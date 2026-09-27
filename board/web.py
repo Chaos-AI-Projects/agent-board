@@ -122,16 +122,24 @@ def _state_class(state: str) -> str:
     return "st_" + "".join(c if c.isalnum() else "_" for c in state)
 
 
-def workflow_diagram(wf: dict) -> str:
+def workflow_target(wf: dict) -> str | None:
+    """The step a workflow's link opens: the first not yet done, else the first step."""
+    steps = wf["steps"]
+    open_steps = [st for st in steps if st["state"] != "done"]
+    return (open_steps or steps or [{"id": None}])[0]["id"]
+
+
+def workflow_diagram(wf: dict, here: str | None) -> str:
     """The workflow as Mermaid `flowchart LR` source, one clickable node per step.
 
     Node ids are positional (`s0`, `s1`, ...) so no issue id is ever parsed as
     syntax; the id, title and state appear only inside the escaped label.
+    The step whose id is `here` is the one outlined.
     """
     lines = ["flowchart LR"]
     for state, fill in _STATE_FILLS.items():
         lines.append(f"  classDef {_state_class(state)} fill:{fill},stroke:#42526e")
-    lines.append("  classDef current stroke:#0052cc,stroke-width:3px")
+    lines.append("  classDef here stroke:#0052cc,stroke-width:3px")
     steps = wf["steps"]
     for n, step in enumerate(steps):
         label = "<br/>".join(_mermaid_text(part)
@@ -143,8 +151,8 @@ def workflow_diagram(wf: dict) -> str:
         lines.append(f'  click s{n} "/issues/{quote(step["id"], safe="")}"')
         # One class per line: Mermaid reads `a,b` as a single class name.
         lines.append(f"  class s{n} {_state_class(step['state'])}")
-        if step["id"] == wf["current"]:
-            lines.append(f"  class s{n} current")
+        if step["id"] == here:
+            lines.append(f"  class s{n} here")
     return "\n".join(lines)
 
 
@@ -291,11 +299,11 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None) -> 
         for wf in view["workflows"]:
             if wf_projects.get(wf["id"], set()) & tracked:
                 current = next((st for st in wf["steps"] if st["state"] != "done"), None)
-                workflows.append(wf | {"current": current})
+                workflows.append(wf | {"current": current, "target": workflow_target(wf)})
         loose = [i for i in view["issues"]
                  if i["workflow_id"] is None and i["project"] in tracked]
         # The workflow is the card: its computed state picks the column, and
-        # its steps show on its own page rather than as loose cards here.
+        # its steps show on their issue pages rather than as loose cards here.
         columns = [(state, [w for w in workflows if w["state"] == state],
                     [i for i in loose if i["state"] == state])
                    for state in prefs["lanes"]]
@@ -335,17 +343,21 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None) -> 
                      max_age=PREFS_MAX_AGE, samesite="lax", httponly=True)
         return r
 
-    @app.get("/workflows/{workflow_id}", response_class=HTMLResponse)
-    def workflow_page(request: Request, workflow_id: int):
-        wf = core.workflow(engine, workflow_id)
-        return page(request, "workflow.html", wf=wf, now=wf["now"], current=wf["current"],
-                    diagram=workflow_diagram(wf))
+    @app.get("/workflows/{workflow_id}")
+    def workflow_page(workflow_id: int):
+        """A workflow shows on its steps' issue pages; links already sent land on one."""
+        target = workflow_target(core.workflow(engine, workflow_id))
+        if target is None:
+            raise core.NotFound(f"workflow {workflow_id} has no steps")
+        return RedirectResponse(f"/issues/{quote(target, safe='')}", status_code=303)
 
     @app.get("/issues/{issue_id}", response_class=HTMLResponse)
     def issue_page(request: Request, issue_id: str):
         issue = core.show(engine, issue_id)
+        wf = issue["workflow"]
         return page(request, "issue.html", issue=issue, now=core.overview(engine)["now"],
-                    states=list(core.TRANSITIONS))
+                    states=list(core.TRANSITIONS),
+                    diagram=workflow_diagram(wf, issue["id"]) if wf else None)
 
     @app.post("/issues")
     async def create_issue(request: Request):

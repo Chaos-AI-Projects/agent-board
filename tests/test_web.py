@@ -153,27 +153,86 @@ def test_loose_issues_show_as_their_own_group(board, client):
     assert "data-workflow=" not in group
 
 
-def test_a_workflow_card_opens_its_workflow_page(board, client):
+def finish(engine, step_id, worker="w1"):
+    claim = core.next(engine, worker)
+    assert claim["issue"]["id"] == step_id
+    core.transition(engine, step_id, "done", note="done", actor=worker, actor_kind=AGENT,
+                    token=claim["lease_token"])
+
+
+def test_a_workflow_card_opens_its_current_steps_issue_page(board, client):
     wf = release(board)
+    build, test, _ = [st["id"] for st in wf["steps"]]
     c = wf_card(client.get("/").text, wf["id"])
-    assert f'data-href="/workflows/{wf["id"]}"' in c
-    assert f'href="/workflows/{wf["id"]}"' in c
+    assert f'data-href="/issues/{build}"' in c and f'href="/issues/{build}"' in c
+    assert "/workflows/" not in c
     # Its state is computed from the steps, so it is not dragged between columns.
     assert "data-moves=" not in c
+    finish(board, build)
+    c = wf_card(client.get("/").text, wf["id"])
+    assert f'data-href="/issues/{test}"' in c and f'href="/issues/{test}"' in c
 
 
-def test_the_workflow_page_lists_steps_in_position_order_with_state_and_lease(board, client):
+def test_a_finished_workflow_card_opens_its_first_step(board, client):
+    wf = release(board, ["build", "ship"])
+    build, ship = [st["id"] for st in wf["steps"]]
+    finish(board, build)
+    finish(board, ship)
+    c = wf_card(client.get("/").text, wf["id"])
+    assert f'data-href="/issues/{build}"' in c and f'href="/issues/{build}"' in c
+
+
+def test_the_workflow_url_redirects_to_its_current_step(board, client):
     wf = release(board)
-    core.next(board, "w1")
-    html = client.get(f"/workflows/{wf['id']}").text
-    assert "Release" in html
-    ids = re.findall(r'data-id="([^"]+)"', html)
-    assert ids == [st["id"] for st in wf["steps"]]
-    first = card(html, wf["steps"][0]["id"])
-    assert "processing" in first and "Held by w1 until" in first
-    assert "lease-live" in first and "current-step" in first
-    assert f'data-href="/issues/{wf["steps"][0]["id"]}"' in first
-    assert "ready" in card(html, wf["steps"][1]["id"])
+    build, test, _ = [st["id"] for st in wf["steps"]]
+    r = client.get(f"/workflows/{wf['id']}")
+    assert r.status_code == 303 and r.headers["location"] == f"/issues/{build}"
+    finish(board, build)
+    r = client.get(f"/workflows/{wf['id']}")
+    assert r.status_code == 303 and r.headers["location"] == f"/issues/{test}"
+
+
+def test_a_finished_workflows_url_redirects_to_its_first_step(board, client):
+    # The link already mailed for workflow 1 must land on its first step.
+    wf = release(board, ["build", "ship"])
+    build, ship = [st["id"] for st in wf["steps"]]
+    finish(board, build)
+    finish(board, ship)
+    r = client.get(f"/workflows/{wf['id']}")
+    assert r.status_code == 303 and r.headers["location"] == f"/issues/{build}"
+
+
+def workflow_section(html):
+    m = re.search(r'<section class="workflow"[^>]*>.*?</section>', html, re.S)
+    assert m, "no workflow section"
+    return m.group(0)
+
+
+def test_a_step_issue_page_shows_its_workflow_above_the_body(board, client):
+    wf = release(board)
+    build, test, ship = [st["id"] for st in wf["steps"]]
+    core.edit(board, test, actor=CHAOS, actor_kind=HUMAN,
+              expected_version=core.show(board, test)["version"], body="THE BODY")
+    finish(board, build)
+    html = client.get(f"/issues/{test}").text
+    section = workflow_section(html)
+    assert "Release" in section
+    assert html.index('<section class="workflow"') < html.index("THE BODY")
+    # The step list, in position order with each state, is the no-JS fallback.
+    steps = re.findall(r'<li[^>]*data-step="([^"]+)"[^>]*>(.*?)</li>', section, re.S)
+    assert [sid for sid, _ in steps] == [build, test, ship]
+    assert "done" in steps[0][1] and "ready" in steps[1][1] and "ready" in steps[2][1]
+    # This issue's step is the one marked, not the others.
+    marked = re.findall(r'<li[^>]*class="[^"]*this-step[^"]*"[^>]*data-step="([^"]+)"', section)
+    assert marked == [test]
+    assert f'href="/issues/{build}"' in section and f'href="/issues/{ship}"' in section
+    assert "/workflows/" not in html
+
+
+def test_a_loose_issue_page_has_no_workflow_section(board, client):
+    html = client.get(f"/issues/{ready(board)}").text
+    assert '<section class="workflow"' not in html
+    assert "mermaid.min.js" not in html
 
 
 def test_an_unknown_workflow_is_404(client):
@@ -187,10 +246,10 @@ def mermaid_source(html):
     return unescape(m.group(1)).strip()
 
 
-def test_the_workflow_page_draws_its_steps_as_a_mermaid_flowchart(board, client):
+def test_the_issue_page_draws_its_workflow_as_a_mermaid_flowchart(board, client):
     wf = release(board)
     core.next(board, "w1")
-    html = client.get(f"/workflows/{wf['id']}").text
+    html = client.get(f"/issues/{wf['steps'][1]['id']}").text
     src = mermaid_source(html).splitlines()
     assert src[0].strip() == "flowchart LR"
     ids = [st["id"] for st in wf["steps"]]
@@ -206,16 +265,17 @@ def test_the_workflow_page_draws_its_steps_as_a_mermaid_flowchart(board, client)
     # Each node is a link to its issue page.
     clicks = [l.strip() for l in src if l.strip().startswith("click ")]
     assert clicks == [f'click s{n} "/issues/{i}"' for n, i in enumerate(ids)]
-    # Styled by state, and the current step is marked.
-    assert {"class s0 st_processing", "class s0 current"} <= {l.strip() for l in src}
-    assert "class s1 current" not in [l.strip() for l in src]
+    # Styled by state, and this issue's node is the one highlighted.
+    assert {"class s0 st_processing", "class s1 here"} <= {l.strip() for l in src}
+    assert [l.strip() for l in src if l.strip().endswith(" here")] == ["class s1 here"]
+    assert "classDef here " in "\n".join(src)
     assert not any(l.strip().startswith("class ") and "," in l for l in src)
     assert "class s1 st_ready" in [l.strip() for l in src]
     assert "classDef st_processing" in "\n".join(src)
     # Mermaid loads from the CDN like SortableJS, and the step list stays as fallback.
     assert "cdn.jsdelivr.net/npm/mermaid@" in html
     assert 'securityLevel: "strict"' in html
-    assert card(html, ids[0])
+    assert f'data-step="{ids[0]}"' in workflow_section(html)
 
 
 HOSTILE = 'a "quoted" [bracket] --> x;\nclick s0 "javascript:alert(1)" %%{init}%% <b>'
@@ -225,7 +285,7 @@ def test_a_hostile_step_title_cannot_break_or_inject_into_the_diagram(board, cli
     # Step titles come from the template, which an agent may write.
     wf = release(board, [HOSTILE, "ship"])
     build = wf["steps"][0]["id"]
-    src = mermaid_source(client.get(f"/workflows/{wf['id']}").text)
+    src = mermaid_source(client.get(f"/issues/{build}").text)
     lines = [l.strip() for l in src.splitlines()]
     # Still exactly two nodes, one edge, two clicks: nothing the title said became syntax.
     assert len([l for l in lines if re.match(r"s\d+\[", l)]) == 2
@@ -251,8 +311,8 @@ def test_a_title_cannot_trigger_mermaids_markdown_katex_or_icons():
 
 def test_the_click_target_cannot_carry_a_quote_even_from_an_issue_id():
     # Ids are generated today; the diagram does not rely on that.
-    wf = {"current": None, "steps": [{"id": 'X-1" x', "title": "t", "state": "ready"}]}
-    clicks = [l.strip() for l in web.workflow_diagram(wf).splitlines() if "click" in l]
+    wf = {"steps": [{"id": 'X-1" x', "title": "t", "state": "ready"}]}
+    clicks = [l.strip() for l in web.workflow_diagram(wf, None).splitlines() if "click" in l]
     assert clicks == ['click s0 "/issues/X-1%22%20x"']
 
 
@@ -798,14 +858,7 @@ def test_the_current_step_moves_past_a_done_step(client, board):
                     token=claim["lease_token"])
     c = wf_card(client.get("/").text, wf["id"])
     assert "current: ship" in " ".join(re.sub(r"<[^>]+>", " ", c).split())
-    html = client.get(f"/workflows/{wf['id']}").text
-    assert "current-step" in card(html, ship) and "current-step" not in card(html, build)
-
-
-def test_a_step_issue_page_links_to_its_workflow(client, board):
-    wf = release(board)
-    html = client.get(f"/issues/{wf['steps'][0]['id']}").text
-    assert f'href="/workflows/{wf["id"]}"' in html
+    assert client.get(f"/workflows/{wf['id']}").headers["location"] == f"/issues/{ship}"
 
 
 def test_ms637_the_hidden_attribute_beats_label_display_block(board, client):

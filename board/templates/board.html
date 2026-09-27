@@ -28,8 +28,8 @@
   <h2>{{ state }} ({{ workflows|length + issues|length }})</h2>
   {% if workflows %}<div class="workflows">
   {% for wf in workflows %}
-  <article class="card workflow-card" data-workflow="{{ wf.id }}" data-href="/workflows/{{ wf.id }}">
-    <a href="/workflows/{{ wf.id }}">{{ wf.title }}</a>
+  <article class="card workflow-card" data-workflow="{{ wf.id }}" data-href="/issues/{{ wf.target }}">
+    <a href="/issues/{{ wf.target }}">{{ wf.title }}</a>
     <div class="steps-summary">{{ wf.steps|length }} step{{ "" if wf.steps|length == 1 else "s" }}{% if wf.current %} &middot; current: {{ wf.current.title }}{% endif %}</div>
   </article>
   {% endfor %}
@@ -86,7 +86,7 @@
                         onStart: onStart, onEnd: onEnd});
   });
 
-  // The whole card opens its issue or workflow page, unless the click ended a drag.
+  // The whole card opens its issue page, or its current step's, unless the click ended a drag.
   document.querySelectorAll(".card[data-href]").forEach(function (card) {
     card.addEventListener("click", function (e) {
       if (justDragged || e.target.closest("a, button, input, form")) return;

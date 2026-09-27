@@ -80,8 +80,10 @@ truth until dev-queue is switched over.
 its own server, apart from doc-review. The kanban has one column per lifecycle state, in the
 order `backlog`, `ready`, `need-input`, `processing`, `onhold`, `done`, `cancelled`. A workflow
 is one card, in the column its computed state picks, showing its step count and current step.
-Clicking it opens `/workflows/<id>`, which lists the steps in position order with their states
-and leases. Loose issues sit below the workflows in each column, and dragging one to another column
+Clicking it opens the issue page of its current step, or of its first step once every step is
+done. A step's issue page shows its workflow above the body: a Mermaid diagram with that step
+outlined, and the step list in position order as the no-JS fallback. `/workflows/<id>` redirects to
+the same issue page the card opens. Loose issues sit below the workflows in each column, and dragging one to another column
 is a state change.
 
 The board at `/` is a view only, and searching is its own page. `/search` lists matching issues as a

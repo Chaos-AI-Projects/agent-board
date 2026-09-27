@@ -4,7 +4,7 @@
 {% set ls = lease_status(issue, now) %}
 <h1>{{ issue.id }} {{ issue.title }}</h1>
 <p>State <b>{{ issue.state }}</b> &middot; rank {{ issue.rank }} &middot; version {{ issue.version }}
-{% if issue.workflow %} &middot; step {{ issue.workflow.position }} of <a href="/workflows/{{ issue.workflow.id }}"><i>{{ issue.workflow.title }}</i></a> ({{ issue.workflow.state }}){% endif %}</p>
+{% if issue.workflow %} &middot; step {{ issue.workflow.position }} of <i>{{ issue.workflow.title }}</i> ({{ issue.workflow.state }}){% endif %}</p>
 <div class="card{% if ls %} lease-{{ ls }}{% endif %}">
   {% include "_lease.html" %}
   {% if not ls %}<div class="lease">Not held</div>{% endif %}
@@ -14,6 +14,27 @@
   </form>
   {% endif %}
 </div>
+
+{% if issue.workflow %}{% set wf = issue.workflow %}
+<section class="workflow">
+<h2>Workflow: {{ wf.title }}</h2>
+<p>State <b>{{ wf.state }}</b> &middot; {{ wf.steps|length }} step{{ "" if wf.steps|length == 1 else "s" }}</p>
+<pre class="mermaid">
+{{ diagram }}
+</pre>
+<ol class="workflow-steps">
+{% for st in wf.steps %}
+<li{% if st.id == issue.id %} class="this-step"{% endif %} data-step="{{ st.id }}"><a href="/issues/{{ st.id }}">{{ st.id }}</a> {{ st.title }} &middot; <b>{{ st.state }}</b></li>
+{% endfor %}
+</ol>
+</section>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
+<script>
+  // strict: labels are sanitised and click links are URL-checked; only the
+  // callback form of `click` needs loose, and the diagram uses none.
+  if (window.mermaid) mermaid.initialize({startOnLoad: true, securityLevel: "strict"});
+</script>
+{% endif %}
 
 {% if issue.body %}<div class="markdown">{{ issue.body|markdown }}</div>{% endif %}
 
