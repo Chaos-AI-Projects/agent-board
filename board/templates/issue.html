@@ -38,12 +38,6 @@
 
 {% if issue.body %}<div class="markdown">{{ issue.body|markdown }}</div>{% endif %}
 
-<h2>Note</h2>
-<form method="post" action="/issues/{{ issue.id }}/note">
-  <textarea name="note" required></textarea> <button>Add note</button>
-  <div>A note never needs the lease.</div>
-</form>
-
 <details>
 <summary>Edit issue</summary>
 <form method="post" action="/issues/{{ issue.id }}/edit">
@@ -69,6 +63,12 @@
     sync();
   })();
 </script>
+
+<h2>Note</h2>
+<form method="post" action="/issues/{{ issue.id }}/note">
+  <textarea name="note" required></textarea> <button>Add note</button>
+  <div>A note never needs the lease.</div>
+</form>
 
 <h2>Artifacts</h2>
 <ul>{% for a in issue.artifacts %}<li>{{ a.kind }} {{ a.ref }}{% if a.closes %} (closes){% endif %} &middot; {{ a.added_by }}</li>{% endfor %}</ul>

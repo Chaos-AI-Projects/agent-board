@@ -596,6 +596,14 @@ def test_ms637_the_note_form_is_there_by_default(board, client):
     assert re.search(r'<textarea name="note" required', issue_forms(outside)[f"/issues/{iid}/note"])
 
 
+def test_ms639_edit_issue_comes_before_the_note_form(board, client):
+    iid = ready(board)
+    html = client.get(f"/issues/{iid}").text
+    edit = html.index("<summary>Edit issue</summary>")
+    note = html.index(f'action="/issues/{iid}/note"')
+    assert edit < note, "the Edit issue control sits above the note form"
+
+
 def test_ms637_the_state_change_note_shows_only_when_the_state_changes(board, client):
     """Visible in the HTML for no-JS users; JS hides it until the state select moves."""
     iid = ready(board)
