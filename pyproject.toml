@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,6 +7,7 @@ name = "agent-board"
 version = "0.1.0"
 description = "Issue and kanban board for agents"
 requires-python = ">=3.10"
+license = "Apache-2.0"
 dependencies = [
     "alembic>=1.13",
     "fastapi>=0.141.1",
