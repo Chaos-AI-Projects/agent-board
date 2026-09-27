@@ -17,26 +17,37 @@
 
 {% if issue.body %}<div class="markdown">{{ issue.body|markdown }}</div>{% endif %}
 
-<h2>Edit</h2>
-<form method="post" action="/issues/{{ issue.id }}/edit">
-  <input type="hidden" name="version" value="{{ issue.version }}">
-  <label>Title <input name="title" value="{{ issue.title }}" size="60"></label>
-  <details>
-    <summary>Edit body</summary>
-    <label>Body <textarea name="body">{{ issue.body }}</textarea></label>
-  </details>
-  <label>Rank <input name="rank" value="{{ issue.rank }}" size="6"></label>
-  <label>Labels <input name="labels" value="{{ issue.labels|join(', ') }}"></label>
-  <label>State <select name="state">{% for s in states %}<option{% if s == issue.state %} selected{% endif %}>{{ s }}</option>{% endfor %}</select></label>
-  <label>Note for a state change (done and need-input need one) <textarea name="note"></textarea></label>
-  <button>Save</button>
-</form>
-
 <h2>Note</h2>
 <form method="post" action="/issues/{{ issue.id }}/note">
   <textarea name="note" required></textarea> <button>Add note</button>
   <div>A note never needs the lease.</div>
 </form>
+
+<details>
+<summary>Edit issue</summary>
+<form method="post" action="/issues/{{ issue.id }}/edit">
+  <input type="hidden" name="version" value="{{ issue.version }}">
+  <label>Title <input name="title" value="{{ issue.title }}" size="60"></label>
+  <label>Body <textarea name="body">{{ issue.body }}</textarea></label>
+  <label>Rank <input name="rank" value="{{ issue.rank }}" size="6"></label>
+  <label>Labels <input name="labels" value="{{ issue.labels|join(', ') }}"></label>
+  <label>State <select name="state" data-current="{{ issue.state }}">{% for s in states %}<option{% if s == issue.state %} selected{% endif %}>{{ s }}</option>{% endfor %}</select></label>
+  <label data-state-note>Note for the state change (done and need-input need one) <textarea name="note"></textarea></label>
+  <button>Save</button>
+</form>
+</details>
+<script>
+  // Without JS the state-change note stays visible; with it, the note shows only
+  // once the state select moves off the issue's current state.
+  (function () {
+    var select = document.querySelector("select[data-current]");
+    var note = document.querySelector("[data-state-note]");
+    if (!select || !note) return;
+    function sync() { note.hidden = select.value === select.dataset.current; }
+    select.addEventListener("change", sync);
+    sync();
+  })();
+</script>
 
 <h2>Artifacts</h2>
 <ul>{% for a in issue.artifacts %}<li>{{ a.kind }} {{ a.ref }}{% if a.closes %} (closes){% endif %} &middot; {{ a.added_by }}</li>{% endfor %}</ul>

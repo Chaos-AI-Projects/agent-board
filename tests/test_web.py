@@ -508,17 +508,45 @@ def issue_forms(html):
             re.finditer(r'<form[^>]*action="([^"]*)"[^>]*>.*?</form>', html, re.S)}
 
 
-def test_ms634_the_body_is_read_only_until_edit_body_is_opened(board, client):
+def edit_control(html):
+    """The closed-by-default Edit issue control: (details attributes, its contents)."""
+    m = re.search(r"<details([^>]*)>\s*<summary>Edit issue</summary>(.*?)</details>", html, re.S)
+    assert m, "the edit form sits behind one Edit issue control"
+    return m.group(1), m.group(2), html.replace(m.group(0), "")
+
+
+def test_ms637_the_issue_page_is_read_only_until_edit_issue_is_opened(board, client):
     iid = ready(board, body="Some **bold** text")
     html = client.get(f"/issues/{iid}").text
-    assert "<strong>bold</strong>" in html
-    form = issue_forms(html)[f"/issues/{iid}/edit"]
-    m = re.search(r"<details([^>]*)>\s*<summary>Edit body</summary>(.*?)</details>", form, re.S)
-    assert m, "the raw body sits behind an Edit body control"
-    assert "open" not in m.group(1), "closed by default"
-    assert re.search(r'<textarea name="body">Some \*\*bold\*\* text</textarea>', m.group(2))
-    outside = form.replace(m.group(0), "")
-    assert 'name="body"' not in outside
+    attrs, inside, outside = edit_control(html)
+    assert "open" not in attrs, "closed by default"
+    assert f'action="/issues/{iid}/edit"' in inside
+    for field in ("title", "body", "rank", "labels", "state"):
+        assert f'name="{field}"' in inside
+        assert f'name="{field}"' not in outside, f"{field} is editable outside the control"
+    assert re.search(r'<textarea name="body">Some \*\*bold\*\* text</textarea>', inside)
+    assert "Edit body" not in html, "no nested Edit body control"
+    assert "<strong>bold</strong>" in outside
+    assert re.search(r"<h1>MS-\d+ item</h1>", outside), "the title reads as the heading"
+
+
+def test_ms637_the_note_form_is_there_by_default(board, client):
+    iid = ready(board)
+    _, _, outside = edit_control(client.get(f"/issues/{iid}").text)
+    assert re.search(r'<textarea name="note" required', issue_forms(outside)[f"/issues/{iid}/note"])
+
+
+def test_ms637_the_state_change_note_shows_only_when_the_state_changes(board, client):
+    """Visible in the HTML for no-JS users; JS hides it until the state select moves."""
+    iid = ready(board)
+    html = client.get(f"/issues/{iid}").text
+    _, inside, _ = edit_control(html)
+    note = re.search(r"<label([^>]*)>[^<]*<textarea name=\"note\"", inside)
+    assert note and "data-state-note" in note.group(1)
+    assert "hidden" not in note.group(1), "the server does not hide it; JS does"
+    assert re.search(r'<select name="state"[^>]*data-current="ready"', inside)
+    script = re.search(r"<script>(.*?)</script>", html, re.S)
+    assert script and "data-state-note" in script.group(1) and "data-current" in script.group(1)
 
 
 def test_ms634_an_unopened_body_still_round_trips_through_edit(board, client):
@@ -778,3 +806,9 @@ def test_a_step_issue_page_links_to_its_workflow(client, board):
     wf = release(board)
     html = client.get(f"/issues/{wf['steps'][0]['id']}").text
     assert f'href="/workflows/{wf["id"]}"' in html
+
+
+def test_ms637_the_hidden_attribute_beats_label_display_block(board, client):
+    """`label { display: block }` outranks the UA's [hidden] rule, so JS hiding needs this."""
+    html = client.get(f"/issues/{ready(board)}").text
+    assert re.search(r"\[hidden\]\s*\{\s*display:\s*none\s*!important;?\s*\}", html)
