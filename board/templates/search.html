@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Search -- agent-board{% endblock %}
+{% block main %}
+<form method="get" action="/search" class="filters">
+  <label>Search <input type="search" name="q" value="{{ filters.q }}" placeholder="id, title, body or label"></label>
+  <label>Project <select name="project"><option value="">any</option>{% for p in view.projects %}<option value="{{ p.key }}"{% if p.key == filters.project %} selected{% endif %}>{{ p.key }}</option>{% endfor %}</select></label>
+  <label>Label <select name="label"><option value="">any</option>{% for l in view.labels %}<option value="{{ l }}"{% if l == filters.label %} selected{% endif %}>{{ l }}</option>{% endfor %}</select></label>
+  <label>Assignee <select name="assignee"><option value="">any</option>{% for a in view.assignees %}<option value="{{ a }}"{% if a == filters.assignee %} selected{% endif %}>{{ a }}</option>{% endfor %}</select></label>
+  <button>Search</button>{% if searched %} <a href="/search">Clear</a>{% endif %}
+</form>
+{% if results %}
+<ol class="hits">
+{% for issue in results %}
+  <li class="hit"><a href="/issues/{{ issue.id }}">{{ issue.id }}</a> {{ issue.title }}
+    <span class="meta">{{ issue.state }}{% for l in issue.labels %} &middot; {{ l }}{% endfor %}</span></li>
+{% endfor %}
+</ol>
+{% elif searched %}
+<p class="no-hits">Nothing matched.</p>
+{% endif %}
+{% endblock %}

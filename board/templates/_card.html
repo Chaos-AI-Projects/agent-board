@@ -1,0 +1,8 @@
+{%- set ls = lease_status(issue, now) -%}
+<article class="card{% if ls %} lease-{{ ls }}{% endif %}{% if issue.id == current %} current-step{% endif %}"
+         data-id="{{ issue.id }}" data-version="{{ issue.version }}"
+         data-href="/issues/{{ issue.id }}" data-moves="{{ moves(issue)|join(' ') }}">
+  <a href="/issues/{{ issue.id }}">{{ issue.id }}</a> {{ issue.title }}
+  {% if issue.labels %}<div class="labels">{% for l in issue.labels %}<span>{{ l }}</span> {% endfor %}</div>{% endif %}
+  {% include "_lease.html" %}
+</article>

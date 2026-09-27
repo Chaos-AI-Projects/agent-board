@@ -1,0 +1,6 @@
+{% extends "base.html" %}
+{% block main %}
+<div class="error"><p>{{ message }}</p>
+{% if issue_id %}<p><a href="/issues/{{ issue_id }}">Back to {{ issue_id }}</a></p>{% else %}<p><a href="/">Back to the board</a></p>{% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}{{ wf.title }}{% endblock %}
+{% block main %}
+<h1>{{ wf.title }}</h1>
+<p>State <b>{{ wf.state }}</b> &middot; {{ wf.steps|length }} step{{ "" if wf.steps|length == 1 else "s" }}</p>
+<pre class="mermaid">
+{{ diagram }}
+</pre>
+<ol class="workflow-steps">
+{% for issue in wf.steps %}
+<li>{%- set ls = lease_status(issue, now) -%}
+<article class="card{% if ls %} lease-{{ ls }}{% endif %}{% if issue.id == current %} current-step{% endif %}"
+         data-id="{{ issue.id }}" data-href="/issues/{{ issue.id }}">
+  <a href="/issues/{{ issue.id }}">{{ issue.id }}</a> {{ issue.title }} &middot; <b>{{ issue.state }}</b>
+  {% include "_lease.html" %}
+</article></li>
+{% endfor %}
+</ol>
+<p><a href="/">Back to the board</a></p>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
+<script>
+  // strict: labels are sanitised and click links are URL-checked; only the
+  // callback form of `click` needs loose, and the diagram uses none.
+  if (window.mermaid) mermaid.initialize({startOnLoad: true, securityLevel: "strict"});
+  document.querySelectorAll(".card[data-href]").forEach(function (card) {
+    card.addEventListener("click", function (e) {
+      if (e.target.closest("a")) return;
+      location.href = card.dataset.href;
+    });
+  });
+</script>
+{% endblock %}

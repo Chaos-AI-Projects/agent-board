@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% block main %}
+<details>
+  <summary>New issue</summary>
+  <form method="post" action="/issues">
+    <label>Project <select name="project">{% for p in view.projects %}<option value="{{ p.key }}">{{ p.key }} ({{ p.name }})</option>{% endfor %}</select></label>
+    <label>Title <input name="title" required size="60"></label>
+    <label>Body <textarea name="body"></textarea></label>
+    <label>State <select name="state"><option>backlog</option><option>ready</option></select></label>
+    <label>Labels <input name="labels" placeholder="comma, separated"></label>
+    <button>Create</button>
+  </form>
+</details>
+{% if view.templates %}
+<details>
+  <summary>New workflow from a template</summary>
+  <form method="post" action="/workflows">
+    <label>Template <select name="template">{% for t in view.templates %}<option value="{{ t.name }}">{{ t.name }} ({{ t.title }})</option>{% endfor %}</select></label>
+    <label>Project <select name="project">{% for p in view.projects %}<option value="{{ p.key }}">{{ p.key }}</option>{% endfor %}</select></label>
+    <label>Title <input name="title" placeholder="defaults to the template's"></label>
+    <button>Instantiate</button>
+  </form>
+</details>
+{% endif %}
+<div class="kanban">
+{% for state, workflows, issues in columns %}
+<section class="column" data-state="{{ state }}">
+  <h2>{{ state }} ({{ workflows|length + issues|length }})</h2>
+  {% if workflows %}<div class="workflows">
+  {% for wf in workflows %}
+  <article class="card workflow-card" data-workflow="{{ wf.id }}" data-href="/workflows/{{ wf.id }}">
+    <a href="/workflows/{{ wf.id }}">{{ wf.title }}</a>
+    <div class="steps-summary">{{ wf.steps|length }} step{{ "" if wf.steps|length == 1 else "s" }}{% if wf.current %} &middot; current: {{ wf.current.title }}{% endif %}</div>
+  </article>
+  {% endfor %}
+  </div>{% endif %}
+  {% if workflows and issues %}<h3 class="group">Loose issues</h3>{% endif %}
+  <div class="cards" data-state="{{ state }}">
+  {% for issue in issues %}{% include "_card.html" %}{% endfor %}
+  </div>
+</section>
+{% endfor %}
+</div>
+<script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.6/Sortable.min.js"></script>
+<script>
+  // Dragging a card to another column is a state change through core.edit.
+  // Each card lists the columns its state may move to (data-moves), so a
+  // column that would refuse the move does not accept the drop and is dimmed
+  // while the card is in the air. A move refused anyway (a lease, a stale
+  // version) is shown, then the page reloads so the board never shows a move
+  // that did not happen. A workflow card does not drag: its column is
+  // computed from its steps, and a step's state changes on its issue page.
+  var justDragged = false;
+  function allowed(card) { return (card.dataset.moves || "").split(" "); }
+  function onStart(evt) {
+    var ok = allowed(evt.item);
+    document.querySelectorAll(".kanban .column").forEach(function (col) {
+      col.classList.add(ok.indexOf(col.dataset.state) >= 0 ? "drop-ok" : "drop-no");
+    });
+  }
+  async function onEnd(evt) {
+    justDragged = true;
+    setTimeout(function () { justDragged = false; }, 0);
+    document.querySelectorAll(".kanban .column").forEach(function (col) {
+      col.classList.remove("drop-ok", "drop-no");
+    });
+    if (evt.from === evt.to) return;
+    var card = evt.item, state = evt.to.dataset.state;
+    var body = new URLSearchParams({version: card.dataset.version, state: state});
+    if (state === "done" || state === "need-input") {
+      var note = prompt("A move to " + state + " needs a note:");
+      if (!note) { location.reload(); return; }
+      body.set("note", note);
+    }
+    var r = await fetch("/issues/" + card.dataset.id + "/move", {method: "POST", body: body});
+    if (!r.ok) {
+      var why = r.status;
+      try { why = (await r.json()).error || why; } catch (_) { /* an HTML error page */ }
+      alert("Move refused: " + why);
+    }
+    location.reload();
+  }
+  function accepts(to, _from, card) { return allowed(card).indexOf(to.el.dataset.state) >= 0; }
+  document.querySelectorAll(".kanban .cards").forEach(function (list) {
+    new Sortable(list, {group: {name: "kanban", put: accepts}, animation: 150,
+                        onStart: onStart, onEnd: onEnd});
+  });
+
+  // The whole card opens its issue or workflow page, unless the click ended a drag.
+  document.querySelectorAll(".card[data-href]").forEach(function (card) {
+    card.addEventListener("click", function (e) {
+      if (justDragged || e.target.closest("a, button, input, form")) return;
+      location.href = card.dataset.href;
+    });
+  });
+
+</script>
+{% endblock %}

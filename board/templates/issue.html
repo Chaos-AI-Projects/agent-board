@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}{{ issue.id }} {{ issue.title }}{% endblock %}
+{% block main %}
+{% set ls = lease_status(issue, now) %}
+<h1>{{ issue.id }} {{ issue.title }}</h1>
+<p>State <b>{{ issue.state }}</b> &middot; rank {{ issue.rank }} &middot; version {{ issue.version }}
+{% if issue.workflow %} &middot; step {{ issue.workflow.position }} of <a href="/workflows/{{ issue.workflow.id }}"><i>{{ issue.workflow.title }}</i></a> ({{ issue.workflow.state }}){% endif %}</p>
+<div class="card{% if ls %} lease-{{ ls }}{% endif %}">
+  {% include "_lease.html" %}
+  {% if not ls %}<div class="lease">Not held</div>{% endif %}
+  {% if ls == "held" and issue.lease_holder == me %}
+  <form class="inline" method="post" action="/issues/{{ issue.id }}/release">
+    <button>Release</button> back to the queue as ready
+  </form>
+  {% endif %}
+</div>
+
+{% if issue.body %}<div class="markdown">{{ issue.body|markdown }}</div>{% endif %}
+
+<h2>Edit</h2>
+<form method="post" action="/issues/{{ issue.id }}/edit">
+  <input type="hidden" name="version" value="{{ issue.version }}">
+  <label>Title <input name="title" value="{{ issue.title }}" size="60"></label>
+  <details>
+    <summary>Edit body</summary>
+    <label>Body <textarea name="body">{{ issue.body }}</textarea></label>
+  </details>
+  <label>Rank <input name="rank" value="{{ issue.rank }}" size="6"></label>
+  <label>Labels <input name="labels" value="{{ issue.labels|join(', ') }}"></label>
+  <label>State <select name="state">{% for s in states %}<option{% if s == issue.state %} selected{% endif %}>{{ s }}</option>{% endfor %}</select></label>
+  <label>Note for a state change (done and need-input need one) <textarea name="note"></textarea></label>
+  <button>Save</button>
+</form>
+
+<h2>Note</h2>
+<form method="post" action="/issues/{{ issue.id }}/note">
+  <textarea name="note" required></textarea> <button>Add note</button>
+  <div>A note never needs the lease.</div>
+</form>
+
+<h2>Artifacts</h2>
+<ul>{% for a in issue.artifacts %}<li>{{ a.kind }} {{ a.ref }}{% if a.closes %} (closes){% endif %} &middot; {{ a.added_by }}</li>{% endfor %}</ul>
+<form method="post" action="/issues/{{ issue.id }}/link">
+  <select name="kind"><option>pr</option><option>commit</option><option>path</option><option>url</option></select>
+  <input name="ref" required> <label class="inline"><input type="checkbox" name="closes" value="1"> closes the issue</label>
+  <button>Link</button>
+</form>
+
+<h2>History</h2>
+<ul class="events">{% for e in issue.events %}
+<li>{{ e.at }} &middot; {{ e.actor }} ({{ e.actor_kind }}) &middot; {{ e.kind }}{% if e.from_state or e.to_state %} {{ e.from_state or "" }} &rarr; {{ e.to_state or "" }}{% endif %}{% if e.note and e.kind == "annotate" %}<div class="markdown">{{ e.note|markdown }}</div>{% elif e.note %}: {{ e.note }}{% endif %}</li>
+{% endfor %}</ul>
+{% endblock %}
