@@ -70,7 +70,7 @@ def claimed(engine):
 def test_the_tools_are_the_cli_operations(migrated):
     names = {t.name for t in list_tools(migrated)}
     assert names == {"next", "show", "transition", "annotate", "link", "create",
-                     "instantiate", "heartbeat"}
+                     "instantiate", "heartbeat", "plan"}
 
 
 def test_next_claims_as_the_server_actor_and_returns_the_token(migrated):
@@ -156,3 +156,22 @@ def test_an_unusable_ttl_is_refused(migrated):
     issue_id, token = claimed(board(migrated))
     err = failed(migrated, "heartbeat", id=issue_id, token=token, ttl_minutes=0)
     assert (err["error"], err["code"]) == ("ValueError", 1)
+
+
+def test_plan_breaks_the_claimed_issue_into_steps(migrated):
+    board(migrated)
+    issue_id, token = claimed(migrated)
+    out = ok(migrated, "plan", id=issue_id, token=token,
+             steps=[{"title": "design"}, {"title": "build", "body": "the code"}])
+    assert out["state"] == "onhold"
+    assert [s["title"] for s in out["plan"]["steps"]] == ["design", "build"]
+    step = core.show(migrated, out["plan"]["steps"][1]["id"])
+    assert step["body"] == "the code"
+    assert step["events"][0]["actor"] == WORKER
+
+
+def test_plan_without_the_lease_is_code_4(migrated):
+    board(migrated)
+    issue_id = ready(migrated)
+    out = failed(migrated, "plan", id=issue_id, steps=[{"title": "a"}])
+    assert (out["error"], out["code"]) == ("LeaseLost", 4)

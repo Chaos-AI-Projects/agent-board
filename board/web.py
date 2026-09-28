@@ -542,9 +542,10 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None) -> 
     @app.get("/issues/{issue_id}", response_class=HTMLResponse)
     def issue_page(request: Request, issue_id: str):
         issue = core.show(engine, issue_id)
-        wf = issue["workflow"]
+        # A step shows the workflow it belongs to; an origin shows its plan (MS-644).
+        wf = issue["workflow"] or issue["plan"]
         return page(request, "issue.html", issue=issue, now=core.overview(engine)["now"],
-                    states=list(core.TRANSITIONS),
+                    states=list(core.TRANSITIONS), wf=wf,
                     diagram=(workflow_diagram(wf, issue["id"])
                              if wf and len(wf["steps"]) <= DIAGRAM_MAX_STEPS else None),
                     steps=workflow_list(wf, issue["id"]) if wf else None)
@@ -567,6 +568,16 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None) -> 
         core.instantiate(engine, f.get("template", ""), f.get("project", ""), actor=me.email,
                          actor_kind=me.kind, title=f.get("title") or None)
         return back()
+
+    @app.post("/issues/{issue_id}/plan")
+    async def plan(request: Request, issue_id: str):
+        """Break an issue into a workflow, one step per non-blank line."""
+        me = await run_in_threadpool(actor, request)
+        f = await request.form()
+        titles = [line.strip() for line in f.get("steps", "").splitlines() if line.strip()]
+        core.plan(engine, issue_id, [{"title": t} for t in titles], actor=me.email,
+                  actor_kind=me.kind)
+        return back(issue_id)
 
     @app.post("/issues/{issue_id}/edit")
     async def edit(request: Request, issue_id: str):

@@ -8,7 +8,7 @@ green run that never touched PostgreSQL says so.
 import os
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 
 from board import store
 
@@ -16,9 +16,12 @@ PG_ENV = "BOARD_TEST_PG_URL"
 
 
 def _reset_pg(engine):
-    store.Base.metadata.drop_all(engine)
+    # CASCADE, not metadata.drop_all: the workflow <-> issue foreign-key cycle
+    # makes drop_all drop the use_alter constraint by name first, which fails
+    # on a database a test left at a revision before that constraint existed.
     with engine.begin() as conn:
-        conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
+        for name in inspect(conn).get_table_names():
+            conn.execute(text(f'DROP TABLE IF EXISTS "{name}" CASCADE'))
 
 
 @pytest.fixture(params=["sqlite", "postgresql"])

@@ -307,3 +307,28 @@ def test_search_with_no_hits_exits_3(url):
     proc = board(url, "search", "nothing", "--assignee", "nobody", actor=None)
     assert proc.returncode == 3, proc.stderr
     assert json.loads(proc.stdout) == {"issues": []}
+
+
+# --- MS-644: plan ------------------------------------------------------------
+
+
+def test_plan_turns_the_claimed_issue_into_ordered_steps(url):
+    issue_id = ready(url, "big job")
+    token = claim(url)["lease_token"]
+    out = ok(board(url, "plan", issue_id, "--step", "design", "--step", "build",
+                   "--token", token))
+    assert out["state"] == "onhold"
+    assert [(s["position"], s["title"]) for s in out["plan"]["steps"]] == [
+        (1, "design"), (2, "build")]
+
+
+def test_plan_without_a_step_is_a_usage_error(url):
+    assert board(url, "plan", "MS-1").returncode == 2
+
+
+def test_a_second_plan_exits_5(url):
+    issue_id = ready(url)
+    token = claim(url)["lease_token"]
+    ok(board(url, "plan", issue_id, "--step", "a", "--token", token))
+    proc = board(url, "--actor-kind", "human", "plan", issue_id, "--step", "b", actor=CHAOS)
+    assert proc.returncode == 5, proc.stderr

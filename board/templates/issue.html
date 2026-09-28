@@ -4,7 +4,8 @@
 {% set ls = lease_status(issue, now) %}
 <h1>{{ issue.id }} {{ issue.title }}</h1>
 <p>State <b>{{ issue.state }}</b> &middot; rank {{ issue.rank }} &middot; version {{ issue.version }}
-{% if issue.workflow %} &middot; step {{ issue.workflow.position }} of <i>{{ issue.workflow.title }}</i> ({{ issue.workflow.state }}){% endif %}</p>
+{% if issue.workflow %} &middot; step {{ issue.workflow.position }} of <i>{{ issue.workflow.title }}</i> ({{ issue.workflow.state }}){% if issue.workflow.origin_issue_id %}, planned from <a href="/issues/{{ issue.workflow.origin_issue_id }}">{{ issue.workflow.origin_issue_id }}</a>{% endif %}{% endif %}
+{% if issue.plan %} &middot; planned as <i>{{ issue.plan.title }}</i> ({{ issue.plan.state }}){% endif %}</p>
 <div class="card{% if ls %} lease-{{ ls }}{% endif %}">
   {% include "_lease.html" %}
   {% if not ls %}<div class="lease">Not held</div>{% endif %}
@@ -15,9 +16,9 @@
   {% endif %}
 </div>
 
-{% if issue.workflow %}{% set wf = issue.workflow %}
+{% if wf %}
 <section class="workflow">
-<h2>Workflow: {{ wf.title }}</h2>
+<h2>{% if issue.plan %}Plan{% else %}Workflow{% endif %}: {{ wf.title }}</h2>
 <p>State <b>{{ wf.state }}</b> &middot; {{ wf.steps|length }} step{{ "" if wf.steps|length == 1 else "s" }}</p>
 {% macro step_list(run) %}{% set start, run_steps = run %}
 <ol class="workflow-steps" start="{{ start }}">
@@ -51,6 +52,17 @@
 {% endif %}
 
 {% if issue.body %}<div class="markdown">{{ issue.body|markdown }}</div>{% endif %}
+
+{% if not wf and issue.state not in ("done", "cancelled") %}
+<details>
+<summary>Plan as workflow</summary>
+<form method="post" action="/issues/{{ issue.id }}/plan">
+  <label>Steps, one per line, in order <textarea name="steps" required></textarea></label>
+  <button>Plan</button>
+  <div>Each line becomes a ready step. This issue goes on hold and comes back ready when the last step is done.</div>
+</form>
+</details>
+{% endif %}
 
 <details>
 <summary>Edit issue</summary>

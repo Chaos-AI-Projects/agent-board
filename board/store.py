@@ -224,7 +224,12 @@ class Issue(Base):
     updated_at: Mapped[datetime] = mapped_column(Timestamp())
 
     project: Mapped[Project] = relationship(back_populates="issues")
-    workflow: Mapped[Workflow | None] = relationship(back_populates="steps")
+    workflow: Mapped[Workflow | None] = relationship(back_populates="steps",
+                                                     foreign_keys=[workflow_id])
+    # The workflow this issue was broken into, if any (MS-644).
+    plan: Mapped[Workflow | None] = relationship(
+        foreign_keys="Workflow.origin_issue_id", viewonly=True
+    )
     events: Mapped[list[Event]] = relationship(
         back_populates="issue", order_by="Event.id"
     )
@@ -313,10 +318,16 @@ class Workflow(Base):
     template_id: Mapped[int | None] = mapped_column(ForeignKey("template.id"))
     created_at: Mapped[datetime] = mapped_column(Timestamp())
     archived_at: Mapped[datetime | None] = mapped_column(Timestamp())
+    # Set when the workflow is the plan for one issue (MS-644). `use_alter`
+    # because issue.workflow_id already points the other way.
+    origin_issue_id: Mapped[str | None] = mapped_column(
+        ForeignKey("issue.id", use_alter=True), unique=True
+    )
 
     template: Mapped[Template | None] = relationship()
     steps: Mapped[list[Issue]] = relationship(
-        back_populates="workflow", order_by="Issue.position"
+        back_populates="workflow", order_by="Issue.position",
+        foreign_keys="Issue.workflow_id"
     )
 
 

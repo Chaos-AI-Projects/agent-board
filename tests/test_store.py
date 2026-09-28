@@ -362,3 +362,13 @@ def test_0004_adds_the_attachment_table_and_downgrade_drops_only_it(engine):
     store.downgrade(engine, "0003")
     names = set(inspect(engine).get_table_names())
     assert "attachment" not in names and TABLES - {"attachment"} <= names
+
+
+def test_0005_adds_workflow_origin_and_downgrade_drops_only_it(engine):
+    store.upgrade(engine, "0005")
+    cols = {c["name"] for c in inspect(engine).get_columns("workflow")}
+    assert "origin_issue_id" in cols
+    store.downgrade(engine, "0004")
+    cols = {c["name"] for c in inspect(engine).get_columns("workflow")}
+    assert "origin_issue_id" not in cols
+    assert "attachment" in inspect(engine).get_table_names()

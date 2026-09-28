@@ -132,6 +132,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--title")
     writes(sp, token=False)
 
+    sp = op("plan", help="break an issue into a workflow of ready steps; exit 5 if it has one")
+    sp.add_argument("id")
+    sp.add_argument("--step", action="append", required=True, dest="steps",
+                    help="a step title, in order; repeat for each step")
+    sp.add_argument("--preempt", action="store_true")
+    writes(sp)
+
     sp = op("heartbeat", help="extend the lease on a claimed issue")
     sp.add_argument("id")
     sp.add_argument("--token", required=True)
@@ -177,6 +184,9 @@ def _run(engine, a) -> dict | None:
         case "instantiate":
             return core.instantiate(engine, a.template, a.project, title=a.title,
                                     request_id=a.request_id, **who)
+        case "plan":
+            return core.plan(engine, a.id, [{"title": t} for t in a.steps], token=a.token,
+                             request_id=a.request_id, preempt=a.preempt, **who)
         case "heartbeat":
             return core.heartbeat(engine, a.id, a.actor, a.token, ttl=a.ttl)
         case "import-backlog":

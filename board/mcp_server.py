@@ -127,6 +127,17 @@ def build_server(engine, actor: str) -> FastMCP:
                    request_id=request_id, **who)
 
     @mcp.tool()
+    def plan(id: str, steps: list[dict[str, str]], token: str | None = None,
+             request_id: str | None = None) -> CallToolResult:
+        """Break a claimed issue into a workflow of ready steps, in the order given.
+
+        Each step is {"title", "body"?, "project"?}; project defaults to the
+        issue's. The issue goes onhold, releasing the lease, and comes back
+        ready when the last step is done, for you to check and close.
+        """
+        return run(core.plan, engine, id, steps, token=token, request_id=request_id, **who)
+
+    @mcp.tool()
     def heartbeat(id: str, token: str,
                   ttl_minutes: float = DEFAULT_TTL_MINUTES) -> CallToolResult:
         """Extend the lease on an issue this agent claimed."""

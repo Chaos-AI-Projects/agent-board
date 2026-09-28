@@ -10,8 +10,11 @@ Slices 1 to 5 of 6 are in: the schema in `board.store`, the operations in `board
 ## Operations
 
 `board.core` holds `next`, `show`, `search`, `transition`, `annotate`, `link`, `create`,
-`instantiate`, `heartbeat` and `edit`. Each is one transaction, returns a plain dict, and appends at least one event,
+`instantiate`, `plan`, `heartbeat` and `edit`. Each is one transaction, returns a plain dict, and appends at least one event,
 except `heartbeat`, which only moves a lease expiry, and an `edit` whose form changed nothing.
+`plan` breaks an issue into a workflow of `ready` steps the caller lists. The issue goes `onhold`
+and returns to `ready` when the last step is done, so `next` hands it back to be checked and closed.
+An issue has at most one plan, and a step cannot be planned.
 `next` returns `None` on an empty queue. Lease failures raise `LeaseLost` (the CLI's exit 4) and
 conflicts raise `Conflict` (exit 5), including `LeaseHeld` when `edit` meets someone else's lease
 without `preempt=True`. Only a human or the system edits; an agent works through `transition`,
@@ -152,8 +155,8 @@ back to `ready`. A note never needs the lease.
 ## MCP server
 
 `board-mcp` serves the CLI's operations as MCP tools over stdio, for an agent working in a
-conversation. The tools are `next`, `show`, `transition`, `annotate`, `link`, `create`, `instantiate`
-and `heartbeat`, with the CLI's names and arguments. `migrate` and `edit` are left out.
+conversation. The tools are `next`, `show`, `transition`, `annotate`, `link`, `create`, `instantiate`,
+`plan` and `heartbeat`, with the CLI's names and arguments. `migrate` and `edit` are left out.
 
 One server is one agent. `BOARD_ACTOR` names it when the server starts, and every write is recorded
 as `agent`. The lease token `next` returns is the `token` argument of each later write, and TTLs are

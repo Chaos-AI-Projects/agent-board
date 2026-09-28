@@ -450,6 +450,64 @@ def instantiate(engine, template: str, project: str, *, actor: str, actor_kind: 
     return _write(engine, key, run, replay, [project, title, actor, actor_kind])
 
 
+def plan(engine, issue_id: str, steps: list[dict], *, actor: str, actor_kind: str,
+         token: str | None = None, request_id: str | None = None,
+         preempt: bool = False) -> dict:
+    """Break an issue into a workflow of steps its caller planned (MS-644).
+
+    Each step is a dict of `title`, optional `body` and optional `project`
+    (the origin's by default); each becomes a `ready` issue at positions
+    1..N of a new workflow titled after the origin. The origin moves to
+    `onhold`, releasing any lease, and returns to `ready` when the last step
+    is done, so `next` hands it back to check the result (Chaos, 09-28).
+    Both moves are outside TRANSITIONS on purpose. An agent needs its live
+    lease on the origin; a human follows the lease rules of `edit`. A second
+    plan for one issue raises `Conflict`, and a step cannot be planned.
+    """
+    steps = [{"title": str(st.get("title") or "").strip(), "body": st.get("body") or "",
+              "project": st.get("project") or None} for st in steps]
+    if not steps:
+        raise BoardError(f"{issue_id}: a plan needs at least one step")
+    if not all(st["title"] for st in steps):
+        raise BoardError(f"{issue_id}: every step needs a title")
+    key = (_scoped("plan", issue_id, request_id)
+           or _derive(actor, "plan", issue_id, token, steps))
+
+    def body(s):
+        issue = _get(s, issue_id, lock=True)
+        now = store.db_now(s)
+        if actor_kind == "agent" and issue.lease_holder is None:
+            raise LeaseLost(f"{issue.id}: an agent plans an issue only under a lease")
+        _guard(s, issue, actor, actor_kind, token, now, preempt, key)
+        if issue.workflow_id is not None:
+            raise BoardError(f"{issue.id} is step {issue.position} of workflow "
+                             f"{issue.workflow_id}; a step cannot be planned")
+        if issue.plan is not None:
+            raise Conflict(f"{issue.id} already has a plan, workflow {issue.plan.id}")
+        if issue.state in ("done", "cancelled"):
+            raise InvalidTransition(f"{issue.id} is {issue.state}; it cannot be planned")
+        wf = Workflow(title=issue.title, origin_issue_id=issue.id, created_at=now)
+        s.add(wf)
+        s.flush()
+        for position, st in enumerate(steps, 1):
+            # The origin's rank, so planning an urgent issue keeps its steps urgent.
+            _create(s, st["project"] or issue.project_key, st["title"], actor, actor_kind,
+                    st["body"], "ready", issue.rank, (), wf.id, position, now, None)
+        old = issue.state
+        issue.state = "onhold"
+        issue.lease_holder = issue.lease_token = issue.lease_expires_at = None
+        issue.version += 1
+        issue.updated_at = now
+        n = len(steps)
+        _event(s, issue.id, now, actor, actor_kind, "transition", old, "onhold",
+               f"planned as workflow {wf.id}: {n} step{'' if n == 1 else 's'}",
+               None if _has_key(s, key) else key)
+        return _view(s, issue)
+
+    return _write(engine, key, body, _replay_view,
+                  [steps, actor, actor_kind, token, preempt])
+
+
 def heartbeat(engine, issue_id: str, worker: str, token: str, *,
               ttl: timedelta = DEFAULT_TTL) -> dict:
     """Push the lease expiry forward. Not a state change, so no event.
@@ -598,6 +656,26 @@ def _apply_state(s, issue, state, note, actor, actor_kind, now, key, key_used):
         issue.updated_at = now
     _event(s, issue.id, now, actor, actor_kind, "transition", old, state, note,
            None if key_used else key)
+    if state == "done" and old != "done":
+        _resume_origin(s, issue, now)
+
+
+def _resume_origin(s, step, now):
+    """The last step of a plan is done: the held origin goes back to `ready`.
+
+    An origin a human has moved off `onhold` meanwhile is left where it is.
+    """
+    wf = step.workflow
+    if wf is None or wf.origin_issue_id is None or wf.steps[-1].state != "done":
+        return
+    origin = _get(s, wf.origin_issue_id, lock=True)
+    if origin.state != "onhold":
+        return
+    origin.state = "ready"
+    origin.version += 1
+    origin.updated_at = now
+    _event(s, origin.id, now, "board", "system", "transition", "onhold", "ready",
+           f"every step of workflow {wf.id} is done; check the result and close this", None)
 
 
 def _guard(s, issue, actor, actor_kind, token, now, preempt, key):
@@ -801,6 +879,7 @@ def _view(s, issue):
         ],
         "workflow": (_workflow_view(s, issue.workflow) | {"position": issue.position}
                      if issue.workflow is not None else None),
+        "plan": _workflow_view(s, issue.plan) if issue.plan is not None else None,
     }
 
 
@@ -826,6 +905,7 @@ def _workflow_view(s, wf):
     return {
         "id": wf.id,
         "title": wf.title,
+        "origin_issue_id": wf.origin_issue_id,
         "state": _workflow_state(wf.steps),
         "steps": [{"id": st.id, "position": st.position, "title": st.title,
                    "state": st.state} for st in wf.steps],

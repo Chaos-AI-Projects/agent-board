@@ -792,3 +792,150 @@ def test_a_fileless_retry_still_replays_a_request_hashed_before_attachments(boar
         assert ev.request_hash == old
     again = core.annotate(board, iid, "n", actor=CHAOS, actor_kind=HUMAN, request_id="r")
     assert len(again["events"]) == len(core.show(board, iid)["events"])
+
+
+# --- MS-644: an agent plans an issue as a workflow ------------------------------
+
+
+def claimed(engine, title="big job"):
+    iid = ready(engine, title)
+    claim = core.next(engine, "w1")
+    assert claim["issue"]["id"] == iid
+    return iid, claim["lease_token"]
+
+
+def plan(engine, iid, token, steps=("design", "build", "test"), **kw):
+    return core.plan(engine, iid, [{"title": t} for t in steps], actor="w1",
+                     actor_kind=AGENT, token=token, **kw)
+
+
+def test_plan_creates_ordered_ready_steps_and_holds_the_origin(board):
+    iid, token = claimed(board)
+    view = plan(board, iid, token)
+    assert view["id"] == iid
+    assert view["state"] == "onhold"
+    assert view["lease_holder"] is None
+    wf = view["plan"]
+    assert wf["title"] == "big job"
+    assert [(s["position"], s["title"], s["state"]) for s in wf["steps"]] == [
+        (1, "design", "ready"), (2, "build", "ready"), (3, "test", "ready")]
+    step = core.show(board, wf["steps"][0]["id"])
+    assert step["project"] == "MS"
+    # The steps keep the origin's place in the queue rather than going to the back.
+    assert {core.show(board, s["id"])["rank"] for s in wf["steps"]} == {view["rank"]}
+    assert step["workflow"]["origin_issue_id"] == iid
+    last = events(board, iid)[-1]
+    assert (last["from_state"], last["to_state"], last["actor"]) == ("processing", "onhold", "w1")
+    assert "3 steps" in last["note"]
+
+
+def test_plan_step_takes_its_own_body_and_project(board):
+    core.create_project(board, "OPS", "operations")
+    iid, token = claimed(board)
+    view = core.plan(board, iid, [{"title": "a", "body": "do a", "project": "OPS"},
+                                  {"title": "b"}],
+                     actor="w1", actor_kind=AGENT, token=token)
+    a, b = [core.show(board, s["id"]) for s in view["plan"]["steps"]]
+    assert (a["project"], a["body"], b["project"]) == ("OPS", "do a", "MS")
+
+
+def test_plan_needs_the_callers_live_lease(board):
+    iid = ready(board)
+    with pytest.raises(core.LeaseLost):
+        core.plan(board, iid, [{"title": "a"}], actor="w1", actor_kind=AGENT, token=None)
+    claim = core.next(board, "w1")
+    with pytest.raises(core.LeaseLost):
+        core.plan(board, iid, [{"title": "a"}], actor="w1", actor_kind=AGENT, token="stale")
+    with pytest.raises(core.LeaseLost):
+        core.plan(board, iid, [{"title": "a"}], actor="w2", actor_kind=AGENT,
+                  token=claim["lease_token"])
+    assert core.show(board, iid)["plan"] is None
+
+
+def test_plan_without_steps_is_refused_and_writes_nothing(board):
+    iid, token = claimed(board)
+    with pytest.raises(core.BoardError):
+        plan(board, iid, token, steps=())
+    with pytest.raises(core.BoardError):
+        plan(board, iid, token, steps=("ok", "  "))
+    with store.session(board) as s:
+        assert s.scalars(select(store.Workflow)).all() == []
+    assert core.show(board, iid)["state"] == "processing"
+
+
+def test_a_second_plan_on_one_issue_is_refused(board):
+    iid, token = claimed(board)
+    plan(board, iid, token)
+    with pytest.raises(core.Conflict):
+        core.plan(board, iid, [{"title": "again"}], actor=CHAOS, actor_kind=HUMAN)
+
+
+def test_plan_replays_one_request_id_without_duplicates(board):
+    iid, token = claimed(board)
+    first = plan(board, iid, token, request_id="r1")
+    again = plan(board, iid, token, request_id="r1")
+    assert again["plan"]["id"] == first["plan"]["id"]
+    with store.session(board) as s:
+        assert len(s.scalars(select(store.Workflow)).all()) == 1
+        assert len(s.scalars(select(store.Issue)).all()) == 4
+    with pytest.raises(core.Conflict):
+        plan(board, iid, token, steps=("other",), request_id="r1")
+
+
+def test_a_human_plans_a_backlog_issue_without_a_lease(board):
+    iid = core.create(board, "MS", "idea", actor=CHAOS, actor_kind=HUMAN)["id"]
+    view = core.plan(board, iid, [{"title": "a"}], actor=CHAOS, actor_kind=HUMAN)
+    assert view["state"] == "onhold"
+    assert len(view["plan"]["steps"]) == 1
+
+
+def test_a_human_plan_under_an_agents_lease_needs_preempt(board):
+    iid, _ = claimed(board)
+    with pytest.raises(core.LeaseHeld):
+        core.plan(board, iid, [{"title": "a"}], actor=CHAOS, actor_kind=HUMAN)
+    view = core.plan(board, iid, [{"title": "a"}], actor=CHAOS, actor_kind=HUMAN,
+                     preempt=True)
+    assert (view["state"], view["lease_holder"]) == ("onhold", None)
+
+
+def test_a_finished_issue_cannot_be_planned(board):
+    iid = ready(board)
+    core.transition(board, iid, "cancelled", actor=CHAOS, actor_kind=HUMAN)
+    with pytest.raises(core.InvalidTransition):
+        core.plan(board, iid, [{"title": "a"}], actor=CHAOS, actor_kind=HUMAN)
+
+
+def test_a_step_cannot_be_planned_into_a_nested_workflow(board):
+    iid, token = claimed(board)
+    step = plan(board, iid, token)["plan"]["steps"][0]["id"]
+    claim = core.next(board, "w1")
+    assert claim["issue"]["id"] == step
+    with pytest.raises(core.BoardError):
+        core.plan(board, step, [{"title": "x"}], actor="w1", actor_kind=AGENT,
+                  token=claim["lease_token"])
+
+
+def test_the_last_step_done_returns_the_origin_to_ready(board):
+    iid, token = claimed(board)
+    plan(board, iid, token, steps=("a", "b"))
+    for note in ("did a", "did b"):
+        assert core.show(board, iid)["state"] == "onhold"
+        claim = core.next(board, "w2")
+        core.transition(board, claim["issue"]["id"], "done", note=note, actor="w2",
+                        actor_kind=AGENT, token=claim["lease_token"])
+    origin = core.show(board, iid)
+    assert origin["state"] == "ready"
+    last = origin["events"][-1]
+    assert (last["from_state"], last["to_state"], last["actor_kind"]) == (
+        "onhold", "ready", "system")
+    assert core.next(board, "w3")["issue"]["id"] == iid
+
+
+def test_an_origin_moved_off_hold_by_a_human_is_left_alone(board):
+    iid, token = claimed(board)
+    plan(board, iid, token, steps=("a",))
+    core.transition(board, iid, "backlog", actor=CHAOS, actor_kind=HUMAN)
+    claim = core.next(board, "w2")
+    core.transition(board, claim["issue"]["id"], "done", note="did a", actor="w2",
+                    actor_kind=AGENT, token=claim["lease_token"])
+    assert core.show(board, iid)["state"] == "backlog"

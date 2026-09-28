@@ -1284,3 +1284,54 @@ def test_a_path_in_an_uploaded_filename_is_stripped_on_the_route(board, attach_d
 def test_a_bad_upload_cap_falls_back_to_the_default(monkeypatch, raw):
     monkeypatch.setenv(web.MAX_UPLOAD_ENV, raw)
     assert web._max_upload_bytes() == web.DEFAULT_MAX_UPLOAD_MB * 1024 * 1024
+
+
+# --- MS-644: plan an issue as a workflow ------------------------------------------
+
+
+def test_a_loose_issue_page_offers_plan_as_workflow(board, client):
+    iid = ready(board)
+    html = client.get(f"/issues/{iid}").text
+    assert f'action="/issues/{iid}/plan"' in html
+
+
+def test_the_plan_form_makes_one_step_per_line(board, client):
+    iid = ready(board, "big job")
+    r = client.post(f"/issues/{iid}/plan", headers=AS_CHAOS,
+                    data={"steps": "design\r\n\r\n  build  \ntest\n"})
+    assert r.status_code == 303
+    issue = core.show(board, iid)
+    assert issue["state"] == "onhold"
+    assert [s["title"] for s in issue["plan"]["steps"]] == ["design", "build", "test"]
+    assert issue["events"][-1]["actor"] == CHAOS
+
+
+def test_the_origin_page_shows_its_plan_and_no_second_form(board, client):
+    iid = ready(board, "big job")
+    view = core.plan(board, iid, [{"title": "a"}, {"title": "b"}], actor=CHAOS,
+                     actor_kind=HUMAN)
+    a, b = [s["id"] for s in view["plan"]["steps"]]
+    html = client.get(f"/issues/{iid}").text
+    section = workflow_section(html)
+    steps = re.findall(r'<li[^>]*data-step="([^"]+)"', section)
+    assert steps == [a, b]
+    assert "mermaid" in html
+    assert f'action="/issues/{iid}/plan"' not in html
+    step_html = client.get(f"/issues/{a}").text
+    assert f'href="/issues/{iid}"' in step_html
+    assert f'action="/issues/{a}/plan"' not in step_html
+
+
+def test_a_plan_with_no_steps_is_refused(board, client):
+    iid = ready(board)
+    r = client.post(f"/issues/{iid}/plan", headers=AS_CHAOS, data={"steps": " \n "})
+    assert r.status_code >= 400
+    assert core.show(board, iid)["plan"] is None
+
+
+def test_a_plan_under_an_agents_lease_is_refused_409(board, client):
+    iid = ready(board)
+    core.next(board, "w1")
+    r = client.post(f"/issues/{iid}/plan", headers=AS_CHAOS, data={"steps": "a"})
+    assert r.status_code == 409
+    assert core.show(board, iid)["state"] == "processing"
