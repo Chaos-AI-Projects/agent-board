@@ -19,21 +19,35 @@
 <section class="workflow">
 <h2>Workflow: {{ wf.title }}</h2>
 <p>State <b>{{ wf.state }}</b> &middot; {{ wf.steps|length }} step{{ "" if wf.steps|length == 1 else "s" }}</p>
-<pre class="mermaid">
-{{ diagram }}
-</pre>
-<ol class="workflow-steps">
-{% for st in wf.steps %}
+{% macro step_list(run) %}{% set start, run_steps = run %}
+<ol class="workflow-steps" start="{{ start }}">
+{% for st in run_steps %}
 <li{% if st.id == issue.id %} class="this-step"{% endif %} data-step="{{ st.id }}"><a href="/issues/{{ st.id }}">{{ st.id }}</a> {{ st.title }} &middot; <b>{{ st.state }}</b></li>
 {% endfor %}
 </ol>
+{% endmacro %}
+{% if diagram %}
+<pre class="mermaid">
+{{ diagram }}
+</pre>
+{% endif %}
+{{ step_list(steps.shown) }}
+{% if steps.hidden %}
+<details class="workflow-more">
+<summary>Show {{ steps.hidden }} more</summary>
+{% if steps.before[1] %}{{ step_list(steps.before) }}{% endif %}
+{% if steps.after[1] %}{{ step_list(steps.after) }}{% endif %}
+</details>
+{% endif %}
 </section>
+{% if diagram %}
 <script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
 <script>
   // strict: labels are sanitised and click links are URL-checked; only the
   // callback form of `click` needs loose, and the diagram uses none.
   if (window.mermaid) mermaid.initialize({startOnLoad: true, securityLevel: "strict"});
 </script>
+{% endif %}
 {% endif %}
 
 {% if issue.body %}<div class="markdown">{{ issue.body|markdown }}</div>{% endif %}

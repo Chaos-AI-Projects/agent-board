@@ -162,6 +162,29 @@ def workflow_target(wf: dict) -> str | None:
     return (open_steps or steps or [{"id": None}])[0]["id"]
 
 
+# Above this many steps the diagram is unreadable, so the page shows only the list.
+DIAGRAM_MAX_STEPS = 4
+# How many steps of a long workflow's list show before "Show N more".
+LIST_WINDOW = 10
+
+
+def workflow_list(wf: dict, here: str | None) -> dict:
+    """A workflow's step list split into the visible window and the rest.
+
+    The window holds `LIST_WINDOW` steps starting four before the step whose
+    id is `here`, clamped to the list, so a late step's page still shows it.
+    Each run is `(start, steps)`, `start` being the 1-based number of its
+    first step; `before` and `after` are the hidden runs either side.
+    """
+    steps = wf["steps"]
+    ids = [st["id"] for st in steps]
+    at = ids.index(here) if here in ids else 0
+    lo = min(max(0, at - 4), max(0, len(steps) - LIST_WINDOW))
+    hi = lo + LIST_WINDOW
+    return {"shown": (lo + 1, steps[lo:hi]), "before": (1, steps[:lo]),
+            "after": (hi + 1, steps[hi:]), "hidden": lo + len(steps[hi:])}
+
+
 def workflow_diagram(wf: dict, here: str | None) -> str:
     """The workflow as Mermaid `flowchart LR` source, one clickable node per step.
 
@@ -405,7 +428,9 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None) -> 
         wf = issue["workflow"]
         return page(request, "issue.html", issue=issue, now=core.overview(engine)["now"],
                     states=list(core.TRANSITIONS),
-                    diagram=workflow_diagram(wf, issue["id"]) if wf else None)
+                    diagram=(workflow_diagram(wf, issue["id"])
+                             if wf and len(wf["steps"]) <= DIAGRAM_MAX_STEPS else None),
+                    steps=workflow_list(wf, issue["id"]) if wf else None)
 
     @app.post("/issues")
     async def create_issue(request: Request):

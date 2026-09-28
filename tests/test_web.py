@@ -281,6 +281,69 @@ def test_the_issue_page_draws_its_workflow_as_a_mermaid_flowchart(board, client)
     assert f'data-step="{ids[0]}"' in workflow_section(html)
 
 
+def step_lists(section):
+    """The step ids the workflow section lists: (visible, behind the expander)."""
+    m = re.search(r"<details[^>]*>(.*?)</details>", section, re.S)
+    hidden = re.findall(r'data-step="([^"]+)"', m.group(1)) if m else []
+    visible = re.findall(r'data-step="([^"]+)"', section.replace(m.group(0), "") if m else section)
+    return visible, hidden
+
+
+def test_a_workflow_of_four_steps_keeps_its_diagram(board, client):
+    wf = release(board, ["a", "b", "c", "d"])
+    html = client.get(f"/issues/{wf['steps'][0]['id']}").text
+    assert '<pre class="mermaid"' in html and "mermaid.min.js" in html
+    visible, hidden = step_lists(workflow_section(html))
+    assert visible == [st["id"] for st in wf["steps"]] and hidden == []
+
+
+def test_a_workflow_over_four_steps_is_a_list_without_the_diagram(board, client):
+    wf = release(board, [f"step {n}" for n in range(1, 6)])
+    html = client.get(f"/issues/{wf['steps'][0]['id']}").text
+    assert 'class="mermaid"' not in html
+    assert "mermaid.min.js" not in html
+    section = workflow_section(html)
+    visible, hidden = step_lists(section)
+    assert visible == [st["id"] for st in wf["steps"]] and hidden == []
+    assert "<details" not in section
+
+
+def test_a_long_workflow_shows_ten_steps_and_the_rest_behind_show_more(board, client):
+    wf = release(board, [f"step {n}" for n in range(1, 13)])
+    ids = [st["id"] for st in wf["steps"]]
+    section = workflow_section(client.get(f"/issues/{ids[0]}").text)
+    visible, hidden = step_lists(section)
+    assert visible == ids[:10]
+    assert hidden == ids[10:]
+    assert re.search(r"<summary>\s*Show 2 more\s*</summary>", section)
+    # The list numbers each step by its position, wherever the list starts.
+    assert '<ol class="workflow-steps" start="1"' in section
+    assert '<ol class="workflow-steps" start="11"' in section
+
+
+def test_a_late_steps_page_shows_the_window_that_holds_it(board, client):
+    wf = release(board, [f"step {n}" for n in range(1, 13)])
+    ids = [st["id"] for st in wf["steps"]]
+    section = workflow_section(client.get(f"/issues/{ids[11]}").text)
+    visible, hidden = step_lists(section)
+    assert visible == ids[2:]
+    assert hidden == ids[:2]
+    marked = re.findall(r'class="[^"]*this-step[^"]*"[^>]*data-step="([^"]+)"', section)
+    assert marked == [ids[11]]
+
+
+def test_a_middle_steps_window_starts_four_before_it(board, client):
+    wf = release(board, [f"step {n}" for n in range(1, 15)])
+    ids = [st["id"] for st in wf["steps"]]
+    section = workflow_section(client.get(f"/issues/{ids[6]}").text)
+    visible, hidden = step_lists(section)
+    assert visible == ids[2:12]
+    # Hidden steps before and after the window keep their order and numbering.
+    assert hidden == ids[:2] + ids[12:]
+    assert re.search(r"<summary>\s*Show 4 more\s*</summary>", section)
+    assert '<ol class="workflow-steps" start="13"' in section
+
+
 HOSTILE = 'a "quoted" [bracket] --> x;\nclick s0 "javascript:alert(1)" %%{init}%% <b>'
 
 
