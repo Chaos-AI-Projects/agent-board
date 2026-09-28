@@ -1110,3 +1110,177 @@ def test_project_writes_need_an_actor_and_the_same_origin(client, board, monkeyp
     assert r.status_code == 403
     assert core.projects(board) == [{"key": "MS", "name": "memory-solution", "issues": 0},
                                     {"key": "ZZ", "name": "empty", "issues": 0}]
+
+
+# --- attachments (MS-643) -------------------------------------------------------
+
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\0" * 16
+
+
+@pytest.fixture
+def attach_dir(tmp_path, monkeypatch):
+    d = tmp_path / "attachments"
+    monkeypatch.setenv(web.ATTACH_DIR_ENV, str(d))
+    monkeypatch.delenv(web.MAX_UPLOAD_ENV, raising=False)
+    return d
+
+
+def test_upload_on_create_stores_bytes_on_disk_by_hash(board, attach_dir, client):
+    import hashlib
+    r = client.post("/issues", data={"project": "MS", "title": "t", "state": "ready"},
+                    files=[("files", ("notes.txt", b"hello", "text/plain"))],
+                    headers=AS_CHAOS)
+    assert r.status_code == 303
+    [a] = core.show(board, "MS-1")["attachments"]
+    assert (attach_dir / hashlib.sha256(b"hello").hexdigest()).read_bytes() == b"hello"
+    got = client.get(f"/attachments/{a['id']}")
+    assert got.status_code == 200 and got.content == b"hello"
+
+
+def test_an_empty_file_field_attaches_nothing(board, attach_dir, client):
+    r = client.post("/issues", data={"project": "MS", "title": "t"},
+                    files=[("files", ("", b"", "application/octet-stream"))],
+                    headers=AS_CHAOS)
+    assert r.status_code == 303
+    assert core.show(board, "MS-1")["attachments"] == []
+
+
+def test_upload_on_edit(board, attach_dir, client):
+    iid = ready(board)
+    issue = core.show(board, iid)
+    r = client.post(f"/issues/{iid}/edit", data=edit_form(issue),
+                    files=[("files", ("spec.md", b"# spec", "text/markdown"))],
+                    headers=AS_CHAOS)
+    assert r.status_code == 303
+    assert [a["filename"] for a in core.show(board, iid)["attachments"]] == ["spec.md"]
+
+
+def test_a_notes_file_shows_under_that_note(board, attach_dir, client):
+    iid = ready(board)
+    r = client.post(f"/issues/{iid}/note", data={"note": "the log"},
+                    files=[("files", ("run.log", b"boom", "text/plain"))], headers=AS_CHAOS)
+    assert r.status_code == 303
+    issue = core.show(board, iid)
+    [a] = issue["attachments"]
+    html = client.get(f"/issues/{iid}").text
+    history = html.split("<h2>History</h2>", 1)[1]
+    item = re.search(r"<li>(?:(?!</li>).)*the log.*?</li>", history, re.S).group(0)
+    assert f'href="/attachments/{a["id"]}"' in item and "run.log" in item
+
+
+def test_the_forms_are_multipart_with_a_file_picker(board, attach_dir, client):
+    iid = ready(board)
+    for html in (client.get("/").text, client.get(f"/issues/{iid}").text):
+        assert 'enctype="multipart/form-data"' in html
+        assert '<input type="file" name="files" multiple>' in html
+    page = client.get(f"/issues/{iid}").text
+    assert page.count('enctype="multipart/form-data"') == 2
+
+
+def test_an_over_cap_upload_is_refused_and_writes_nothing(board, attach_dir, client,
+                                                          monkeypatch):
+    monkeypatch.setenv(web.MAX_UPLOAD_ENV, "0.001")  # 1048 bytes
+    r = client.post("/issues", data={"project": "MS", "title": "big"},
+                    files=[("files", ("big.bin", b"x" * 2000, "application/octet-stream"))],
+                    headers=AS_CHAOS)
+    assert r.status_code == 413
+    assert "big.bin" in unescape(r.text)
+    assert core.overview(board)["issues"] == []
+    assert not attach_dir.exists() or list(attach_dir.iterdir()) == []
+
+
+def test_html_and_svg_download_rather_than_open(board, attach_dir, client):
+    iid = ready(board)
+    for name, ctype in (("x.html", "text/html"), ("x.svg", "image/svg+xml")):
+        client.post(f"/issues/{iid}/note", data={"note": name},
+                    files=[("files", (name, b"<script>alert(1)</script>", ctype))],
+                    headers=AS_CHAOS)
+    for a in core.show(board, iid)["attachments"]:
+        r = client.get(f"/attachments/{a['id']}")
+        assert r.headers["content-disposition"].startswith("attachment;")
+        assert r.headers["content-type"] == "application/octet-stream"
+        assert r.headers["x-content-type-options"] == "nosniff"
+
+
+def test_a_png_shows_inline_with_its_type(board, attach_dir, client):
+    iid = ready(board)
+    client.post(f"/issues/{iid}/note", data={"note": "shot"},
+                files=[("files", ("shot.png", PNG, "image/png"))], headers=AS_CHAOS)
+    [a] = core.show(board, iid)["attachments"]
+    r = client.get(f"/attachments/{a['id']}")
+    assert r.headers["content-disposition"].startswith("inline;")
+    assert r.headers["content-type"] == "image/png"
+    assert r.headers["x-content-type-options"] == "nosniff"
+    assert f'<img src="/attachments/{a["id"]}"' in client.get(f"/issues/{iid}").text
+
+
+@pytest.mark.parametrize("raw, clean", [
+    ("../../etc/passwd", "passwd"),
+    ("C:\\Users\\me\\report.pdf", "report.pdf"),
+    ("a\r\nb.txt", "ab.txt"),
+    ("..", "file"),
+    ("", "file"),
+])
+def test_filenames_lose_their_path_and_control_characters(raw, clean):
+    assert web.safe_filename(raw) == clean
+
+
+def test_an_upload_without_an_attachment_dir_is_refused(board, client, monkeypatch):
+    monkeypatch.delenv(web.ATTACH_DIR_ENV, raising=False)
+    r = client.post("/issues", data={"project": "MS", "title": "t"},
+                    files=[("files", ("a.txt", b"a", "text/plain"))], headers=AS_CHAOS)
+    assert r.status_code == 422
+    assert core.overview(board)["issues"] == []
+
+
+def test_an_unknown_attachment_is_404(board, attach_dir, client):
+    assert client.get("/attachments/999").status_code == 404
+
+
+def test_a_take_over_names_the_files_it_could_not_keep(board, attach_dir, client):
+    """A file input cannot be refilled, so the take-over page says which files to attach again."""
+    iid = ready(board)
+    core.next(board, "run-2")
+    issue = core.show(board, iid)
+    refused = client.post(f"/issues/{iid}/edit", data=edit_form(issue, body="new spec"),
+                          files=[("files", ("spec.md", b"# spec", "text/markdown")),
+                                 ("files", ("<i>x.png", PNG, "image/png"))],
+                          headers=AS_CHAOS)
+    assert refused.status_code == 409
+    text = unescape(refused.text)
+    assert "spec.md" in text and "<i>x.png" in text and "attach" in text.lower()
+    assert "<i>x.png" not in refused.text
+    assert 'enctype="multipart/form-data"' in refused.text
+    assert '<input type="file" name="files" multiple>' in refused.text
+    assert core.show(board, iid)["attachments"] == []
+
+    taken = client.post(f"/issues/{iid}/edit",
+                        data=edit_form(issue, body="new spec", preempt="1"),
+                        files=[("files", ("spec.md", b"# spec", "text/markdown"))],
+                        headers=AS_CHAOS)
+    assert taken.status_code == 303
+    assert [a["filename"] for a in core.show(board, iid)["attachments"]] == ["spec.md"]
+
+
+def test_a_take_over_without_files_says_nothing_about_them(board, attach_dir, client):
+    iid = ready(board)
+    core.next(board, "run-2")
+    refused = client.post(f"/issues/{iid}/edit", data=edit_form(core.show(board, iid)),
+                          headers=AS_CHAOS)
+    assert refused.status_code == 409 and "were not attached" not in refused.text
+
+
+def test_a_path_in_an_uploaded_filename_is_stripped_on_the_route(board, attach_dir, client):
+    iid = ready(board)
+    client.post(f"/issues/{iid}/note", data={"note": "n"},
+                files=[("files", ("../../x", b"x", "text/plain"))], headers=AS_CHAOS)
+    [a] = core.show(board, iid)["attachments"]
+    assert a["filename"] == "x"
+    assert not (attach_dir.parent.parent / "x").exists()
+
+
+@pytest.mark.parametrize("raw", ["lots", "-1", "nan", "inf", "0"])
+def test_a_bad_upload_cap_falls_back_to_the_default(monkeypatch, raw):
+    monkeypatch.setenv(web.MAX_UPLOAD_ENV, raw)
+    assert web._max_upload_bytes() == web.DEFAULT_MAX_UPLOAD_MB * 1024 * 1024

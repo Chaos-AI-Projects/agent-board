@@ -725,3 +725,70 @@ def test_a_workflow_whose_first_open_step_is_held_is_not_ready(board):
     core.transition(board, wf["steps"][0]["id"], "onhold", actor=CHAOS, actor_kind=HUMAN)
     assert core.next(board, "w1") is None
     assert core.show(board, wf["steps"][1]["id"])["workflow"]["state"] == "backlog"
+
+
+# --- attachments (MS-643) -------------------------------------------------------
+
+
+def blob(name="a.txt", content_type="text/plain", data=b"hello"):
+    import hashlib
+    return {"filename": name, "content_type": content_type, "size": len(data),
+            "sha256": hashlib.sha256(data).hexdigest()}
+
+
+def test_create_records_attachments_on_the_issue(board):
+    issue = core.create(board, "MS", "with a file", actor=CHAOS, actor_kind=HUMAN,
+                        attachments=[blob()])
+    [a] = issue["attachments"]
+    assert (a["filename"], a["content_type"], a["size"], a["event_id"], a["added_by"]) == (
+        "a.txt", "text/plain", 5, None, CHAOS)
+    assert core.attachment(board, a["id"])["sha256"] == blob()["sha256"]
+
+
+def test_a_notes_files_hang_off_that_note(board):
+    iid = ready(board)
+    issue = core.annotate(board, iid, "see file", actor=CHAOS, actor_kind=HUMAN,
+                          attachments=[blob("log.txt")])
+    note = issue["events"][-1]
+    assert note["kind"] == "annotate"
+    assert [a["filename"] for a in note["attachments"]] == ["log.txt"]
+    assert issue["attachments"][0]["event_id"] == note["id"]
+    assert issue["events"][0]["attachments"] == []
+
+
+def test_an_edit_that_only_attaches_is_a_change(board):
+    iid = ready(board)
+    before = core.show(board, iid)
+    after = core.edit(board, iid, actor=CHAOS, expected_version=before["version"],
+                      attachments=[blob()])
+    assert after["version"] == before["version"] + 1
+    assert after["events"][-1]["note"] == "changed attachments"
+    assert [a["event_id"] for a in after["attachments"]] == [None]
+
+
+def test_an_unknown_attachment_is_not_found(board):
+    with pytest.raises(core.NotFound):
+        core.attachment(board, 999)
+
+
+@pytest.mark.parametrize("bad", ["../../etc/passwd", "ABC", "a" * 63, "g" * 64, "A" * 64])
+def test_an_attachment_digest_must_be_a_lowercase_sha256(board, bad):
+    """The digest names the file on disk, so anything else could point outside the store."""
+    with pytest.raises(core.BoardError):
+        core.create(board, "MS", "x", actor=CHAOS, actor_kind=HUMAN,
+                    attachments=[blob() | {"sha256": bad}])
+    assert core.overview(board)["issues"] == []
+
+
+def test_a_fileless_retry_still_replays_a_request_hashed_before_attachments(board):
+    """Request hashes written before MS-643 carry no file list, and a fileless call must match them."""
+    import hashlib
+    import json
+    iid = ready(board)
+    core.annotate(board, iid, "n", actor=CHAOS, actor_kind=HUMAN, request_id="r")
+    old = hashlib.sha256(json.dumps(["n", CHAOS, HUMAN, None]).encode()).hexdigest()
+    with store.session(board) as s, s.begin():
+        ev = s.scalar(select(store.Event).where(store.Event.idempotency_key.like("%:r")))
+        assert ev.request_hash == old
+    again = core.annotate(board, iid, "n", actor=CHAOS, actor_kind=HUMAN, request_id="r")
+    assert len(again["events"]) == len(core.show(board, iid)["events"])

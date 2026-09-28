@@ -28,6 +28,13 @@ browser in the `board_prefs` cookie, set from `/preferences`, and searching is
 its own page at `/search`. Projects are created, renamed and deleted at
 `/projects`; only the name can change, and only an empty project can go.
 
+Files can be attached when an issue is created or edited and when a note is
+added (MS-643). The bytes go to `BOARD_ATTACHMENT_DIR`, named by SHA-256, and
+only their metadata goes to the database; each file is capped at
+`BOARD_MAX_UPLOAD_MB` (default 25). `/attachments/<id>` serves a raster image
+inline and everything else, HTML and SVG included, as a download: the board
+writes as the reader, so an uploaded page opening on its origin could act as them.
+
 Times are stored in UTC and shown in a zone: the one saved in `board_prefs`,
 else `BOARD_TIMEZONE`, else UTC. An unknown name in either is skipped, and
 one in the environment is logged rather than stopping the board.
@@ -35,16 +42,19 @@ one in the environment is logged rather than stopping the board.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import tempfile
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.concurrency import run_in_threadpool
 from fastapi.templating import Jinja2Templates
 from markdown_it import MarkdownIt
@@ -61,6 +71,11 @@ HOSTS_ENV = "BOARD_WEB_HOSTS"
 PREFS_COOKIE = "board_prefs"
 PREFS_MAX_AGE = 365 * 24 * 3600
 TZ_ENV = "BOARD_TIMEZONE"
+ATTACH_DIR_ENV = "BOARD_ATTACHMENT_DIR"
+MAX_UPLOAD_ENV = "BOARD_MAX_UPLOAD_MB"
+DEFAULT_MAX_UPLOAD_MB = 25
+# Raster images only: an SVG can carry script, so it downloads like HTML does.
+INLINE_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
 UTC = ZoneInfo("UTC")
 
 log = logging.getLogger(__name__)
@@ -100,7 +115,15 @@ def localtime(at, tz: ZoneInfo) -> str:
     return dt.astimezone(tz).strftime("%Y-%m-%d %H:%M %Z")
 
 
+def filesize(n: int) -> str:
+    """A byte count as B, KB or MB, one decimal above bytes."""
+    if n < 1024:
+        return f"{n} B"
+    return f"{n / 1024:.1f} KB" if n < 1024 * 1024 else f"{n / (1024 * 1024):.1f} MB"
+
+
 templates.env.filters["markdown"] = markdown
+templates.env.filters["filesize"] = filesize
 templates.env.filters["localtime"] = localtime
 
 
@@ -237,6 +260,69 @@ def _same_origin(request: Request) -> bool:
     return origin is None or urlsplit(origin).netloc == request.headers.get("host")
 
 
+class TooLarge(Exception):
+    pass
+
+
+def safe_filename(name: str | None) -> str:
+    """A client's filename cut to its last path component, without control characters."""
+    name = (name or "").replace("\\", "/").rsplit("/", 1)[-1]
+    name = "".join(c for c in name if unicodedata.category(c)[0] != "C").strip()
+    return name[:255] if name not in ("", ".", "..") else "file"
+
+
+def _max_upload_bytes() -> int:
+    """The cap in bytes. A value that is not a positive finite number means the default."""
+    try:
+        mb = float(os.environ.get(MAX_UPLOAD_ENV, "").strip() or DEFAULT_MAX_UPLOAD_MB)
+    except ValueError:
+        mb = DEFAULT_MAX_UPLOAD_MB
+    if not (0 < mb < float("inf")):
+        mb = DEFAULT_MAX_UPLOAD_MB
+    return int(mb * 1024 * 1024)
+
+
+async def save_uploads(form) -> list[dict]:
+    """Write the form's `files` to BOARD_ATTACHMENT_DIR and describe them for `core`.
+
+    Every file is checked against the cap before any is kept, so a refused
+    upload leaves nothing behind. A file is stored under its SHA-256, so the
+    same bytes uploaded twice take one file.
+    """
+    uploads = [f for f in form.getlist("files")
+               if not isinstance(f, str) and f.filename]
+    if not uploads:
+        return []
+    root = os.environ.get(ATTACH_DIR_ENV, "").strip()
+    if not root:
+        raise core.BoardError(f"{ATTACH_DIR_ENV} is not set, so this board takes no files")
+    cap = _max_upload_bytes()
+    for up in uploads:
+        if up.size is not None and up.size > cap:
+            raise TooLarge(safe_filename(up.filename))
+    blobs = []
+    for up in uploads:
+        data = await up.read(cap + 1)
+        if len(data) > cap:
+            raise TooLarge(safe_filename(up.filename))
+        blobs.append((up, data))
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    described = []
+    for up, data in blobs:
+        digest = hashlib.sha256(data).hexdigest()
+        target = root / digest
+        if not target.exists():
+            fd, tmp = tempfile.mkstemp(dir=root)
+            with os.fdopen(fd, "wb") as out:
+                out.write(data)
+            os.replace(tmp, target)
+        described.append({"filename": safe_filename(up.filename),
+                          "content_type": (up.content_type or "application/octet-stream")[:200],
+                          "size": len(data), "sha256": digest})
+    return described
+
+
 def _form_int(value):
     return int(value) if value not in (None, "") else None
 
@@ -303,7 +389,7 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None) -> 
         me = who(request)
         saved_tz = read_prefs(request.cookies.get(PREFS_COOKIE))["timezone"]
         ctx |= {"me": me.email if me else None, "lease_status": lease_status,
-                "tz": zone(saved_tz) or default_tz,
+                "tz": zone(saved_tz) or default_tz, "inline_types": INLINE_TYPES,
                 "moves": lambda issue: sorted(core.TRANSITIONS[issue["state"]])}
         return templates.TemplateResponse(request, name, ctx, status_code=status)
 
@@ -330,6 +416,12 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None) -> 
                          "writes need an IAP or Access assertion, or a Google token.")
         return error(request, 401, f"No {ACTOR_HEADER} header and no {ACTOR_ENV} set: "
                      "writes need Cloudflare Access or a local actor.")
+
+    @app.exception_handler(TooLarge)
+    async def too_large(request, exc):
+        mb = _max_upload_bytes() / (1024 * 1024)
+        return error(request, 413, f"{exc} is over the {mb:g} MB limit for one file. "
+                     "Nothing was saved.")
 
     @app.exception_handler(core.NotFound)
     async def not_found(request, exc):
@@ -461,10 +553,11 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None) -> 
     async def create_issue(request: Request):
         me = await run_in_threadpool(actor, request)
         f = await request.form()
+        files = await save_uploads(f)
         issue = core.create(engine, f.get("project", ""), f.get("title", ""), actor=me.email,
                             actor_kind=me.kind, body=f.get("body", ""),
                             state=f.get("state") or "backlog", rank=_form_int(f.get("rank")),
-                            labels=_form_labels(f.get("labels")) or ())
+                            labels=_form_labels(f.get("labels")) or (), attachments=files)
         return back(issue["id"])
 
     @app.post("/workflows")
@@ -481,6 +574,7 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None) -> 
         f = await request.form()
         current = core.show(engine, issue_id)
         state = f.get("state")
+        files = await save_uploads(f)
         try:
             core.edit(engine, issue_id, actor=me.email, actor_kind=me.kind,
                       expected_version=int(f.get("version", -1)),
@@ -488,11 +582,12 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None) -> 
                       title=f.get("title"), body=f.get("body"),
                       rank=_form_int(f.get("rank")), labels=_form_labels(f.get("labels")),
                       state=state if state and state != current["state"] else None,
-                      note=f.get("note") or None)
+                      note=f.get("note") or None, attachments=files)
         except core.LeaseHeld as held:
-            fields = {k: v for k, v in f.items() if k != "preempt"}
+            # A file input cannot be refilled, so the page names the files to attach again.
+            fields = {k: v for k, v in f.items() if k not in ("preempt", "files")}
             return page(request, "takeover.html", 409, issue=current, held=held,
-                        fields=fields)
+                        fields=fields, dropped=[a["filename"] for a in files])
         except core.Conflict:
             return error(request, 409, f"{issue_id} changed since you loaded it. "
                          "Reload the card to see what changed, then save again.", issue_id)
@@ -516,8 +611,25 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None) -> 
     async def note(request: Request, issue_id: str):
         me = await run_in_threadpool(actor, request)
         f = await request.form()
-        core.annotate(engine, issue_id, f.get("note", ""), actor=me.email, actor_kind=me.kind)
+        files = await save_uploads(f)
+        core.annotate(engine, issue_id, f.get("note", ""), actor=me.email, actor_kind=me.kind,
+                      attachments=files)
         return back(issue_id)
+
+    @app.get("/attachments/{attachment_id}")
+    def download(attachment_id: int):
+        a = core.attachment(engine, attachment_id)
+        root = os.environ.get(ATTACH_DIR_ENV, "").strip()
+        path = Path(root) / a["sha256"] if root else None
+        if path is None or not path.is_file():
+            raise core.NotFound(f"attachment {attachment_id}'s file is missing")
+        inline = a["content_type"] in INLINE_TYPES
+        return FileResponse(
+            path, filename=a["filename"],
+            media_type=a["content_type"] if inline else "application/octet-stream",
+            content_disposition_type="inline" if inline else "attachment",
+            headers={"X-Content-Type-Options": "nosniff",
+                     "Content-Security-Policy": "sandbox"})
 
     @app.post("/issues/{issue_id}/link")
     async def link(request: Request, issue_id: str):

@@ -24,7 +24,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import aliased
 
 from board import store
-from board.store import Artifact, Event, Issue, Label, Project, Template, TemplateStep, Workflow
+from board.store import Artifact, Attachment, Event, Issue, Label, Project, Template, TemplateStep, Workflow
 
 DEFAULT_TTL = timedelta(minutes=90)
 
@@ -338,20 +338,36 @@ def transition(engine, issue_id: str, state: str, *, actor: str, actor_kind: str
 
 
 def annotate(engine, issue_id: str, note: str, *, actor: str, actor_kind: str,
-             token: str | None = None, request_id: str | None = None) -> dict:
-    """Append a note. A human note needs no lease; it cannot overwrite anything."""
+             token: str | None = None, request_id: str | None = None,
+             attachments: list[dict] = ()) -> dict:
+    """Append a note. A human note needs no lease; it cannot overwrite anything.
+
+    `attachments` are files already stored on disk, as `_attach` describes;
+    they hang off this note's event.
+    """
     key = (_scoped("annotate", issue_id, request_id)
-           or _derive(actor, "annotate", issue_id, token, note))
+           or _derive(actor, "annotate", issue_id, token, note, *_digests(attachments)))
 
     def body(s):
         issue = _get(s, issue_id, lock=True)
         now = store.db_now(s)
         if actor_kind == "agent":
             _check_token(s, issue, actor, token)
-        _event(s, issue.id, now, actor, actor_kind, "annotate", None, None, note, key)
+        ev = _event(s, issue.id, now, actor, actor_kind, "annotate", None, None, note, key)
+        _attach(s, issue, ev.id, attachments, actor, now)
         return _view(s, issue)
 
-    return _write(engine, key, body, _replay_view, [note, actor, actor_kind, token])
+    return _write(engine, key, body, _replay_view,
+                  [note, actor, actor_kind, token, *_digests(attachments)])
+
+
+def attachment(engine, attachment_id: int) -> dict:
+    """One attachment's metadata, `sha256` included so the caller can find the bytes."""
+    with store.session(engine) as s:
+        a = s.get(Attachment, attachment_id)
+        if a is None:
+            raise NotFound(f"no attachment {attachment_id}")
+        return _attachment_view(a) | {"sha256": a.sha256, "issue_id": a.issue_id}
 
 
 def link(engine, issue_id: str, ref: str, *, kind: str, actor: str, actor_kind: str,
@@ -384,7 +400,8 @@ def link(engine, issue_id: str, ref: str, *, kind: str, actor: str, actor_kind: 
 def create(engine, project: str, title: str, *, actor: str, actor_kind: str,
            body: str = "", state: str = "backlog", rank: int | None = None,
            labels: list[str] = (), workflow_id: int | None = None,
-           position: int | None = None, request_id: str | None = None) -> dict:
+           position: int | None = None, request_id: str | None = None,
+           attachments: list[dict] = ()) -> dict:
     if state not in CREATE_STATES:
         raise InvalidTransition(f"an issue is created {sorted(CREATE_STATES)}, not {state!r}")
     if (workflow_id is None) != (position is None):
@@ -393,13 +410,15 @@ def create(engine, project: str, title: str, *, actor: str, actor_kind: str,
     key = _scoped("create", project, request_id)
 
     def run(s):
+        now = store.db_now(s)
         issue = _create(s, project, title, actor, actor_kind, body, state, rank,
-                        labels, workflow_id, position, store.db_now(s), key)
+                        labels, workflow_id, position, now, key)
+        _attach(s, issue, None, attachments, actor, now)
         return _view(s, issue)
 
     return _write(engine, key, run, _replay_view,
                   [title, body, state, rank, sorted(set(labels)), workflow_id, position,
-                   actor, actor_kind])
+                   actor, actor_kind, *_digests(attachments)])
 
 
 def instantiate(engine, template: str, project: str, *, actor: str, actor_kind: str,
@@ -452,7 +471,8 @@ def edit(engine, issue_id: str, *, actor: str, expected_version: int,
          actor_kind: str = "human", preempt: bool = False, title: str | None = None,
          body: str | None = None, rank: int | None = None,
          labels: list[str] | None = None, state: str | None = None,
-         note: str | None = None, request_id: str | None = None) -> dict:
+         note: str | None = None, request_id: str | None = None,
+         attachments: list[dict] = ()) -> dict:
     """A change from the web UI (design section 6).
 
     Under someone else's lease this raises `LeaseHeld` unless `preempt`. On
@@ -485,6 +505,9 @@ def edit(engine, issue_id: str, *, actor: str, expected_version: int,
         if labels is not None and sorted(set(labels)) != [l.name for l in issue.labels]:
             issue.labels = [Label(name=n) for n in sorted(set(labels))]
             changed.append("labels")
+        if attachments:
+            _attach(s, issue, None, attachments, actor, now)
+            changed.append("attachments")
         if changed:
             issue.version += 1
             issue.updated_at = now
@@ -499,7 +522,7 @@ def edit(engine, issue_id: str, *, actor: str, expected_version: int,
     return _write(engine, request_id, run, _replay_view,
                   [expected_version, preempt, title, body, rank,
                    sorted(set(labels)) if labels is not None else None, state, note,
-                   actor, actor_kind])
+                   actor, actor_kind, *_digests(attachments)])
 
 
 # --- internals ------------------------------------------------------------------
@@ -620,10 +643,42 @@ def _lost_message(s, issue):
 def _event(s, issue_id, at, actor, actor_kind, kind, from_state, to_state, note, key):
     if actor_kind not in ACTOR_KINDS:
         raise BoardError(f"actor kind {actor_kind!r} is not one of {sorted(ACTOR_KINDS)}")
-    s.add(Event(issue_id=issue_id, at=at, actor=actor, actor_kind=actor_kind, kind=kind,
-                from_state=from_state, to_state=to_state, note=note,
-                idempotency_key=key))
+    ev = Event(issue_id=issue_id, at=at, actor=actor, actor_kind=actor_kind, kind=kind,
+               from_state=from_state, to_state=to_state, note=note, idempotency_key=key)
+    s.add(ev)
     s.flush()
+    return ev
+
+
+def _attach(s, issue, event_id, files, actor, now):
+    """Record files already written to disk: dicts of filename, content_type, size, sha256.
+
+    The digest names the file on disk, so it must be a SHA-256 and nothing else.
+    """
+    for f in files:
+        if not re.fullmatch(r"[0-9a-f]{64}", str(f["sha256"])):
+            raise BoardError(f"{f['filename']!r} has no valid SHA-256 digest")
+    for f in files:
+        s.add(Attachment(issue_id=issue.id, event_id=event_id, filename=f["filename"],
+                         content_type=f["content_type"], size=f["size"], sha256=f["sha256"],
+                         added_at=now, added_by=actor))
+    if files:
+        s.flush()
+
+
+def _digests(files):
+    """What identifies a call's files for a request hash: name and content.
+
+    A list to splat onto the hashed arguments. It is empty without files, so a
+    fileless call hashes as it did before attachments existed.
+    """
+    return [[[f["filename"], f["sha256"]] for f in files]] if files else []
+
+
+def _attachment_view(a):
+    return {"id": a.id, "filename": a.filename, "content_type": a.content_type,
+            "size": a.size, "event_id": a.event_id, "added_by": a.added_by,
+            "added_at": _iso(a.added_at)}
 
 
 def _has_key(s, key):
@@ -735,10 +790,13 @@ def _view(s, issue):
              "added_at": _iso(a.added_at)}
             for a in issue.artifacts
         ],
+        "attachments": [_attachment_view(a) for a in issue.attachments],
         "events": [
             {"id": e.id, "at": _iso(e.at), "actor": e.actor, "actor_kind": e.actor_kind,
              "kind": e.kind, "from_state": e.from_state, "to_state": e.to_state,
-             "note": e.note}
+             "note": e.note,
+             "attachments": [_attachment_view(a) for a in issue.attachments
+                             if a.event_id == e.id]}
             for e in issue.events
         ],
         "workflow": (_workflow_view(s, issue.workflow) | {"position": issue.position}

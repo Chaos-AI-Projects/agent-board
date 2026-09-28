@@ -99,6 +99,19 @@ An issue page shows its body as rendered markdown. The raw body is editable only
 "Edit body", and a save that never opened it posts the body unchanged. Both note fields are
 textareas.
 
+Files can be attached from the new-issue form, the Edit issue form and the Note form. A note's
+files show under that note in the history, and the rest are listed under Attachments on the issue
+page. The web page is the only way to upload; the CLI and MCP server cannot. Two settings govern it:
+
+- `BOARD_ATTACHMENT_DIR` is where the bytes go, one file per upload named by its SHA-256. Only the
+  metadata is in the database. Unset, the board refuses any upload with 422.
+- `BOARD_MAX_UPLOAD_MB`, default 25, caps each file. An over-cap upload gets 413 and saves nothing.
+
+`/attachments/<id>` serves PNG, JPEG, GIF and WebP inline, and the issue page shows them as
+thumbnails. Everything else downloads, SVG and HTML included, as `application/octet-stream` with
+`X-Content-Type-Options: nosniff` and a sandbox CSP. The board writes as whoever reads it, so an
+uploaded page opening on the board's origin could act as them.
+
 Every write goes through `board.core`. Who made it depends on whether a verifier is configured.
 
 With none configured, the board is in local mode. The human actor comes from Cloudflare Access's

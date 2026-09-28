@@ -234,6 +234,9 @@ class Issue(Base):
     labels: Mapped[list[Label]] = relationship(
         back_populates="issue", order_by="Label.name", cascade="all, delete-orphan"
     )
+    attachments: Mapped[list[Attachment]] = relationship(
+        back_populates="issue", order_by="Attachment.id", cascade="all, delete-orphan"
+    )
 
 
 class Event(Base):
@@ -270,6 +273,25 @@ class Artifact(Base):
     added_by: Mapped[str] = mapped_column(String(200))
 
     issue: Mapped[Issue] = relationship(back_populates="artifacts")
+
+
+class Attachment(Base):
+    """A file's metadata (MS-643). The bytes are on disk, named by `sha256`."""
+
+    __tablename__ = "attachment"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    issue_id: Mapped[str] = mapped_column(ForeignKey("issue.id"), index=True)
+    # Set when the file came with a note, so history shows it under that note.
+    event_id: Mapped[int | None] = mapped_column(EventId, ForeignKey("event.id"))
+    filename: Mapped[str] = mapped_column(String(255))
+    content_type: Mapped[str] = mapped_column(String(200))
+    size: Mapped[int] = mapped_column(BigInteger)
+    sha256: Mapped[str] = mapped_column(String(64))
+    added_at: Mapped[datetime] = mapped_column(Timestamp())
+    added_by: Mapped[str] = mapped_column(String(200))
+
+    issue: Mapped[Issue] = relationship(back_populates="attachments")
 
 
 class Label(Base):

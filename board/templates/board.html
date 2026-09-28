@@ -2,12 +2,13 @@
 {% block main %}
 <details>
   <summary>New issue</summary>
-  <form method="post" action="/issues">
+  <form method="post" action="/issues" enctype="multipart/form-data">
     <label>Project <select name="project">{% for p in view.projects %}<option value="{{ p.key }}">{{ p.key }} ({{ p.name }})</option>{% endfor %}</select></label>
     <label>Title <input name="title" required size="60"></label>
     <label>Body <textarea name="body"></textarea></label>
     <label>State <select name="state"><option>backlog</option><option>ready</option></select></label>
     <label>Labels <input name="labels" placeholder="comma, separated"></label>
+    <label>Files <input type="file" name="files" multiple></label>
     <button>Create</button>
   </form>
 </details>

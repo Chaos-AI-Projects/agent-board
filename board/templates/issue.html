@@ -54,13 +54,14 @@
 
 <details>
 <summary>Edit issue</summary>
-<form method="post" action="/issues/{{ issue.id }}/edit">
+<form method="post" action="/issues/{{ issue.id }}/edit" enctype="multipart/form-data">
   <input type="hidden" name="version" value="{{ issue.version }}">
   <label>Title <input name="title" value="{{ issue.title }}" size="60"></label>
   <label>Body <textarea name="body">{{ issue.body }}</textarea></label>
   <label>Rank <input name="rank" value="{{ issue.rank }}" size="6"></label>
   <label>Labels <input name="labels" value="{{ issue.labels|join(', ') }}"></label>
   <label>State <select name="state" data-current="{{ issue.state }}">{% for s in states %}<option{% if s == issue.state %} selected{% endif %}>{{ s }}</option>{% endfor %}</select></label>
+  <label>Attach files <input type="file" name="files" multiple></label>
   <label data-state-note>Note for the state change (done and need-input need one) <textarea name="note"></textarea></label>
   <button>Save</button>
 </form>
@@ -79,10 +80,23 @@
 </script>
 
 <h2>Note</h2>
-<form method="post" action="/issues/{{ issue.id }}/note">
-  <textarea name="note" required></textarea> <button>Add note</button>
+<form method="post" action="/issues/{{ issue.id }}/note" enctype="multipart/form-data">
+  <textarea name="note" required></textarea>
+  <label>Files <input type="file" name="files" multiple></label>
+  <button>Add note</button>
   <div>A note never needs the lease.</div>
 </form>
+
+{% macro files(list) %}{% if list %}
+<ul class="attachments">{% for a in list %}
+<li>{% if a.content_type in inline_types %}<a href="/attachments/{{ a.id }}"><img src="/attachments/{{ a.id }}" alt="{{ a.filename }}" class="thumb"></a><br>{% endif %}<a href="/attachments/{{ a.id }}">{{ a.filename }}</a> &middot; {{ a.size|filesize }} &middot; {{ a.added_by }}</li>
+{% endfor %}</ul>
+{% endif %}{% endmacro %}
+{% set issue_files = issue.attachments|selectattr("event_id", "none")|list %}
+{% if issue_files %}
+<h2>Attachments</h2>
+{{ files(issue_files) }}
+{% endif %}
 
 <h2>Artifacts</h2>
 <ul>{% for a in issue.artifacts %}<li>{{ a.kind }} {{ a.ref }}{% if a.closes %} (closes){% endif %} &middot; {{ a.added_by }}</li>{% endfor %}</ul>
@@ -94,6 +108,6 @@
 
 <h2>History</h2>
 <ul class="events">{% for e in issue.events %}
-<li>{{ e.at|localtime(tz) }} &middot; {{ e.actor }} ({{ e.actor_kind }}) &middot; {{ e.kind }}{% if e.from_state or e.to_state %} {{ e.from_state or "" }} &rarr; {{ e.to_state or "" }}{% endif %}{% if e.note and e.kind == "annotate" %}<div class="markdown">{{ e.note|markdown }}</div>{% elif e.note %}: {{ e.note }}{% endif %}</li>
+<li>{{ e.at|localtime(tz) }} &middot; {{ e.actor }} ({{ e.actor_kind }}) &middot; {{ e.kind }}{% if e.from_state or e.to_state %} {{ e.from_state or "" }} &rarr; {{ e.to_state or "" }}{% endif %}{% if e.note and e.kind == "annotate" %}<div class="markdown">{{ e.note|markdown }}</div>{% elif e.note %}: {{ e.note }}{% endif %}{{ files(e.attachments) }}</li>
 {% endfor %}</ul>
 {% endblock %}

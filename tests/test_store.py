@@ -15,6 +15,7 @@ TABLES = {
     "issue",
     "event",
     "artifact",
+    "attachment",
     "label",
     "workflow",
     "template",
@@ -353,3 +354,11 @@ def test_two_engines_on_one_file_wait_for_each_other(tmp_path):
     assert claimed is not None
     web_side.dispose()
     agent_side.dispose()
+
+
+def test_0004_adds_the_attachment_table_and_downgrade_drops_only_it(engine):
+    store.upgrade(engine, "0004")
+    assert "attachment" in inspect(engine).get_table_names()
+    store.downgrade(engine, "0003")
+    names = set(inspect(engine).get_table_names())
+    assert "attachment" not in names and TABLES - {"attachment"} <= names
