@@ -25,7 +25,8 @@ it back to `ready`.
 
 The board at `/` is a view only. Which projects and lanes it shows is saved per
 browser in the `board_prefs` cookie, set from `/preferences`, and searching is
-its own page at `/search`.
+its own page at `/search`. Projects are created, renamed and deleted at
+`/projects`; only the name can change, and only an empty project can go.
 
 Times are stored in UTC and shown in a zone: the one saved in `board_prefs`,
 else `BOARD_TIMEZONE`, else UTC. An unknown name in either is skipped, and
@@ -413,6 +414,30 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None) -> 
         r.set_cookie(PREFS_COOKIE, quote(json.dumps(prefs, separators=(",", ":")), safe=""),
                      max_age=PREFS_MAX_AGE, samesite="lax", httponly=True)
         return r
+
+    @app.get("/projects", response_class=HTMLResponse)
+    def projects_page(request: Request):
+        return page(request, "projects.html", projects=core.projects(engine))
+
+    @app.post("/projects")
+    async def create_project(request: Request):
+        await run_in_threadpool(actor, request)
+        f = await request.form()
+        core.create_project(engine, f.get("key", ""), f.get("name", ""))
+        return RedirectResponse("/projects", status_code=303)
+
+    @app.post("/projects/{key}/rename")
+    async def rename_project(request: Request, key: str):
+        await run_in_threadpool(actor, request)
+        f = await request.form()
+        core.rename_project(engine, key, f.get("name", ""))
+        return RedirectResponse("/projects", status_code=303)
+
+    @app.post("/projects/{key}/delete")
+    def delete_project(request: Request, key: str):
+        actor(request)
+        core.delete_project(engine, key)
+        return RedirectResponse("/projects", status_code=303)
 
     @app.get("/workflows/{workflow_id}")
     def workflow_page(workflow_id: int):

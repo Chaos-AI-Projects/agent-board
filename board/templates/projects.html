@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Projects -- agent-board{% endblock %}
+{% block main %}
+<table class="projects">
+  <tr><th>Key</th><th>Name</th><th>Issues</th><th></th></tr>
+  {% for p in projects %}<tr data-key="{{ p.key }}">
+    <td>{{ p.key }}</td>
+    <td><form class="inline" method="post" action="/projects/{{ p.key | urlencode }}/rename"><input name="name" value="{{ p.name }}" required maxlength="200"> <button>Rename</button></form></td>
+    <td>{{ p.issues }}</td>
+    <td>{% if p.issues == 0 %}<form class="inline" method="post" action="/projects/{{ p.key | urlencode }}/delete"><button>Delete</button></form>{% endif %}</td>
+  </tr>{% endfor %}
+</table>
+<p>The key is the prefix of every issue id, so it cannot change. A project can be deleted only while it has no issues.</p>
+<form method="post" action="/projects">
+  <fieldset><legend>New project</legend>
+  <label>Key <input name="key" required maxlength="16" pattern="[A-Z][A-Z0-9]*" placeholder="MS"></label>
+  <label>Name <input name="name" required maxlength="200" placeholder="memory-solution"></label>
+  <button>Create</button>
+  </fieldset>
+</form>
+{% endblock %}

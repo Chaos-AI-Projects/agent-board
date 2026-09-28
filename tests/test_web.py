@@ -752,9 +752,10 @@ def test_the_board_has_no_search_and_ignores_filter_params(client, board):
 
 def test_every_page_header_links_to_search_and_preferences(client, board):
     iid = ready(board)
-    for path in ("/", f"/issues/{iid}", "/search", "/preferences"):
+    for path in ("/", f"/issues/{iid}", "/search", "/preferences", "/projects"):
         header = re.search(r"<header>.*?</header>", client.get(path).text, re.S).group(0)
         assert 'href="/search"' in header and 'href="/preferences"' in header
+        assert 'href="/projects"' in header
 
 
 def test_search_lists_hits_by_q_linking_to_their_issue_pages(client, board):
@@ -1027,3 +1028,85 @@ def test_lease_expiry_renders_in_the_chosen_zone(board, monkeypatch):
     refused = client.post(f"/issues/{iid}/edit", data=edit_form(core.show(board, iid), body="x"),
                           headers=AS_CHAOS)
     assert refused.status_code == 409 and f"until {want}" in refused.text
+
+
+# --- managing projects (MS-642) ----------------------------------------------
+
+
+def project_row(html, key):
+    m = re.search(rf'<tr data-key="{key}">.*?</tr>', html, re.S)
+    assert m, f"no row for {key}"
+    return m.group(0)
+
+
+def test_the_projects_page_lists_key_name_and_issue_count(client, board):
+    core.create_project(board, "BR", "brain")
+    ready(board)
+    html = client.get("/projects").text
+    ms, br = project_row(html, "MS"), project_row(html, "BR")
+    assert "memory-solution" in ms and "<td>1</td>" in ms
+    assert "brain" in br and "<td>0</td>" in br
+    assert html.index('data-key="BR"') < html.index('data-key="MS"')
+
+
+def test_the_projects_page_offers_rename_of_the_name_only(client, board):
+    row = project_row(client.get("/projects").text, "MS")
+    assert 'action="/projects/MS/rename"' in row
+    rename = re.search(r'<form[^>]*/rename".*?</form>', row, re.S).group(0)
+    assert 'name="name"' in rename and 'name="key"' not in rename
+
+
+def test_delete_is_offered_only_for_a_project_with_no_issues(client, board):
+    core.create_project(board, "BR", "brain")
+    ready(board)
+    html = client.get("/projects").text
+    assert 'action="/projects/BR/delete"' in project_row(html, "BR")
+    assert "/delete" not in project_row(html, "MS")
+
+
+def test_creating_a_project_from_the_page(client, board):
+    r = client.post("/projects", data={"key": "BR", "name": "brain"}, headers=AS_CHAOS)
+    assert r.status_code == 303 and r.headers["location"] == "/projects"
+    assert {"key": "BR", "name": "brain", "issues": 0} in core.projects(board)
+
+
+def test_a_taken_key_shows_the_error_page(client, board):
+    r = client.post("/projects", data={"key": "MS", "name": "again"}, headers=AS_CHAOS)
+    assert r.status_code == 409 and "already exists" in r.text
+    assert core.projects(board)[0]["name"] == "memory-solution"
+
+
+def test_renaming_a_project_from_the_page(client, board):
+    iid = ready(board)
+    r = client.post("/projects/MS/rename", data={"name": "memory"}, headers=AS_CHAOS)
+    assert r.status_code == 303 and r.headers["location"] == "/projects"
+    assert core.projects(board)[0]["name"] == "memory"
+    assert core.show(board, iid)["project"] == "MS"
+
+
+def test_deleting_a_project_from_the_page(client, board):
+    core.create_project(board, "BR", "brain")
+    r = client.post("/projects/BR/delete", headers=AS_CHAOS)
+    assert r.status_code == 303
+    assert [p["key"] for p in core.projects(board)] == ["MS"]
+
+
+def test_deleting_a_project_with_issues_is_refused(client, board):
+    ready(board)
+    r = client.post("/projects/MS/delete", headers=AS_CHAOS)
+    assert r.status_code == 422 and "1 issue" in r.text
+    assert [p["key"] for p in core.projects(board)] == ["MS"]
+
+
+@pytest.mark.parametrize("path,data", [("/projects", {"key": "BR", "name": "brain"}),
+                                       ("/projects/MS/rename", {"name": "x"}),
+                                       ("/projects/MS/delete", {})])
+def test_project_writes_need_an_actor_and_the_same_origin(client, board, monkeypatch, path, data):
+    monkeypatch.delenv(web.ACTOR_ENV, raising=False)
+    core.create_project(board, "ZZ", "empty")
+    path = path.replace("MS", "ZZ")
+    assert client.post(path, data=data).status_code == 401
+    r = client.post(path, data=data, headers=AS_CHAOS | {"origin": "https://evil.example"})
+    assert r.status_code == 403
+    assert core.projects(board) == [{"key": "MS", "name": "memory-solution", "issues": 0},
+                                    {"key": "ZZ", "name": "empty", "issues": 0}]

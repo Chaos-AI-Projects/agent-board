@@ -514,6 +514,70 @@ def test_a_second_project_with_a_taken_key_is_a_conflict(board):
     assert [p["key"] for p in core.overview(board)["projects"]] == ["MS"]
 
 
+# --- managing projects (MS-642) ----------------------------------------------
+
+
+def test_projects_lists_each_with_its_issue_count(board):
+    core.create_project(board, "BR", "brain")
+    ready(board)
+    ready(board)
+    assert core.projects(board) == [{"key": "BR", "name": "brain", "issues": 0},
+                                    {"key": "MS", "name": "memory-solution", "issues": 2}]
+
+
+def test_rename_project_changes_the_name_and_keeps_the_key_and_ids(board):
+    iid = ready(board)
+    assert core.rename_project(board, "MS", "  memory ") == {"key": "MS", "name": "memory"}
+    assert core.projects(board) == [{"key": "MS", "name": "memory", "issues": 1}]
+    assert core.show(board, iid)["project"] == "MS"
+
+
+def test_rename_project_refuses_a_blank_name_and_an_unknown_key(board):
+    with pytest.raises(core.BoardError):
+        core.rename_project(board, "MS", "   ")
+    with pytest.raises(core.NotFound):
+        core.rename_project(board, "ZZ", "nope")
+    assert core.projects(board)[0]["name"] == "memory-solution"
+
+
+def test_delete_project_removes_an_empty_project(board):
+    core.create_project(board, "BR", "brain")
+    core.delete_project(board, "BR")
+    assert [p["key"] for p in core.projects(board)] == ["MS"]
+    with pytest.raises(core.NotFound):
+        core.delete_project(board, "BR")
+
+
+def test_delete_project_refuses_a_project_with_issues(board):
+    ready(board)
+    with pytest.raises(core.BoardError, match="1 issue"):
+        core.delete_project(board, "MS")
+    assert [p["key"] for p in core.projects(board)] == ["MS"]
+
+
+@pytest.mark.parametrize("key", ["a/b", "..", "ms", "M S", "1AB", "A" * 17])
+def test_create_project_refuses_a_key_that_is_not_a_short_uppercase_word(board, key):
+    """The key is a path segment in every issue URL, so a `/` would strand the project."""
+    with pytest.raises(core.BoardError, match="key"):
+        core.create_project(board, key, "x")
+    assert [p["key"] for p in core.projects(board)] == ["MS"]
+
+
+def test_project_names_over_200_characters_are_refused(board):
+    with pytest.raises(core.BoardError, match="200"):
+        core.create_project(board, "BR", "n" * 201)
+    with pytest.raises(core.BoardError, match="200"):
+        core.rename_project(board, "MS", "n" * 201)
+    core.create_project(board, "A1" + "B" * 14, "n" * 200)
+
+
+def test_create_project_refuses_a_blank_key_or_name(board):
+    for key, name in (("", "x"), ("  ", "x"), ("BR", ""), ("BR", "  ")):
+        with pytest.raises(core.BoardError):
+            core.create_project(board, key, name)
+    assert [p["key"] for p in core.projects(board)] == ["MS"]
+
+
 # --- search and filters (MS-629) ---------------------------------------------
 
 

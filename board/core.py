@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import secrets
 from datetime import timedelta
 
@@ -43,6 +44,9 @@ NOTE_REQUIRED = {"done", "need-input"}
 CREATE_STATES = {"backlog", "ready"}
 ARTIFACT_KINDS = {"commit", "pr", "path", "url"}
 ACTOR_KINDS = {"agent", "human", "system"}
+# Matches the width of store.Project's columns.
+PROJECT_KEY = re.compile(r"[A-Z][A-Z0-9]{0,15}")
+PROJECT_NAME_MAX = 200
 
 
 class BoardError(Exception):
@@ -83,12 +87,64 @@ class LeaseHeld(Conflict):
 
 
 def create_project(engine, key: str, name: str) -> dict:
+    key, name = key.strip(), _project_name(name)
+    if not PROJECT_KEY.fullmatch(key):
+        # The key is a path segment in every issue URL, so a `/` or `..` would
+        # leave a project no page can reach.
+        raise BoardError(f"a project key is 1-16 of A-Z and 0-9, starting with a letter; "
+                         f"not {key!r}")
     try:
         with store.session(engine) as s, s.begin():
             s.add(Project(key=key, name=name))
     except IntegrityError:
         raise Conflict(f"project {key!r} already exists") from None
     return {"key": key, "name": name}
+
+
+def projects(engine) -> list[dict]:
+    """Every project in key order, with how many issues it holds."""
+    count = (select(func.count()).where(Issue.project_key == Project.key)
+             .correlate(Project).scalar_subquery())
+    with store.session(engine) as s:
+        rows = s.execute(select(Project.key, Project.name, count).order_by(Project.key))
+        return [{"key": k, "name": n, "issues": c} for k, n, c in rows]
+
+
+def rename_project(engine, key: str, name: str) -> dict:
+    """A new name for a project. The key cannot change: every issue id carries it."""
+    name = _project_name(name)
+    with store.session(engine) as s, s.begin():
+        project = s.get(Project, key)
+        if project is None:
+            raise NotFound(f"no project {key!r}")
+        project.name = name
+    return {"key": key, "name": name}
+
+
+def delete_project(engine, key: str) -> None:
+    """Remove a project with no issues; one with issues is refused."""
+    try:
+        with store.session(engine) as s, s.begin():
+            project = s.get(Project, key, with_for_update=True)
+            if project is None:
+                raise NotFound(f"no project {key!r}")
+            held = s.scalar(select(func.count()).where(Issue.project_key == key))
+            if held:
+                raise BoardError(f"project {key!r} still has {held} "
+                                 f"issue{'' if held == 1 else 's'}; only an empty one can go")
+            s.delete(project)
+    except IntegrityError:
+        # An issue created between the count and the delete; the foreign key refuses it.
+        raise BoardError(f"project {key!r} gained an issue; only an empty one can go") from None
+
+
+def _project_name(name: str) -> str:
+    name = name.strip()
+    if not name:
+        raise BoardError("a project needs a name")
+    if len(name) > PROJECT_NAME_MAX:
+        raise BoardError(f"a project name is at most {PROJECT_NAME_MAX} characters")
+    return name
 
 
 def create_template(engine, name: str, title: str, steps: list[str]) -> dict:
