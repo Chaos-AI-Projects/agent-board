@@ -256,11 +256,11 @@ def test_the_issue_page_draws_its_workflow_as_a_mermaid_flowchart(board, client)
     src = mermaid_source(html).splitlines()
     assert src[0].strip() == "flowchart LR"
     ids = [st["id"] for st in wf["steps"]]
-    nodes = [l.strip() for l in src if re.match(r"\s*s\d+\[", l)]
+    nodes = [l.strip() for l in src if re.match(r"\s*s\d+\(", l)]
     assert len(nodes) == len(ids)
     # One node per step in position order, labelled id, title and state.
     for n, (node, st) in enumerate(zip(nodes, wf["steps"])):
-        assert node.startswith(f's{n}["')
+        assert node.startswith(f's{n}("')
         assert core.show(board, st["id"])["state"] in node
         assert st["title"] in node
     assert "-->".join(f"s{n}" for n in range(len(ids))) in "".join(
@@ -282,8 +282,8 @@ def test_the_issue_page_draws_its_workflow_as_a_mermaid_flowchart(board, client)
 
 
 def step_lists(section):
-    """The step ids the workflow section lists: (visible, behind the expander)."""
-    m = re.search(r"<details[^>]*>(.*?)</details>", section, re.S)
+    """The step ids the list shows once opened: (in the window, behind "Show N more")."""
+    m = re.search(r'<details class="workflow-more"[^>]*>(.*?)</details>', section, re.S)
     hidden = re.findall(r'data-step="([^"]+)"', m.group(1)) if m else []
     visible = re.findall(r'data-step="([^"]+)"', section.replace(m.group(0), "") if m else section)
     return visible, hidden
@@ -297,15 +297,14 @@ def test_a_workflow_of_four_steps_keeps_its_diagram(board, client):
     assert visible == [st["id"] for st in wf["steps"]] and hidden == []
 
 
-def test_a_workflow_over_four_steps_is_a_list_without_the_diagram(board, client):
+def test_a_workflow_over_four_steps_still_draws_its_diagram(board, client):
+    # MS-645: the chart shows at every size; windowing replaced the >4 cut-off.
     wf = release(board, [f"step {n}" for n in range(1, 6)])
     html = client.get(f"/issues/{wf['steps'][0]['id']}").text
-    assert 'class="mermaid"' not in html
-    assert "mermaid.min.js" not in html
-    section = workflow_section(html)
-    visible, hidden = step_lists(section)
+    assert '<pre class="mermaid"' in html and "mermaid.min.js" in html
+    visible, hidden = step_lists(workflow_section(html))
     assert visible == [st["id"] for st in wf["steps"]] and hidden == []
-    assert "<details" not in section
+    assert '<details class="workflow-more"' not in workflow_section(html)
 
 
 def test_a_long_workflow_shows_ten_steps_and_the_rest_behind_show_more(board, client):
@@ -344,6 +343,112 @@ def test_a_middle_steps_window_starts_four_before_it(board, client):
     assert '<ol class="workflow-steps" start="13"' in section
 
 
+# --- MS-645: the workflow as a BPMN-style chart, distant steps collapsed -----------
+
+
+def chart(wf, here):
+    """(task node ids in order, collapse nodes by id, the one sequence-flow chain)."""
+    src = [l.strip() for l in web.workflow_diagram(wf, here).splitlines()]
+    tasks = [re.match(r"(s\d+)\(", l).group(1) for l in src if re.match(r"s\d+\(", l)]
+    more = {m.group(1): unescape_label(m.group(2)) for l in src
+            if (m := re.fullmatch(r'(more_\w+)\["(.*)"\]', l))}
+    chains = [l for l in src if "-->" in l]
+    assert len(chains) == 1, chains
+    return tasks, more, [n.strip() for n in chains[0].split("-->")], src
+
+
+def unescape_label(label):
+    """A Mermaid label as it renders: `#N;` entity codes decoded, markdown escapes dropped."""
+    text = re.sub(r"#(\d+);", lambda m: chr(int(m.group(1))), label)
+    return text.replace("\\", "")
+
+
+def fake_wf(n, done=0):
+    return {"steps": [{"id": f"MS-{i + 1}", "title": f"step {i + 1}",
+                       "state": "done" if i < done else "ready"} for i in range(n)]}
+
+
+def test_the_chart_opens_with_a_start_event_and_closes_with_an_end_event():
+    tasks, more, chain, src = chart(fake_wf(3), "MS-2")
+    assert src[0] == "flowchart LR"
+    assert chain == ["ev_start", "s0", "s1", "s2", "ev_end"]
+    # BPMN notation drawn in flowchart shapes: a circle, rounded tasks, a double circle.
+    assert any(re.fullmatch(r'ev_start\(\(".*"\)\)', l) for l in src)
+    assert any(re.fullmatch(r'ev_end\(\(\(".*"\)\)\)', l) for l in src)
+    assert tasks == ["s0", "s1", "s2"] and more == {}
+    # `end` is a Mermaid keyword, so no node may be called that.
+    assert not any(re.match(r"end\b", l) for l in src)
+
+
+def test_a_twelve_step_workflow_draws_seven_tasks_between_two_collapse_nodes():
+    tasks, more, chain, src = chart(fake_wf(12), "MS-6")
+    # Step 6 is s5; the window is it and three either side.
+    assert tasks == [f"s{n}" for n in range(2, 9)]
+    assert more == {"more_before": "+2 earlier", "more_after": "+3 later"}
+    assert chain == ["ev_start", "more_before"] + tasks + ["more_after", "ev_end"]
+    assert "class s5 here" in src
+    # A collapse node opens the full step list below the chart.
+    clicks = {l for l in src if l.startswith("click more_")}
+    assert clicks == {'click more_before "#workflow-steps"',
+                      'click more_after "#workflow-steps"'}
+    assert "class more_before more" in src and "class more_after more" in src
+
+
+@pytest.mark.parametrize("here, window, before, after", [
+    ("MS-1", range(0, 7), None, "+5 later"),
+    ("MS-2", range(0, 7), None, "+5 later"),
+    ("MS-12", range(5, 12), "+5 earlier", None),
+    ("MS-10", range(5, 12), "+5 earlier", None),
+])
+def test_at_either_end_the_window_still_holds_seven_tasks(here, window, before, after):
+    tasks, more, chain, _ = chart(fake_wf(12), here)
+    assert tasks == [f"s{n}" for n in window]
+    assert more.get("more_before") == before and more.get("more_after") == after
+    assert chain[0] == "ev_start" and chain[-1] == "ev_end"
+
+
+def test_seven_steps_or_fewer_collapse_nothing():
+    tasks, more, _, _ = chart(fake_wf(7), "MS-7")
+    assert tasks == [f"s{n}" for n in range(7)] and more == {}
+
+
+def test_an_origin_page_centres_on_the_first_step_not_done():
+    # The origin issue is not a step, so the window follows the work instead.
+    tasks, more, _, src = chart(fake_wf(12, done=8), "MS-99")
+    assert tasks == [f"s{n}" for n in range(5, 12)]
+    assert more == {"more_before": "+5 earlier"}
+    assert not any(l.endswith(" here") and l.startswith("class ") for l in src)
+    tasks, more, _, _ = chart(fake_wf(12, done=12), "MS-99")
+    assert tasks == [f"s{n}" for n in range(7)]
+
+
+def test_an_origin_page_with_a_long_plan_draws_the_chart_and_lists_every_step(board, client):
+    iid = ready(board, "big job")
+    view = core.plan(board, iid, [{"title": f"part {n}"} for n in range(1, 13)],
+                     actor=CHAOS, actor_kind=HUMAN)
+    ids = [s["id"] for s in view["plan"]["steps"]]
+    html = client.get(f"/issues/{iid}").text
+    src = mermaid_source(html)
+    assert "more_after" in src and "more_before" not in src
+    # The full list stays reachable under the chart, collapsed, as the collapse nodes' target.
+    section = workflow_section(html)
+    m = re.search(r'<details class="workflow-list" id="workflow-steps">(.*)</details>',
+                  section, re.S)
+    assert m, "the step list is not collapsed under the chart"
+    assert re.findall(r'data-step="([^"]+)"', m.group(1)) == ids
+    assert section.index('<pre class="mermaid"') < section.index('id="workflow-steps"')
+
+
+def test_a_collapse_node_label_is_escaped_like_a_step_label():
+    src = web.workflow_diagram(fake_wf(12), "MS-1")
+    node = next(l.strip() for l in src.splitlines() if l.strip().startswith("more_after["))
+    label = re.fullmatch(r'more_after\["(.*)"\]', node).group(1)
+    assert re.fullmatch(r"[A-Za-z0-9 #;]*", label), label
+    # One line, so mermaid 11.4.1 renders no markdown there: a `#92;` escape would
+    # show as a literal backslash (checked in jsdom), unlike a step's 3-line label.
+    assert label == "#43;5 later"
+
+
 HOSTILE = 'a "quoted" [bracket] --> x;\nclick s0 "javascript:alert(1)" %%{init}%% <b>'
 
 
@@ -354,12 +459,12 @@ def test_a_hostile_step_title_cannot_break_or_inject_into_the_diagram(board, cli
     src = mermaid_source(client.get(f"/issues/{build}").text)
     lines = [l.strip() for l in src.splitlines()]
     # Still exactly two nodes, one edge, two clicks: nothing the title said became syntax.
-    assert len([l for l in lines if re.match(r"s\d+\[", l)]) == 2
+    assert len([l for l in lines if re.match(r"s\d+\(", l)]) == 2
     assert [l for l in lines if l.startswith("click ")] == [
         f'click s0 "/issues/{build}"', f'click s1 "/issues/{wf["steps"][1]["id"]}"']
     assert "javascript" not in "".join(l for l in lines if l.startswith("click "))
-    node = next(l for l in lines if l.startswith("s0["))
-    label = re.fullmatch(r's0\["(.*)"\]', node).group(1)
+    node = next(l for l in lines if l.startswith("s0("))
+    label = re.fullmatch(r's0\("(.*)"\)', node).group(1)
     # Every character that means anything to Mermaid is an entity code.
     assert re.fullmatch(r'[A-Za-z0-9 #;]*(<br/>[A-Za-z0-9 #;]*)*', label), label
     assert "-->" not in label and "%%" not in label

@@ -84,8 +84,10 @@ its own server, apart from doc-review. The kanban has one column per lifecycle s
 order `backlog`, `ready`, `need-input`, `processing`, `onhold`, `done`, `cancelled`. A workflow
 is one card, in the column its computed state picks, showing its step count and current step.
 Clicking it opens the issue page of its current step, or of its first step once every step is
-done. A step's issue page shows its workflow above the body: a Mermaid diagram with that step
-outlined, and the step list in position order as the no-JS fallback. `/workflows/<id>` redirects to
+done. A step's issue page shows its workflow above the body as a BPMN-style Mermaid chart: a start
+event, one task per step with that step outlined, and an end event. The chart draws the step and
+three either side; the steps beyond collapse into a "+N earlier" or "+N later" node, which opens
+the full step list kept collapsed under the chart as the no-JS fallback. `/workflows/<id>` redirects to
 the same issue page the card opens. Loose issues sit below the workflows in each column, and dragging one to another column
 is a state change.
 

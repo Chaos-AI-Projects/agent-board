@@ -186,8 +186,10 @@ def workflow_target(wf: dict) -> str | None:
     return (open_steps or steps or [{"id": None}])[0]["id"]
 
 
-# Above this many steps the diagram is unreadable, so the page shows only the list.
-DIAGRAM_MAX_STEPS = 4
+# The chart draws this many steps either side of the current one; the rest collapse.
+DIAGRAM_REACH = 3
+# The collapsed full step list under the chart, which a collapse node opens.
+STEP_LIST_ANCHOR = "workflow-steps"
 # How many steps of a long workflow's list show before "Show N more".
 LIST_WINDOW = 10
 
@@ -209,30 +211,74 @@ def workflow_list(wf: dict, here: str | None) -> dict:
             "after": (hi + 1, steps[hi:]), "hidden": lo + len(steps[hi:])}
 
 
-def workflow_diagram(wf: dict, here: str | None) -> str:
-    """The workflow as Mermaid `flowchart LR` source, one clickable node per step.
+def _diagram_window(wf: dict, here: str | None) -> tuple[int, int]:
+    """The `[lo, hi)` slice of steps the chart draws.
 
-    Node ids are positional (`s0`, `s1`, ...) so no issue id is ever parsed as
-    syntax; the id, title and state appear only inside the escaped label.
-    The step whose id is `here` is the one outlined.
+    It centres on the step whose id is `here`, else (an origin issue's page)
+    on the step the workflow's link opens, and is clamped to the list so it
+    always holds `2 * DIAGRAM_REACH + 1` steps when there are that many.
+    """
+    steps = wf["steps"]
+    ids = [st["id"] for st in steps]
+    centre = here if here in ids else workflow_target(wf)
+    at = ids.index(centre) if centre in ids else 0
+    width = 2 * DIAGRAM_REACH + 1
+    lo = min(max(0, at - DIAGRAM_REACH), max(0, len(steps) - width))
+    return lo, min(len(steps), lo + width)
+
+
+def workflow_diagram(wf: dict, here: str | None) -> str:
+    """The workflow as Mermaid `flowchart LR` source in BPMN notation (MS-645).
+
+    A start event (circle), one rounded task per step, an end event (double
+    circle), joined by one sequence flow; the workflow is strictly ordered, so
+    there are no gateways. Only the window around the current step is drawn:
+    the steps outside it collapse into a "+N earlier" / "+N later" node that
+    opens the full step list. Node ids are positional (`s0`, `s1`, ...) so no
+    issue id is ever parsed as syntax; the id, title and state appear only
+    inside the escaped label. The step whose id is `here` is the one outlined.
     """
     lines = ["flowchart LR"]
     for state, fill in _STATE_FILLS.items():
         lines.append(f"  classDef {_state_class(state)} fill:{fill},stroke:#42526e")
     lines.append("  classDef here stroke:#0052cc,stroke-width:3px")
+    lines.append("  classDef event fill:#ffffff,stroke:#42526e,stroke-width:2px")
+    lines.append("  classDef more fill:#ffffff,stroke:#6b778c,stroke-dasharray:4 3")
     steps = wf["steps"]
-    for n, step in enumerate(steps):
+    lo, hi = _diagram_window(wf, here)
+    # `end` is a flowchart keyword, so the events carry a prefix. The event and
+    # collapse labels are one line, which mermaid renders without markdown, so
+    # they take a bare `#43;` for `+`: `_mermaid_text`'s `#92;` would show.
+    lines.append('  ev_start(("start"))')
+    chain = ["ev_start"]
+    if lo:
+        lines.append(f'  more_before["#43;{lo} earlier"]')
+        chain.append("more_before")
+    for n in range(lo, hi):
+        step = steps[n]
         label = "<br/>".join(_mermaid_text(part)
                              for part in (step["id"], step["title"], step["state"]))
-        lines.append(f'  s{n}["{label}"]')
-    if len(steps) > 1:
-        lines.append("  " + " --> ".join(f"s{n}" for n in range(len(steps))))
-    for n, step in enumerate(steps):
+        lines.append(f'  s{n}("{label}")')
+        chain.append(f"s{n}")
+    if hi < len(steps):
+        lines.append(f'  more_after["#43;{len(steps) - hi} later"]')
+        chain.append("more_after")
+    lines.append('  ev_end((("end")))')
+    chain.append("ev_end")
+    lines.append("  " + " --> ".join(chain))
+    for n in range(lo, hi):
+        step = steps[n]
         lines.append(f'  click s{n} "/issues/{quote(step["id"], safe="")}"')
         # One class per line: Mermaid reads `a,b` as a single class name.
         lines.append(f"  class s{n} {_state_class(step['state'])}")
         if step["id"] == here:
             lines.append(f"  class s{n} here")
+    for node in ("more_before", "more_after"):
+        if node in chain:
+            lines.append(f'  click {node} "#{STEP_LIST_ANCHOR}"')
+            lines.append(f"  class {node} more")
+    lines.append("  class ev_start event")
+    lines.append("  class ev_end event")
     return "\n".join(lines)
 
 
@@ -546,8 +592,7 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None) -> 
         wf = issue["workflow"] or issue["plan"]
         return page(request, "issue.html", issue=issue, now=core.overview(engine)["now"],
                     states=list(core.TRANSITIONS), wf=wf,
-                    diagram=(workflow_diagram(wf, issue["id"])
-                             if wf and len(wf["steps"]) <= DIAGRAM_MAX_STEPS else None),
+                    diagram=workflow_diagram(wf, issue["id"]) if wf else None,
                     steps=workflow_list(wf, issue["id"]) if wf else None)
 
     @app.post("/issues")

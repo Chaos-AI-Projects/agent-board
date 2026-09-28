@@ -32,6 +32,9 @@
 {{ diagram }}
 </pre>
 {% endif %}
+{# The chart's "+N earlier" / "+N later" nodes link here (web.STEP_LIST_ANCHOR). #}
+<details class="workflow-list" id="workflow-steps">
+<summary>All {{ wf.steps|length }} step{{ "" if wf.steps|length == 1 else "s" }}</summary>
 {{ step_list(steps.shown) }}
 {% if steps.hidden %}
 <details class="workflow-more">
@@ -40,6 +43,7 @@
 {% if steps.after[1] %}{{ step_list(steps.after) }}{% endif %}
 </details>
 {% endif %}
+</details>
 </section>
 {% if diagram %}
 <script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
@@ -47,6 +51,18 @@
   // strict: labels are sanitised and click links are URL-checked; only the
   // callback form of `click` needs loose, and the diagram uses none.
   if (window.mermaid) mermaid.initialize({startOnLoad: true, securityLevel: "strict"});
+  // A collapse node links to #workflow-steps; open the list, and its "Show N more",
+  // on every click, since a repeat click to the same hash fires no hashchange.
+  function openStepList() {
+    document.querySelectorAll("#workflow-steps, #workflow-steps details")
+      .forEach(function (d) { d.open = true; });
+  }
+  document.addEventListener("click", function (e) {
+    var a = e.target.closest ? e.target.closest("a") : null;
+    var href = a ? (a.getAttribute("href") || a.getAttribute("xlink:href") || "") : "";
+    if (href === "#workflow-steps") openStepList();
+  });
+  if (location.hash === "#workflow-steps") openStepList();
 </script>
 {% endif %}
 {% endif %}
