@@ -80,6 +80,6 @@
 
 <h2>History</h2>
 <ul class="events">{% for e in issue.events %}
-<li>{{ e.at }} &middot; {{ e.actor }} ({{ e.actor_kind }}) &middot; {{ e.kind }}{% if e.from_state or e.to_state %} {{ e.from_state or "" }} &rarr; {{ e.to_state or "" }}{% endif %}{% if e.note and e.kind == "annotate" %}<div class="markdown">{{ e.note|markdown }}</div>{% elif e.note %}: {{ e.note }}{% endif %}</li>
+<li>{{ e.at|localtime(tz) }} &middot; {{ e.actor }} ({{ e.actor_kind }}) &middot; {{ e.kind }}{% if e.from_state or e.to_state %} {{ e.from_state or "" }} &rarr; {{ e.to_state or "" }}{% endif %}{% if e.note and e.kind == "annotate" %}<div class="markdown">{{ e.note|markdown }}</div>{% elif e.note %}: {{ e.note }}{% endif %}</li>
 {% endfor %}</ul>
 {% endblock %}

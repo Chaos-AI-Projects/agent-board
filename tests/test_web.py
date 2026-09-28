@@ -9,8 +9,10 @@ Release hands it back to the queue.
 
 import json
 import re
-from datetime import timedelta
+from datetime import datetime, timedelta
 from html import unescape
+from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi.testclient import TestClient
@@ -29,6 +31,7 @@ def default_hosts(monkeypatch):
     """Every test starts on the default port with no tunnel hosts."""
     monkeypatch.delenv(web.PORT_ENV, raising=False)
     monkeypatch.delenv(web.HOSTS_ENV, raising=False)
+    monkeypatch.delenv(web.TZ_ENV, raising=False)
 
 
 @pytest.fixture
@@ -770,7 +773,7 @@ def test_saving_preferences_sets_a_lax_year_long_cookie(client, board):
     assert "samesite=lax" in cookie.lower()
     assert "max-age=31536000" in cookie.lower()
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
-        "projects": ["BR"], "lanes": ["ready", "done"]}
+        "projects": ["BR"], "lanes": ["ready", "done"], "timezone": ""}
 
 
 def test_the_board_shows_only_the_saved_projects_and_lanes(client, board):
@@ -844,7 +847,7 @@ def test_saving_keeps_only_known_projects_and_lanes(client, board):
     client.post("/preferences", data={"project": ["BR", "ZZ"] * 300,
                                       "lane": ["done", "bogus", "ready"]})
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
-        "projects": ["BR"], "lanes": ["ready", "done"]}
+        "projects": ["BR"], "lanes": ["ready", "done"], "timezone": ""}
 
 
 def test_preferences_are_a_same_origin_post_only(client, board):
@@ -873,3 +876,91 @@ def test_ms637_the_hidden_attribute_beats_label_display_block(board, client):
     """`label { display: block }` outranks the UA's [hidden] rule, so JS hiding needs this."""
     html = client.get(f"/issues/{ready(board)}").text
     assert re.search(r"\[hidden\]\s*\{\s*display:\s*none\s*!important;?\s*\}", html)
+
+
+# --- history times in local time (MS-640) --------------------------------------
+
+
+def history_times(html):
+    return re.findall(r"<li>(\S+ \S+ \S+) &middot;", html)
+
+
+def tz_client(board, monkeypatch, env=None):
+    if env is not None:
+        monkeypatch.setenv(web.TZ_ENV, env)
+    return local_client(board)
+
+
+def with_tz_cookie(client, value):
+    client.cookies.set(web.PREFS_COOKIE, quote(json.dumps({"timezone": value}), safe=""))
+    return client
+
+
+def test_localtime_renders_minutes_and_the_zone_abbreviation():
+    at = "2026-09-28T00:06:53.304775+00:00"
+    assert web.localtime(at, ZoneInfo("Australia/Sydney")) == "2026-09-28 10:06 AEST"
+    assert web.localtime(at, ZoneInfo("UTC")) == "2026-09-28 00:06 UTC"
+    assert web.localtime(datetime.fromisoformat(at), ZoneInfo("Asia/Tokyo")) == "2026-09-28 09:06 JST"
+    assert web.localtime(None, ZoneInfo("UTC")) == ""
+
+
+def test_history_is_utc_when_neither_env_nor_cookie_names_a_zone(board, monkeypatch):
+    iid = ready(board)
+    times = history_times(tz_client(board, monkeypatch).get(f"/issues/{iid}").text)
+    assert times and all(t.endswith(" UTC") for t in times)
+    assert all(re.fullmatch(r"\d{4}-\d\d-\d\d \d\d:\d\d UTC", t) for t in times)
+
+
+def test_board_timezone_sets_the_default_zone(board, monkeypatch):
+    iid = ready(board)
+    times = history_times(tz_client(board, monkeypatch, "Asia/Tokyo").get(f"/issues/{iid}").text)
+    assert times and all(t.endswith(" JST") for t in times)
+
+
+def test_the_cookie_zone_overrides_the_env_default(board, monkeypatch):
+    iid = ready(board)
+    client = with_tz_cookie(tz_client(board, monkeypatch, "Asia/Tokyo"), "Asia/Kolkata")
+    times = history_times(client.get(f"/issues/{iid}").text)
+    assert times and all(t.endswith(" IST") for t in times)
+
+
+def test_a_bad_cookie_zone_falls_back_to_the_env_default(board, monkeypatch):
+    iid = ready(board)
+    client = with_tz_cookie(tz_client(board, monkeypatch, "Asia/Tokyo"), "Mars/Olympus")
+    times = history_times(client.get(f"/issues/{iid}").text)
+    assert times and all(t.endswith(" JST") for t in times)
+
+
+def test_a_bad_env_zone_is_logged_and_the_board_stays_up_in_utc(board, monkeypatch, caplog):
+    iid = ready(board)
+    with caplog.at_level("WARNING"):
+        client = tz_client(board, monkeypatch, "Not/AZone")
+    assert "Not/AZone" in caplog.text
+    times = history_times(client.get(f"/issues/{iid}").text)
+    assert times and all(t.endswith(" UTC") for t in times)
+
+
+def test_the_preferences_form_saves_and_shows_a_timezone(client, board):
+    r = client.post("/preferences", data={"timezone": " Asia/Tokyo "})
+    assert r.status_code == 303
+    assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE))["timezone"] == "Asia/Tokyo"
+    html = client.get("/preferences").text
+    assert re.search(r'<input[^>]*name="timezone"[^>]*value="Asia/Tokyo"', html)
+
+
+def test_an_unknown_timezone_in_the_form_is_saved_as_blank(client, board):
+    client.post("/preferences", data={"timezone": "Mars/Olympus"})
+    assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE))["timezone"] == ""
+
+
+def test_lease_expiry_renders_in_the_chosen_zone(board, monkeypatch):
+    iid = ready(board)
+    core.next(board, "run-4")
+    expires = core.show(board, iid)["lease_expires_at"]
+    want = web.localtime(expires, ZoneInfo("Asia/Tokyo"))
+    client = tz_client(board, monkeypatch, "Asia/Tokyo")
+    assert f"Held by run-4 until {want}" in client.get(f"/issues/{iid}").text
+    assert f"Held by run-4 until {want}" in card(client.get("/").text, iid)
+    refused = client.post(f"/issues/{iid}/edit", data=edit_form(core.show(board, iid), body="x"),
+                          headers=AS_CHAOS)
+    assert refused.status_code == 409 and f"until {want}" in refused.text

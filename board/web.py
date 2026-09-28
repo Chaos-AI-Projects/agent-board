@@ -26,15 +26,21 @@ it back to `ready`.
 The board at `/` is a view only. Which projects and lanes it shows is saved per
 browser in the `board_prefs` cookie, set from `/preferences`, and searching is
 its own page at `/search`.
+
+Times are stored in UTC and shown in a zone: the one saved in `board_prefs`,
+else `BOARD_TIMEZONE`, else UTC. An unknown name in either is skipped, and
+one in the environment is logged rather than stopping the board.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -53,6 +59,10 @@ PORT_ENV = "BOARD_WEB_PORT"
 HOSTS_ENV = "BOARD_WEB_HOSTS"
 PREFS_COOKIE = "board_prefs"
 PREFS_MAX_AGE = 365 * 24 * 3600
+TZ_ENV = "BOARD_TIMEZONE"
+UTC = ZoneInfo("UTC")
+
+log = logging.getLogger(__name__)
 
 templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
 
@@ -67,7 +77,30 @@ def markdown(text: str | None) -> Markup:
     return Markup(_md.render(text or ""))
 
 
+def zone(name: str | None) -> ZoneInfo | None:
+    """The IANA zone called `name`, or None if it is blank or unknown."""
+    name = (name or "").strip()
+    if not name:
+        return None
+    try:
+        return ZoneInfo(name)
+    except (KeyError, ValueError, OSError):
+        # ZoneInfoNotFoundError is a KeyError; a path-like name is a ValueError.
+        return None
+
+
+def localtime(at, tz: ZoneInfo) -> str:
+    """A stored UTC time, ISO string or datetime, as `YYYY-MM-DD HH:MM <abbrev>` in tz."""
+    if at is None:
+        return ""
+    dt = datetime.fromisoformat(at) if isinstance(at, str) else at
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(tz).strftime("%Y-%m-%d %H:%M %Z")
+
+
 templates.env.filters["markdown"] = markdown
+templates.env.filters["localtime"] = localtime
 
 
 class Unauthenticated(Exception):
@@ -191,11 +224,12 @@ def _form_labels(value):
 
 
 def read_prefs(raw: str | None) -> dict:
-    """The saved view from a `board_prefs` cookie: {"projects": [...], "lanes": [...]}.
+    """The saved view from a `board_prefs` cookie: projects, lanes and timezone.
 
     The value is JSON, percent-encoded so a browser sends it back unmangled.
-    Anything unreadable, and any key other than those two, is ignored. A key
-    that is absent or not a list of strings comes back as [], which means all.
+    Anything unreadable, and any other key, is ignored. A list key that is
+    absent or not a list of strings comes back as [], which means all; a
+    timezone that is not a string comes back as "", which means the default.
     """
     try:
         data = json.loads(unquote(raw or ""))
@@ -207,6 +241,8 @@ def read_prefs(raw: str | None) -> dict:
         value = data.get(key)
         ok = isinstance(value, list) and all(isinstance(v, str) for v in value)
         prefs[key] = value if ok else []
+    tz = data.get("timezone")
+    prefs["timezone"] = tz if isinstance(tz, str) else ""
     return prefs
 
 
@@ -220,6 +256,11 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None) -> 
     engine = engine if engine is not None else store.make_engine()
     authn = authenticator if authenticator is not None else auth.Authenticator.from_env(os.environ)
     app = FastAPI(title="agent-board")
+    default_tz = zone(os.environ.get(TZ_ENV))
+    if default_tz is None and os.environ.get(TZ_ENV, "").strip():
+        log.warning("%s=%r is not a known timezone; showing times in UTC",
+                    TZ_ENV, os.environ[TZ_ENV])
+    default_tz = default_tz or UTC
 
     def who(request) -> auth.Identity | None:
         # Resolved once per request: a Bearer token costs a Google round trip.
@@ -236,7 +277,9 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None) -> 
 
     def page(request, name, status=200, **ctx):
         me = who(request)
+        saved_tz = read_prefs(request.cookies.get(PREFS_COOKIE))["timezone"]
         ctx |= {"me": me.email if me else None, "lease_status": lease_status,
+                "tz": zone(saved_tz) or default_tz,
                 "moves": lambda issue: sorted(core.TRANSITIONS[issue["state"]])}
         return templates.TemplateResponse(request, name, ctx, status_code=status)
 
@@ -283,7 +326,8 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None) -> 
     def view_prefs(request, projects):
         saved = read_prefs(request.cookies.get(PREFS_COOKIE))
         return {"projects": _chosen(saved["projects"], [p["key"] for p in projects]),
-                "lanes": _chosen(saved["lanes"], list(core.TRANSITIONS))}
+                "lanes": _chosen(saved["lanes"], list(core.TRANSITIONS)),
+                "timezone": saved["timezone"]}
 
     @app.get("/", response_class=HTMLResponse)
     def board_page(request: Request):
@@ -323,7 +367,7 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None) -> 
     def preferences_page(request: Request):
         view = core.overview(engine)
         return page(request, "preferences.html", view=view, lanes=list(core.TRANSITIONS),
-                    prefs=view_prefs(request, view["projects"]))
+                    prefs=view_prefs(request, view["projects"]), default_tz=default_tz)
 
     @app.post("/preferences")
     async def save_preferences(request: Request):
@@ -338,8 +382,12 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None) -> 
         for key, values in known.items():
             picked = [v for v in values if v in sent[key]]
             prefs[key] = [] if len(picked) == len(values) else picked
+        # An unknown zone is saved blank, which means the default.
+        tz = (f.get("timezone") or "").strip()
+        prefs["timezone"] = tz if zone(tz) else ""
         r = back()
-        r.set_cookie(PREFS_COOKIE, quote(json.dumps(prefs, separators=(",", ":"))),
+        # safe="": a bare "/" (Asia/Tokyo) makes Starlette quote the whole value.
+        r.set_cookie(PREFS_COOKIE, quote(json.dumps(prefs, separators=(",", ":")), safe=""),
                      max_age=PREFS_MAX_AGE, samesite="lax", httponly=True)
         return r
 

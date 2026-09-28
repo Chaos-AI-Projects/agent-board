@@ -1,8 +1,8 @@
 {%- set ls = lease_status(issue, now) -%}
 {%- if ls == "live" -%}
-<div class="lease">Held by {{ issue.lease_holder }} until {{ issue.lease_expires_at }}</div>
+<div class="lease">Held by {{ issue.lease_holder }} until {{ issue.lease_expires_at|localtime(tz) }}</div>
 {%- elif ls == "expired" -%}
-<div class="lease">Lease expired: {{ issue.lease_holder }} at {{ issue.lease_expires_at }}, reclaimable</div>
+<div class="lease">Lease expired: {{ issue.lease_holder }} at {{ issue.lease_expires_at|localtime(tz) }}, reclaimable</div>
 {%- elif ls == "held" -%}
 <div class="lease">Held by {{ issue.lease_holder }}</div>
 {%- endif -%}

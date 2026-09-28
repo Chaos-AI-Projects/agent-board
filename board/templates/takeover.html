@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block main %}
 <div class="takeover">
-  <p>Held by {{ held.holder }} until {{ held.expires_at.isoformat() if held.expires_at else "released" }}. Take over?</p>
+  <p>Held by {{ held.holder }} until {{ held.expires_at|localtime(tz) if held.expires_at else "released" }}. Take over?</p>
   <p>Taking over moves the lease to you with no expiry, so {{ held.holder }}'s next write fails
      with lease lost. The card stays in processing under your name until you press Release.</p>
   <form class="inline" method="post" action="/issues/{{ issue.id }}/edit">
