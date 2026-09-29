@@ -762,6 +762,7 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         # With no filter at all the page is just the form, not every issue.
         searched = any(filters.values())
         return page(request, "search.html", view=view, filters=filters, searched=searched,
+                    header_q=filters["q"],
                     results=view["issues"] if searched else [])
 
     @app.get("/preferences", response_class=HTMLResponse)

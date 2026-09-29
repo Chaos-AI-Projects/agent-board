@@ -850,9 +850,14 @@ def hits(html):
     return re.findall(r'<li class="hit"[^>]*><a href="/issues/([^"]+)">', html)
 
 
+def main_of(html):
+    """The page body without the header, whose search box is on every page."""
+    return re.search(r"<main>.*</main>", html, re.S).group(0)
+
+
 def test_the_board_has_no_search_and_ignores_filter_params(client, board):
     iid = ready(board, "Lease expiry")
-    html = client.get("/", params={"q": "zzz", "project": "XX"}).text
+    html = main_of(client.get("/", params={"q": "zzz", "project": "XX"}).text)
     assert f'data-id="{iid}"' in html
     assert not re.search(r'<input[^>]*name="q"', html)
     assert not re.search(r'<select name="label"', html)
@@ -864,6 +869,42 @@ def test_every_page_header_links_to_search_and_preferences(client, board):
         header = re.search(r"<header>.*?</header>", client.get(path).text, re.S).group(0)
         assert 'href="/search"' in header and 'href="/preferences"' in header
         assert 'href="/projects"' in header
+
+
+def header_of(html):
+    return re.search(r"<header>.*?</header>", html, re.S).group(0)
+
+
+def test_every_page_header_has_a_search_box_and_an_advanced_search_link(client, board):
+    iid = ready(board)
+    for path in ("/", f"/issues/{iid}", "/search", "/preferences", "/projects"):
+        header = header_of(client.get(path).text)
+        form = re.search(r'<form[^>]*method="get"[^>]*action="/search"[^>]*>(.*?)</form>',
+                         header, re.S)
+        assert form, path
+        assert re.search(r'<input[^>]*name="q"[^>]*placeholder="Search issues"', form.group(1))
+        assert re.search(r"<button[^>]*>Search</button>", form.group(1))
+        assert re.search(r'<a href="/search">Advanced search</a>', header), path
+        assert not re.search(r'<a href="/search">Search</a>', header), path
+
+
+def test_the_header_search_box_finds_an_issue_by_a_title_word(client, board):
+    hit = ready(board, "Quokka migration")
+    ready(board, "Lease expiry")
+    assert hits(client.get("/search", params={"q": "quokka"}).text) == [hit]
+
+
+def test_the_header_search_box_keeps_the_query_on_the_search_page(client, board):
+    ready(board, "Quokka migration")
+    header = header_of(client.get("/search", params={"q": "quokka"}).text)
+    assert re.search(r'<input[^>]*name="q"[^>]*value="quokka"', header)
+    assert not re.search(r'<input[^>]*name="q"[^>]*value="[^"]', header_of(client.get("/").text))
+
+
+def test_the_search_page_is_titled_advanced_search(client, board):
+    html = client.get("/search").text
+    assert "<title>Advanced search -- agent-board</title>" in html
+    assert re.search(r"<h1[^>]*>Advanced search</h1>", main_of(html))
 
 
 def test_search_lists_hits_by_q_linking_to_their_issue_pages(client, board):

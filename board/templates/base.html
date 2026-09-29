@@ -6,8 +6,10 @@
 <title>{% block title %}agent-board{% endblock %}</title>
 <style>
   body { font: 14px/1.4 system-ui, sans-serif; margin: 0; background: #f4f5f7; color: #172b4d; }
-  header { padding: 8px 16px; background: #172b4d; color: #fff; display: flex; gap: 16px; }
+  header { padding: 8px 16px; background: #172b4d; color: #fff; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
   header a { color: #fff; }
+  header form.header-search { margin: 0; display: flex; gap: 4px; }
+  header form.header-search input { width: 12em; max-width: 50vw; }
   main { padding: 16px; }
   .kanban { display: flex; gap: 12px; align-items: flex-start; overflow-x: auto; }
   /* The board scrolls on both axes inside the page; column headers stay put. */
@@ -71,7 +73,7 @@
 </style>
 </head>
 <body>
-<header><a href="/">agent-board</a><a href="/search">Search</a><a href="/preferences">Preferences</a><a href="/projects">Projects</a><span>{{ me or "not signed in" }}</span>{% if sign_in and me %}<form method="post" action="/logout" style="margin:0"><button type="submit">Sign out</button></form>{% elif sign_in %}<a href="/login">Sign in</a>{% endif %}</header>
+<header><a href="/">agent-board</a><form method="get" action="/search" class="header-search"><input type="search" name="q" value="{{ header_q or "" }}" placeholder="Search issues" aria-label="Search issues"><button type="submit">Search</button></form><a href="/search">Advanced search</a><a href="/preferences">Preferences</a><a href="/projects">Projects</a><span>{{ me or "not signed in" }}</span>{% if sign_in and me %}<form method="post" action="/logout" style="margin:0"><button type="submit">Sign out</button></form>{% elif sign_in %}<a href="/login">Sign in</a>{% endif %}</header>
 <main>{% block main %}{% endblock %}</main>
 </body>
 </html>

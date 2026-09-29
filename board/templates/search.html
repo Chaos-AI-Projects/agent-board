@@ -1,6 +1,7 @@
 {% extends "base.html" %}
-{% block title %}Search -- agent-board{% endblock %}
+{% block title %}Advanced search -- agent-board{% endblock %}
 {% block main %}
+<h1>Advanced search</h1>
 <form method="get" action="/search" class="filters">
   <label>Search <input type="search" name="q" value="{{ filters.q }}" placeholder="id, title, body or label"></label>
   <label>Project <select name="project"><option value="">any</option>{% for p in view.projects %}<option value="{{ p.key }}"{% if p.key == filters.project %} selected{% endif %}>{{ p.key }}</option>{% endfor %}</select></label>
