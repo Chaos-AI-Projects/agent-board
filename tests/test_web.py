@@ -847,7 +847,7 @@ def test_a_markdown_image_does_not_fetch_a_third_party_url(board, client):
 
 def hits(html):
     """The issue ids a search page lists, in order."""
-    return re.findall(r'<li class="hit"><a href="/issues/([^"]+)">', html)
+    return re.findall(r'<li class="hit"[^>]*><a href="/issues/([^"]+)">', html)
 
 
 def test_the_board_has_no_search_and_ignores_filter_params(client, board):
@@ -1813,3 +1813,81 @@ def test_the_issue_page_draws_declared_dependencies(board, client):
         depend(board, step, on)
     src = mermaid_source(client.get(f"/issues/{left}").text)
     assert src.count('{"#43;"}') == 2
+
+
+# --- project colour (MS-652) -----------------------------------------------------
+
+
+LIVE_KEYS = ("MS", "DR", "AB", "HC", "GS", "BR", "PE")
+
+
+def hue(colour):
+    return int(re.search(r"hsl\((\d+)", colour).group(1))
+
+
+def test_a_project_colour_is_a_hue_from_the_key_alone():
+    c = web.project_colour("MS")
+    assert c == web.project_colour("MS")
+    assert set(c) == {"bg", "border"}
+    assert 0 <= hue(c["bg"]) < 360 and hue(c["bg"]) == hue(c["border"])
+
+
+def test_a_project_colour_is_the_same_in_a_fresh_process():
+    # Python's hash() is salted per process; the colour must not be.
+    import subprocess
+    import sys
+    out = subprocess.run(
+        [sys.executable, "-c", "import json; from board import web; "
+         "print(json.dumps(web.project_colour('MS')))"],
+        capture_output=True, text=True, check=True,
+        env={"PYTHONHASHSEED": "12345", "PATH": ""}).stdout
+    assert json.loads(out) == web.project_colour("MS")
+
+
+def test_the_live_project_keys_get_distinct_hues():
+    hues = [hue(web.project_colour(k)["bg"]) for k in LIVE_KEYS]
+    assert len(set(hues)) == len(hues)
+
+
+def test_a_card_is_tinted_with_its_projects_colour(board, client):
+    core.create_project(board, "DR", "doc-review")
+    ms = ready(board)
+    dr = core.create(board, "DR", "other", actor=CHAOS, actor_kind=HUMAN, state="ready")["id"]
+    html = client.get("/").text
+    for key, issue_id in (("MS", ms), ("DR", dr)):
+        c = web.project_colour(key)
+        assert c["bg"] in card(html, issue_id) and c["border"] in card(html, issue_id)
+
+
+def test_a_leased_card_keeps_its_lease_class_beside_the_project_colour(board, client):
+    live = ready(board)
+    core.next(board, "run-4")
+    c = card(client.get("/").text, live)
+    assert "lease-live" in c and web.project_colour("MS")["border"] in c
+
+
+def test_search_results_carry_the_project_colour(board, client):
+    issue_id = ready(board, "findme")
+    html = client.get("/search", params={"q": "findme"}).text
+    hit = re.search(rf'<li class="hit" data-id="{issue_id}"[^>]*>', html).group(0)
+    assert web.project_colour("MS")["bg"] in hit
+
+
+def test_a_single_project_workflow_card_takes_that_projects_colour(board, client):
+    wf = release(board)
+    assert web.project_colour("MS")["border"] in wf_card(client.get("/").text, wf["id"])
+
+
+def test_a_mixed_project_workflow_card_keeps_the_workflow_green(board, client):
+    core.create_project(board, "BR", "brain")
+    wf = core.create_batch(board, [{"project": "MS", "title": "a"}, {"project": "BR", "title": "b"}],
+                           actor=CHAOS, actor_kind=HUMAN, workflow_title="mixed")
+    c = wf_card(client.get("/").text, wf["workflow_id"])
+    assert "hsl(" not in c and "workflow-card" in c
+
+
+def test_the_issue_page_and_projects_list_show_the_key_in_its_colour(board, client):
+    issue_id = ready(board)
+    colour = web.project_colour("MS")["border"]
+    assert colour in client.get(f"/issues/{issue_id}").text
+    assert colour in project_row(client.get("/projects").text, "MS")

@@ -129,6 +129,18 @@ def filesize(n: int) -> str:
     return f"{n / 1024:.1f} KB" if n < 1024 * 1024 else f"{n / (1024 * 1024):.1f} MB"
 
 
+def project_colour(key: str) -> dict:
+    """A project's card colours, from a hue hashed out of its key (MS-652).
+
+    The key, not the name, because a rename must not recolour every card.
+    sha256 rather than hash(), which Python salts per process. Only the hue
+    varies, so dark text stays readable on every tint.
+    """
+    h = int.from_bytes(hashlib.sha256(key.encode()).digest()[:4], "big") % 360
+    return {"bg": f"hsl({h} 70% 92%)", "border": f"hsl({h} 65% 45%)"}
+
+
+templates.env.globals["project_colour"] = project_colour
 templates.env.filters["markdown"] = markdown
 templates.env.filters["filesize"] = filesize
 templates.env.filters["localtime"] = localtime
@@ -728,7 +740,9 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         for wf in view["workflows"]:
             if wf_projects.get(wf["id"], set()) & tracked:
                 current = next((st for st in wf["steps"] if st["state"] != "done"), None)
-                workflows.append(wf | {"current": current, "target": workflow_target(wf)})
+                projects = wf_projects[wf["id"]]
+                workflows.append(wf | {"current": current, "target": workflow_target(wf),
+                                       "project": next(iter(projects)) if len(projects) == 1 else None})
         loose = [i for i in view["issues"]
                  if i["workflow_id"] is None and i["project"] in tracked]
         # The workflow is the card: its computed state picks the column, and

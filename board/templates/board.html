@@ -40,7 +40,8 @@
   <h2>{{ state }} ({{ workflows|length + issues|length }}){% if columns|length > 1 %}<form method="post" action="/preferences/lanes/hide"><input type="hidden" name="lane" value="{{ state }}"><button class="hide-lane" title="Hide this lane" aria-label="Hide the {{ state }} lane">&times;</button></form>{% endif %}</h2>
   {% if workflows %}<div class="workflows">
   {% for wf in workflows %}
-  <article class="card workflow-card" data-workflow="{{ wf.id }}" data-href="/issues/{{ wf.target }}">
+  {% if wf.project %}{% set pc = project_colour(wf.project) %}{% endif %}
+  <article class="card workflow-card" data-workflow="{{ wf.id }}" data-href="/issues/{{ wf.target }}"{% if wf.project %} style="--proj-bg: {{ pc.bg }}; --proj-border: {{ pc.border }}"{% endif %}>
     <a href="/issues/{{ wf.target }}">{{ wf.title }}</a>
     <div class="steps-summary">{{ wf.steps|length }} step{{ "" if wf.steps|length == 1 else "s" }}{% if wf.current %} &middot; current: {{ wf.current.title }}{% endif %}</div>
   </article>

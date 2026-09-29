@@ -4,7 +4,7 @@
 <table class="projects">
   <tr><th>Key</th><th>Name</th><th>Issues</th><th></th></tr>
   {% for p in projects %}<tr data-key="{{ p.key }}">
-    <td>{{ p.key }}</td>
+    {% set pc = project_colour(p.key) %}<td><span class="project-key" style="--proj-bg: {{ pc.bg }}; --proj-border: {{ pc.border }}">{{ p.key }}</span></td>
     <td><form class="inline" method="post" action="/projects/{{ p.key | urlencode }}/rename"><input name="name" value="{{ p.name }}" required maxlength="200"> <button>Rename</button></form></td>
     <td>{{ p.issues }}</td>
     <td>{% if p.issues == 0 %}<form class="inline" method="post" action="/projects/{{ p.key | urlencode }}/delete"><button>Delete</button></form>{% endif %}</td>

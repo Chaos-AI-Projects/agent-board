@@ -1,5 +1,6 @@
 {%- set ls = lease_status(issue, now) -%}
-<article class="card{% if ls %} lease-{{ ls }}{% endif %}"
+{%- set pc = project_colour(issue.project) -%}
+<article class="card{% if ls %} lease-{{ ls }}{% endif %}" style="--proj-bg: {{ pc.bg }}; --proj-border: {{ pc.border }}"
          data-id="{{ issue.id }}" data-version="{{ issue.version }}"
          data-href="/issues/{{ issue.id }}" data-moves="{{ moves(issue)|join(' ') }}">
   <a href="/issues/{{ issue.id }}">{{ issue.id }}</a> {{ issue.title }}
