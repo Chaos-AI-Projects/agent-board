@@ -70,7 +70,8 @@ def claimed(engine):
 def test_the_tools_are_the_cli_operations(migrated):
     names = {t.name for t in list_tools(migrated)}
     assert names == {"next", "show", "transition", "annotate", "link", "create",
-                     "instantiate", "heartbeat", "plan", "depend", "undepend"}
+                     "instantiate", "heartbeat", "plan", "depend", "undepend",
+                     "create_batch"}
 
 
 def test_next_claims_as_the_server_actor_and_returns_the_token(migrated):
@@ -197,3 +198,26 @@ def test_a_dependency_cycle_is_code_1(migrated):
     ok(migrated, "depend", id=first, on=second)
     err = failed(migrated, "depend", id=second, on=first)
     assert (err["error"], err["code"]) == ("BoardError", 1)
+
+
+# --- create_batch (MS-647) ----------------------------------------------------
+
+
+def test_create_batch_creates_a_parallel_workflow_as_the_server_actor(migrated):
+    board(migrated)
+    out = ok(migrated, "create_batch", workflow_title="Fan out",
+             items=[{"project": "MS", "title": "design", "ref": "d"},
+                    {"project": "MS", "title": "left", "after": ["d"]},
+                    {"project": "MS", "title": "right", "after": [0]}])
+    design, left, right = out["ids"]
+    assert out["refs"] == {"d": design}
+    assert core.show(migrated, left)["events"][0]["actor"] == WORKER
+    assert [d["id"] for d in core.show(migrated, right)["depends_on"]] == [design]
+
+
+def test_a_bad_create_batch_is_an_error_and_writes_nothing(migrated):
+    board(migrated)
+    err = failed(migrated, "create_batch",
+                 items=[{"project": "MS", "title": "a"}, {"project": "NOPE", "title": "b"}])
+    assert err["code"] == 1
+    assert core.search(migrated) == []

@@ -451,6 +451,170 @@ def instantiate(engine, template: str, project: str, *, actor: str, actor_kind: 
     return _write(engine, key, run, replay, [project, title, actor, actor_kind])
 
 
+def create_batch(engine, items: list[dict], *, actor: str, actor_kind: str,
+                 workflow_title: str | None = None,
+                 request_id: str | None = None) -> dict:
+    """Create several issues together, all or nothing (MS-647).
+
+    Each item is a dict of `project`, `title`, and optional `body`, `state`
+    (`ready` by default), `rank`, `labels`, `ref` and `after`. `after` lists
+    what the item waits on, as MS-646 dependencies: another item of this
+    batch by 0-based index or by its `ref`, or an existing issue id. A string
+    that names a `ref` of this batch means that item, even if an issue has the
+    same id. With `workflow_title` the batch becomes a new workflow at
+    positions 1..N in list order, so a batch with no `after` keeps strict
+    order; without it the issues are loose. Everything is checked before the
+    first row is written. Returns `ids` in list order, `refs` mapping each
+    ref to its id, and `workflow_id`.
+    """
+    items = [_batch_item(i, it) for i, it in enumerate(items)]
+    if not items:
+        raise BoardError("a batch needs at least one item")
+    if workflow_title is not None:
+        if not isinstance(workflow_title, str) or not workflow_title.strip():
+            raise BoardError("a batch's workflow_title is a non-blank string")
+        workflow_title = workflow_title.strip()
+    refs = {}
+    for i, it in enumerate(items):
+        if it["ref"] is not None:
+            if it["ref"] in refs:
+                raise BoardError(f"item {i}: ref {it['ref']!r} is already item {refs[it['ref']]}")
+            refs[it["ref"]] = i
+    for i, it in enumerate(items):
+        it["inside"], it["outside"] = _batch_after(i, it["after"], refs, len(items))
+    _batch_acyclic(items)
+    # The title is hashed so a long one still fits the key column on PostgreSQL.
+    scope = ("wf-" + hashlib.sha256(workflow_title.encode()).hexdigest()[:16]
+             if workflow_title is not None else "loose")
+    key = _scoped("create_batch", scope, request_id)
+
+    def result(ids, workflow_id):
+        return {"ids": ids, "workflow_id": workflow_id,
+                "refs": {it["ref"]: ids[i] for i, it in enumerate(items)
+                         if it["ref"] is not None}}
+
+    def replay(s, ev):
+        ids = [ev.issue_id] + [
+            s.scalar(select(Event.issue_id).where(Event.idempotency_key == _item_key(key, i)))
+            for i in range(1, len(items))]
+        return result(ids, s.get(Issue, ev.issue_id).workflow_id)
+
+    def body(s):
+        for project in {it["project"] for it in items}:
+            if s.get(Project, project) is None:
+                raise NotFound(f"no project {project!r}")
+        for it in items:
+            for other in it["outside"]:
+                _get(s, other)
+        now = store.db_now(s)
+        wf = None
+        if workflow_title is not None:
+            wf = Workflow(title=workflow_title, created_at=now)
+            s.add(wf)
+            s.flush()
+        issues = []
+        for i, it in enumerate(items):
+            item_key = None if key is None else (key if i == 0 else _item_key(key, i))
+            issues.append(_create(s, it["project"], it["title"], actor, actor_kind, it["body"],
+                                  it["state"], it["rank"], it["labels"],
+                                  wf and wf.id, wf and i + 1, now, item_key))
+        for issue, it in zip(issues, items):
+            for on in [issues[j].id for j in it["inside"]] + it["outside"]:
+                if s.get(Dependency, (issue.id, on)) is not None:
+                    continue
+                s.add(Dependency(issue_id=issue.id, depends_on_id=on, created_at=now,
+                                 created_by=actor))
+                _event(s, issue.id, now, actor, actor_kind, "depend", None, None,
+                       f"waits on {on}", None)
+        s.flush()
+        return result([i.id for i in issues], wf and wf.id)
+
+    return _write(engine, key, body, replay,
+                  [[{k: it[k] for k in ("project", "title", "body", "state", "rank",
+                                        "labels", "ref", "after")} for it in items],
+                   workflow_title, actor, actor_kind])
+
+
+def _item_key(key, i):
+    """Item `i`'s key under a batch's `key`. `_scoped` keys start with an
+    operation name, so no caller's request id can produce this one."""
+    return f"batch-item:{i}:{key}"
+
+
+def _batch_item(i, it):
+    if not isinstance(it, dict):
+        raise BoardError(f"item {i}: an item is an object")
+    title = it.get("title")
+    if not isinstance(title, str) or not title.strip():
+        raise BoardError(f"item {i}: every item needs a title")
+    title = title.strip()
+    if not isinstance(it.get("project"), str) or not it["project"]:
+        raise BoardError(f"item {i}: every item needs a project")
+    rank = it.get("rank")
+    if rank is not None and (not isinstance(rank, int) or isinstance(rank, bool)):
+        raise BoardError(f"item {i}: a rank is a whole number")
+    labels = it.get("labels") or []
+    if not isinstance(labels, list) or not all(isinstance(l, str) and l.strip()
+                                               for l in labels):
+        raise BoardError(f"item {i}: labels are a list of non-blank strings")
+    state = it.get("state") or "ready"
+    if state not in CREATE_STATES:
+        raise InvalidTransition(f"item {i}: an issue is created {sorted(CREATE_STATES)}, "
+                                f"not {state!r}")
+    ref = it.get("ref")
+    if ref is not None and (not isinstance(ref, str) or not ref):
+        raise BoardError(f"item {i}: a ref is a non-empty string")
+    after = it.get("after") or []
+    if not isinstance(after, list):
+        raise BoardError(f"item {i}: after is a list")
+    body = it.get("body") or ""
+    if not isinstance(body, str):
+        raise BoardError(f"item {i}: a body is a string")
+    return {"project": it["project"], "title": title, "body": body,
+            "state": state, "rank": rank, "labels": sorted({l.strip() for l in labels}),
+            "ref": ref, "after": after}
+
+
+def _batch_after(i, after, refs, n):
+    """Split one item's `after` into batch indexes and existing issue ids."""
+    inside, outside = [], []
+    for a in after:
+        if isinstance(a, int) and not isinstance(a, bool):
+            if not 0 <= a < n:
+                raise BoardError(f"item {i}: after {a} is not an item of this batch")
+            j = a
+        elif isinstance(a, str) and a in refs:
+            j = refs[a]
+        elif isinstance(a, str) and a:
+            outside.append(a)
+            continue
+        else:
+            raise BoardError(f"item {i}: after {a!r} is neither an index, a ref nor an issue id")
+        if j == i:
+            raise BoardError(f"item {i} cannot wait on itself")
+        inside.append(j)
+    return sorted(set(inside)), sorted(set(outside))
+
+
+def _batch_acyclic(items):
+    """Refuse a cycle among the batch's items. Existing issues cannot close
+    one: none of them waits on an issue that does not exist yet.
+
+    Items that wait on nothing unsettled settle, round by round; whatever
+    never settles is on a cycle or waits on one.
+    """
+    left = {i: set(it["inside"]) for i, it in enumerate(items)}
+    while True:
+        free = [i for i, on in left.items() if not on & left.keys()]
+        if not free:
+            break
+        for i in free:
+            del left[i]
+    if left:
+        stuck = ", ".join(str(i) for i in sorted(left))
+        raise BoardError(f"items {stuck} wait on each other: a cycle")
+
+
 def plan(engine, issue_id: str, steps: list[dict], *, actor: str, actor_kind: str,
          token: str | None = None, request_id: str | None = None,
          preempt: bool = False) -> dict:

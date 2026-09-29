@@ -138,6 +138,22 @@ def build_server(engine, actor: str) -> FastMCP:
         return run(core.plan, engine, id, steps, token=token, request_id=request_id, **who)
 
     @mcp.tool()
+    def create_batch(items: list[dict], workflow_title: str | None = None,
+                     request_id: str | None = None) -> CallToolResult:
+        """Create several issues together, all or nothing.
+
+        Each item is {"project", "title", "body"?, "state"? (default ready),
+        "rank"?, "labels"?, "ref"?, "after"?}. `after` lists what the item
+        waits on: another item by 0-based index or by its `ref`, or an
+        existing issue id. With workflow_title the items become a new
+        workflow in list order. In a workflow, one `after` on any item
+        drops strict order for every step, so give each step the `after` it
+        needs. Returns `ids` in order, `refs` and `workflow_id`.
+        """
+        return run(core.create_batch, engine, items, workflow_title=workflow_title,
+                   request_id=request_id, **who)
+
+    @mcp.tool()
     def depend(id: str, on: str, request_id: str | None = None) -> CallToolResult:
         """Make issue `id` wait until issue `on` is done; `next` skips it until then.
 

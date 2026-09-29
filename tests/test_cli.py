@@ -27,14 +27,14 @@ def url(tmp_path):
     return url
 
 
-def board(url, *args, actor="worker-1"):
+def board(url, *args, actor="worker-1", stdin=None):
     env = {k: v for k, v in os.environ.items() if not k.startswith("BOARD_")}
     if url is not None:
         env[store.DATABASE_URL_ENV] = url
     if actor is not None:
         env["BOARD_ACTOR"] = actor
     return subprocess.run([sys.executable, "-m", "board.cli", *args],
-                          capture_output=True, text=True, env=env, timeout=60)
+                          capture_output=True, text=True, env=env, timeout=60, input=stdin)
 
 
 def ok(proc):
@@ -370,3 +370,47 @@ def test_undepend_of_a_missing_edge_is_a_json_error(url):
 
 def test_depend_needs_on(url):
     assert board(url, "depend", ready(url)).returncode == 2
+
+
+# --- create-batch (MS-647) ----------------------------------------------------
+
+
+BATCH = {"workflow_title": "Fan out",
+         "items": [{"project": "MS", "title": "design", "ref": "d"},
+                   {"project": "MS", "title": "left", "after": ["d"]},
+                   {"project": "MS", "title": "right", "after": [0]}]}
+
+
+def test_create_batch_reads_json_from_stdin(url):
+    out = ok(board(url, "create-batch", "-", stdin=json.dumps(BATCH)))
+    design, left, right = out["ids"]
+    assert out["refs"] == {"d": design}
+    assert out["workflow_id"] is not None
+    assert [d["id"] for d in ok(board(url, "show", right))["depends_on"]] == [design]
+
+
+def test_create_batch_reads_a_file_and_replays_a_request_id(url, tmp_path):
+    f = tmp_path / "batch.json"
+    f.write_text(json.dumps(BATCH))
+    first = ok(board(url, "create-batch", str(f), "--request-id", "r1"))
+    assert ok(board(url, "create-batch", str(f), "--request-id", "r1")) == first
+
+
+def test_create_batch_takes_a_bare_list_of_items(url):
+    out = ok(board(url, "create-batch", "-", stdin=json.dumps(BATCH["items"])))
+    assert len(out["ids"]) == 3
+    assert out["workflow_id"] is None
+
+
+def test_a_bad_batch_is_code_1_and_writes_nothing(url):
+    bad = {"items": [{"project": "MS", "title": "a"}, {"project": "MS", "title": ""}]}
+    proc = board(url, "create-batch", "-", stdin=json.dumps(bad))
+    assert proc.returncode == 1
+    assert json.loads(proc.stderr)["error"] == "BoardError"
+    assert board(url, "search").returncode == 3
+
+
+def test_create_batch_rejects_malformed_json_as_code_1(url):
+    proc = board(url, "create-batch", "-", stdin="{not json")
+    assert proc.returncode == 1
+    assert "error" in json.loads(proc.stderr)

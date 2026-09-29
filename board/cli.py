@@ -139,6 +139,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--preempt", action="store_true")
     writes(sp)
 
+    sp = op("create-batch", help="create several issues together, all or nothing")
+    sp.add_argument("file", help="a JSON file, or - for stdin: a list of items, or "
+                                 "{\"items\": [...], \"workflow_title\": ...}")
+    writes(sp, token=False)
+
     sp = op("depend", help="make an issue wait until another is done")
     sp.add_argument("id")
     sp.add_argument("--on", required=True, help="the issue it waits on")
@@ -197,6 +202,10 @@ def _run(engine, a) -> dict | None:
         case "plan":
             return core.plan(engine, a.id, [{"title": t} for t in a.steps], token=a.token,
                              request_id=a.request_id, preempt=a.preempt, **who)
+        case "create-batch":
+            items, workflow_title = _batch_file(a.file)
+            return core.create_batch(engine, items, workflow_title=workflow_title,
+                                     request_id=a.request_id, **who)
         case "depend":
             return core.depend(engine, a.id, a.on, request_id=a.request_id, **who)
         case "undepend":
@@ -207,6 +216,21 @@ def _run(engine, a) -> dict | None:
             return importer.import_backlog(engine, importer.load_backlog_module(a.backlog_py),
                                            a.root, **who)
     raise AssertionError(a.command)
+
+
+def _batch_file(path: str) -> tuple[list, str | None]:
+    """Read a create-batch file: a bare list of items, or an object with
+    `items` and an optional `workflow_title`."""
+    if path == "-":
+        doc = json.load(sys.stdin)
+    else:
+        with open(path, encoding="utf-8") as f:
+            doc = json.load(f)
+    if isinstance(doc, list):
+        return doc, None
+    if isinstance(doc, dict) and isinstance(doc.get("items"), list):
+        return doc["items"], doc.get("workflow_title")
+    raise core.BoardError("a batch is a JSON list of items or an object with an `items` list")
 
 
 def _fail(code: int, exc: Exception) -> int:

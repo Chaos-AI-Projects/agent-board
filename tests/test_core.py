@@ -1171,3 +1171,168 @@ def test_parallel_last_steps_finishing_together_still_resume_the_origin(board):
     t.join(10)
     assert outcome == {"done": True}
     assert core.show(board, iid)["state"] == "ready"
+
+
+# --- MS-647: create a batch of issues in one call -----------------------------
+
+
+def batch(engine, items, **kw):
+    return core.create_batch(engine, items, actor=CHAOS, actor_kind=HUMAN, **kw)
+
+
+def issue_count(engine):
+    with store.session(engine) as s:
+        return s.scalar(select(func.count()).select_from(store.Issue))
+
+
+def test_batch_creates_ready_issues_in_list_order(board):
+    out = batch(board, [{"project": "MS", "title": "a"}, {"project": "MS", "title": "b",
+                                                            "body": "why", "labels": ["x"]}])
+    a, b = out["ids"]
+    assert out["workflow_id"] is None
+    assert core.show(board, a)["state"] == "ready"
+    view = core.show(board, b)
+    assert (view["title"], view["body"], view["labels"]) == ("b", "why", ["x"])
+    assert core.next(board, "w1")["issue"]["id"] == a
+
+
+def test_batch_is_all_or_nothing_when_the_last_item_is_bad(board):
+    items = [{"project": "MS", "title": "a"}, {"project": "MS", "title": "b"},
+             {"project": "NOPE", "title": "c"}]
+    with pytest.raises(core.BoardError):
+        batch(board, items)
+    assert issue_count(board) == 0
+
+
+@pytest.mark.parametrize("bad", [
+    {"project": "MS", "title": "  "},
+    {"project": "MS", "title": "c", "after": [7]},
+    {"project": "MS", "title": "c", "after": ["no-such-ref"]},
+    {"project": "MS", "title": "c", "after": [2]},
+    {"project": "MS", "title": "c", "state": "done"},
+    {"project": "MS", "title": "c", "ref": "a"},
+    {"project": "MS", "title": "c", "rank": "high"},
+    {"project": "MS", "title": "c", "rank": True},
+    {"project": "MS", "title": "c", "labels": "bug"},
+    {"project": "MS", "title": "c", "labels": [3]},
+    {"project": "MS", "title": "c", "labels": ["  "]},
+    {"project": ["MS"], "title": "c"},
+    "not an item",
+])
+def test_batch_validates_every_item_before_writing(board, bad):
+    items = [{"project": "MS", "title": "a", "ref": "a"}, {"project": "MS", "title": "b"}, bad]
+    with pytest.raises(core.BoardError):
+        batch(board, items)
+    assert issue_count(board) == 0
+
+
+def test_batch_refuses_a_cycle_among_its_items(board):
+    items = [{"project": "MS", "title": "a", "ref": "a", "after": ["b"]},
+             {"project": "MS", "title": "b", "ref": "b", "after": ["a"]}]
+    with pytest.raises(core.BoardError, match="cycle"):
+        batch(board, items)
+    assert issue_count(board) == 0
+
+
+def test_batch_after_by_index_by_ref_and_by_existing_id(board):
+    old = ready(board, "old")
+    out = batch(board, [{"project": "MS", "title": "design", "ref": "d"},
+                        {"project": "MS", "title": "left", "after": [0]},
+                        {"project": "MS", "title": "right", "after": ["d", old]}])
+    design, left, right = out["ids"]
+    assert out["refs"] == {"d": design}
+    assert [d["id"] for d in core.show(board, left)["depends_on"]] == [design]
+    assert sorted(d["id"] for d in core.show(board, right)["depends_on"]) == sorted([design, old])
+    assert "depend" in [e["kind"] for e in events(board, right)]
+
+
+def test_batch_as_a_workflow_runs_steps_in_parallel(board):
+    out = batch(board, [{"project": "MS", "title": "design"},
+                        {"project": "MS", "title": "left", "after": [0]},
+                        {"project": "MS", "title": "right", "after": [0]}],
+                workflow_title="Fan out")
+    design, left, right = out["ids"]
+    wf = core.workflow(board, out["workflow_id"])
+    assert wf["title"] == "Fan out"
+    assert [st["id"] for st in wf["steps"]] == [design, left, right]
+    finish(board, core.next(board, "w1"))
+    got = {core.next(board, "w2")["issue"]["id"], core.next(board, "w3")["issue"]["id"]}
+    assert got == {left, right}
+
+
+def test_batch_as_a_workflow_without_after_keeps_strict_order(board):
+    out = batch(board, [{"project": "MS", "title": "one"}, {"project": "MS", "title": "two"}],
+                workflow_title="Chain")
+    one, _ = out["ids"]
+    assert core.next(board, "w1")["issue"]["id"] == one
+    assert core.next(board, "w2") is None
+
+
+def test_batch_replays_one_request_id_without_duplicates(board):
+    items = [{"project": "MS", "title": "a", "ref": "a"}, {"project": "MS", "title": "b",
+                                                             "after": ["a"]}]
+    first = batch(board, items, workflow_title="W", request_id="r1")
+    again = batch(board, items, workflow_title="W", request_id="r1")
+    assert again == first
+    assert issue_count(board) == 2
+    with pytest.raises(core.Conflict):
+        batch(board, items[:1], workflow_title="W", request_id="r1")
+
+
+def test_batch_needs_at_least_one_item(board):
+    with pytest.raises(core.BoardError):
+        batch(board, [])
+
+
+def test_a_bad_rank_in_a_batch_cannot_break_later_creates(board):
+    with pytest.raises(core.BoardError):
+        batch(board, [{"project": "MS", "title": "r", "rank": "high"}])
+    assert core.create(board, "MS", "after", actor=CHAOS, actor_kind=HUMAN)["id"]
+
+
+def test_batch_labels_are_stripped_like_the_web_form(board):
+    (i,) = batch(board, [{"project": "MS", "title": "a", "labels": [" bug ", "ui"]}])["ids"]
+    assert core.show(board, i)["labels"] == ["bug", "ui"]
+
+
+def test_batch_rejects_a_non_string_workflow_title(board):
+    with pytest.raises(core.BoardError):
+        batch(board, [{"project": "MS", "title": "a"}], workflow_title=["W"])
+    assert issue_count(board) == 0
+
+
+def test_a_request_id_shaped_like_an_item_key_is_its_own_call(board):
+    three = [{"project": "MS", "title": t} for t in "abc"]
+    first = batch(board, three, request_id="r1")
+    other = batch(board, [{"project": "MS", "title": t} for t in "xyz"], request_id="r1#1")
+    assert None not in other["ids"] and not set(other["ids"]) & set(first["ids"])
+    assert issue_count(board) == 6
+    # The other order: the sub-key-shaped id goes first.
+    batch(board, [{"project": "MS", "title": "p"}], request_id="s1#1")
+    two = batch(board, [{"project": "MS", "title": "q"}, {"project": "MS", "title": "r"}],
+                request_id="s1")
+    assert None not in two["ids"] and issue_count(board) == 9
+
+
+def test_a_three_item_cycle_names_every_item_in_it(board):
+    items = [{"project": "MS", "title": "a", "after": [2]},
+             {"project": "MS", "title": "b", "after": [0]},
+             {"project": "MS", "title": "c", "after": [1]},
+             {"project": "MS", "title": "d"}]
+    with pytest.raises(core.BoardError, match=r"items 0, 1, 2 .*cycle"):
+        batch(board, items)
+
+
+def test_a_long_batch_chain_is_checked_without_recursion(board):
+    items = [{"project": "MS", "title": f"s{i}", "after": [i - 1] if i else []}
+             for i in range(1500)]
+    items[0]["after"] = [1499]
+    with pytest.raises(core.BoardError, match="cycle"):
+        batch(board, items)
+
+
+def test_a_long_workflow_title_still_replays(board):
+    title = "W" * 300
+    items = [{"project": "MS", "title": "a"}]
+    first = batch(board, items, workflow_title=title, request_id="r1")
+    assert batch(board, items, workflow_title=title, request_id="r1") == first
