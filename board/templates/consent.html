@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Allow {{ client_name }}? -- agent-board{% endblock %}
+{% block main %}
+<div class="consent">
+  <p><strong>{{ client_name }}</strong> wants to use this board as {{ me }}.</p>
+  <p>Allowing it lets that app read and change issues, with every change recorded as an agent
+     acting for you. After you choose, you go back to <code>{{ params.redirect_uri }}</code>.</p>
+  <form class="inline" method="post" action="/oauth/consent">
+    <input type="hidden" name="req" value="{{ req }}">
+    <button name="decision" value="approve">Allow</button>
+    <button name="decision" value="deny">Deny</button>
+  </form>
+</div>
+{% endblock %}

@@ -65,8 +65,9 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.templating import Jinja2Templates
 from markdown_it import MarkdownIt
 from markupsafe import Markup
+from mcp.server.auth.provider import construct_redirect_uri
 
-from board import auth, core, signin, store
+from board import auth, core, oauth, remote, signin, store
 
 ACTOR_HEADER = "Cf-Access-Authenticated-User-Email"
 ACTOR_ENV = "BOARD_WEB_ACTOR"
@@ -401,12 +402,14 @@ def _port() -> int:
     return int(os.environ.get(PORT_ENV, DEFAULT_PORT))
 
 
+def _hosts_env() -> list[str]:
+    return [n.strip().lower() for n in os.environ.get(HOSTS_ENV, "").split(",") if n.strip()]
+
+
 def allowed_hosts() -> frozenset[str]:
     """The Host values this server answers: loopback on its port, plus BOARD_WEB_HOSTS."""
     port = _port()
-    names = [f"127.0.0.1:{port}", f"localhost:{port}",
-             *os.environ.get(HOSTS_ENV, "").split(",")]
-    return frozenset(n.strip().lower() for n in names if n.strip())
+    return frozenset([f"127.0.0.1:{port}", f"localhost:{port}", *_hosts_env()])
 
 
 def _same_origin(request: Request) -> bool:
@@ -528,7 +531,16 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
     authn = authenticator if authenticator is not None else auth.Authenticator.from_env(os.environ)
     # A half-configured sign-in raises here, so the board refuses to start.
     google = signin.SignIn.from_env(os.environ) if sign_in is _FROM_ENV else sign_in
-    app = FastAPI(title="agent-board")
+    # The remote-MCP authorization server and /mcp exist only beside sign-in (MS-649).
+    provider = oauth.Provider(engine, secret=google.secret) if google is not None else None
+    mcp_routes, lifespan = [], None
+    if provider is not None:
+        mcp_routes, lifespan = remote.build(
+            engine, provider, authn, lambda email: email in google.allowed,
+            remote.issuer(_hosts_env(), f"127.0.0.1:{_port()}"))
+    app = FastAPI(title="agent-board", lifespan=lifespan)
+    app.router.routes.extend(mcp_routes)
+    app.state.oauth = provider
     default_tz = zone(os.environ.get(TZ_ENV))
     if default_tz is None and os.environ.get(TZ_ENV, "").strip():
         log.warning("%s=%r is not a known timezone; showing times in UTC",
@@ -573,6 +585,9 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
     async def host_and_origin_check(request: Request, call_next):
         if request.headers.get("host", "").lower() not in hosts:
             return HTMLResponse("unknown host refused", status_code=403)
+        # The remote-MCP paths carry their own authentication, or grant nothing.
+        if google is not None and request.url.path in remote.PATHS:
+            return await call_next(request)
         if request.method == "POST" and not _same_origin(request):
             return HTMLResponse("cross-origin post refused", status_code=403)
         if (google is not None and request.url.path not in SIGNIN_PATHS
@@ -613,6 +628,53 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
             r = page(request, "signed_out.html")
             r.delete_cookie(signin.SESSION_COOKIE, httponly=True, secure=True, samesite="lax")
             return r
+
+        async def consent_request(req):
+            """The registered client and request a consent token names, or None."""
+            found = provider.pending(req)
+            client = await provider.get_client(found[0]) if found else None
+            return (client, found[1]) if client is not None else None
+
+        def bad_consent(request, message="This authorization request is invalid or has "
+                        "expired. Start again from the app that sent you here."):
+            return error(request, 400, message)
+
+        @app.get(oauth.CONSENT_PATH, response_class=HTMLResponse)
+        async def consent_page(request: Request, req: str = ""):
+            found = await consent_request(req)
+            if found is None:
+                return bad_consent(request)
+            client, params = found
+            r = page(request, "consent.html", req=req, params=params,
+                     client_name=client.client_name or client.client_id)
+            r.headers["content-security-policy"] = "frame-ancestors 'none'"
+            return r
+
+        @app.post(oauth.CONSENT_PATH)
+        async def consent(request: Request):
+            form = await request.form()
+            found = await consent_request(form.get("req"))
+            if found is None:
+                return bad_consent(request)
+            client, params = found
+            # The session cookie only: a Bearer or Access credential is not a
+            # human at a browser, and would turn an hour-long Google token
+            # into a 30-day board grant.
+            me = google.session(request.cookies.get(signin.SESSION_COOKIE))
+            if me is None:
+                raise Unauthenticated()
+            decision = form.get("decision")
+            if decision == "approve":
+                code = await run_in_threadpool(provider.issue_code, client.client_id,
+                                               params, me.email)
+                target = construct_redirect_uri(str(params.redirect_uri), code=code,
+                                                state=params.state)
+            elif decision == "deny":
+                target = construct_redirect_uri(str(params.redirect_uri),
+                                                error="access_denied", state=params.state)
+            else:
+                return bad_consent(request, "Choose Allow or Deny.")
+            return RedirectResponse(target, status_code=303)
 
     @app.exception_handler(Unauthenticated)
     async def unauthenticated(request, _exc):

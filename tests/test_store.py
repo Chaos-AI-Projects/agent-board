@@ -21,7 +21,12 @@ TABLES = {
     "template",
     "template_step",
     "dependency",
+    "oauth_client",
+    "oauth_code",
+    "oauth_token",
 }
+
+OAUTH_TABLES = {"oauth_client", "oauth_code", "oauth_token"}
 
 
 def now():
@@ -362,7 +367,7 @@ def test_0004_adds_the_attachment_table_and_downgrade_drops_only_it(engine):
     assert "attachment" in inspect(engine).get_table_names()
     store.downgrade(engine, "0003")
     names = set(inspect(engine).get_table_names())
-    assert "attachment" not in names and TABLES - {"attachment", "dependency"} <= names
+    assert "attachment" not in names and TABLES - {"attachment", "dependency"} - OAUTH_TABLES <= names
 
 
 def test_0005_adds_workflow_origin_and_downgrade_drops_only_it(engine):
@@ -380,4 +385,12 @@ def test_0006_adds_the_dependency_table_and_downgrade_drops_only_it(engine):
     assert "dependency" in inspect(engine).get_table_names()
     store.downgrade(engine, "0005")
     names = set(inspect(engine).get_table_names())
-    assert "dependency" not in names and TABLES - {"dependency"} <= names
+    assert "dependency" not in names and TABLES - {"dependency"} - OAUTH_TABLES <= names
+
+
+def test_0007_adds_the_oauth_tables_and_downgrade_drops_only_them(engine):
+    store.upgrade(engine, "0007")
+    assert OAUTH_TABLES <= set(inspect(engine).get_table_names())
+    store.downgrade(engine, "0006")
+    names = set(inspect(engine).get_table_names())
+    assert not OAUTH_TABLES & names and TABLES - OAUTH_TABLES <= names

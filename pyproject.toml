@@ -13,8 +13,9 @@ dependencies = [
     "fastapi>=0.141.1",
     "jinja2>=3.1.6",
     "markdown-it-py>=3",
-    # 1.x: FastMCP became MCPServer in 2.0. The container env ships 1.26.
-    "mcp>=1.26,<2",
+    # 1.x: FastMCP became MCPServer in 2.0. 1.28 added the `subject` on
+    # auth tokens that MS-649's remote MCP records as the actor.
+    "mcp>=1.28,<2",
     "psycopg[binary]>=3.2",
     # MS-631: verifies IAP, Cloudflare Access and Google ID-token signatures.
     "pyjwt[crypto]>=2.10",

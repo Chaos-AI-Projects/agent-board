@@ -4,8 +4,10 @@ It is the CLI over another transport (design section 1), so the tools are
 the CLI's operations under the same names, minus `migrate`. `edit` stays
 out too, because only a human or the system edits.
 
-One server is one agent. The actor comes from BOARD_ACTOR when the server
-starts, and every write is recorded as `agent`. The lease token is a tool
+Over stdio one server is one agent, and the actor comes from BOARD_ACTOR
+when the server starts. Over HTTP (MS-649) the actor is a callable, asked
+on every tool call for whoever the request's token names. Either way every
+write is recorded as `agent`. The lease token is a tool
 argument, as it is the CLI's `--token`.
 
 A success returns the operation's dict as JSON. `next` on an empty queue
@@ -26,6 +28,7 @@ import json
 import os
 import sys
 from datetime import timedelta
+from typing import Callable
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent
@@ -58,10 +61,14 @@ def _ttl(minutes: float) -> timedelta:
     return ttl
 
 
-def build_server(engine, actor: str) -> FastMCP:
-    """A server whose tools act on `engine` as the agent `actor`."""
+def build_server(engine, actor: str | Callable[[], str]) -> FastMCP:
+    """A server whose tools act on `engine` as the agent `actor`, or as whoever
+    `actor()` returns at each call."""
     mcp = FastMCP("agent-board")
-    who = {"actor": actor, "actor_kind": "agent"}
+    current = actor if callable(actor) else (lambda: actor)
+
+    def who() -> dict:
+        return {"actor": current(), "actor_kind": "agent"}
 
     def run(op, *args, **kwargs) -> CallToolResult:
         # One catch-all, like cli.main(): a list of database and driver
@@ -81,7 +88,7 @@ def build_server(engine, actor: str) -> FastMCP:
         An empty queue returns {"issue": null}. Pass the token to every
         write on the issue until it is done.
         """
-        return run(lambda: core.next(engine, actor, ttl=_ttl(ttl_minutes), project=project,
+        return run(lambda: core.next(engine, current(), ttl=_ttl(ttl_minutes), project=project,
                                      request_id=request_id))
 
     @mcp.tool()
@@ -94,20 +101,20 @@ def build_server(engine, actor: str) -> FastMCP:
                    request_id: str | None = None, preempt: bool = False) -> CallToolResult:
         """Move an issue to another state. `done` and `need-input` need a note."""
         return run(core.transition, engine, id, state, note=note, token=token,
-                   request_id=request_id, preempt=preempt, **who)
+                   request_id=request_id, preempt=preempt, **who())
 
     @mcp.tool()
     def annotate(id: str, note: str, token: str | None = None,
                  request_id: str | None = None) -> CallToolResult:
         """Append a note to an issue."""
-        return run(core.annotate, engine, id, note, token=token, request_id=request_id, **who)
+        return run(core.annotate, engine, id, note, token=token, request_id=request_id, **who())
 
     @mcp.tool()
     def link(id: str, artifact: str, kind: str, closes: bool = False,
              token: str | None = None, request_id: str | None = None) -> CallToolResult:
         """Attach a commit, pr, path or url. `closes` marks it as finishing the issue."""
         return run(core.link, engine, id, artifact, kind=kind, closes=closes, token=token,
-                   request_id=request_id, **who)
+                   request_id=request_id, **who())
 
     @mcp.tool()
     def create(project: str, title: str, body: str = "", state: str = "backlog",
@@ -117,14 +124,14 @@ def build_server(engine, actor: str) -> FastMCP:
         """A new issue, `backlog` unless state says `ready`."""
         return run(core.create, engine, project, title, body=body, state=state, rank=rank,
                    labels=labels or [], workflow_id=workflow_id, position=position,
-                   request_id=request_id, **who)
+                   request_id=request_id, **who())
 
     @mcp.tool()
     def instantiate(template: str, project: str, title: str | None = None,
                     request_id: str | None = None) -> CallToolResult:
         """A workflow and one ready issue per step of the named template."""
         return run(core.instantiate, engine, template, project, title=title,
-                   request_id=request_id, **who)
+                   request_id=request_id, **who())
 
     @mcp.tool()
     def plan(id: str, steps: list[dict[str, str]], token: str | None = None,
@@ -135,7 +142,7 @@ def build_server(engine, actor: str) -> FastMCP:
         issue's. The issue goes onhold, releasing the lease, and comes back
         ready when the last step is done, for you to check and close.
         """
-        return run(core.plan, engine, id, steps, token=token, request_id=request_id, **who)
+        return run(core.plan, engine, id, steps, token=token, request_id=request_id, **who())
 
     @mcp.tool()
     def create_batch(items: list[dict], workflow_title: str | None = None,
@@ -151,7 +158,7 @@ def build_server(engine, actor: str) -> FastMCP:
         needs. Returns `ids` in order, `refs` and `workflow_id`.
         """
         return run(core.create_batch, engine, items, workflow_title=workflow_title,
-                   request_id=request_id, **who)
+                   request_id=request_id, **who())
 
     @mcp.tool()
     def depend(id: str, on: str, request_id: str | None = None) -> CallToolResult:
@@ -161,18 +168,18 @@ def build_server(engine, actor: str) -> FastMCP:
         wait only on their own dependencies, so steps without one run in
         parallel. A self-dependency or a cycle is refused.
         """
-        return run(core.depend, engine, id, on, request_id=request_id, **who)
+        return run(core.depend, engine, id, on, request_id=request_id, **who())
 
     @mcp.tool()
     def undepend(id: str, on: str, request_id: str | None = None) -> CallToolResult:
         """Remove the dependency of issue `id` on issue `on`."""
-        return run(core.undepend, engine, id, on, request_id=request_id, **who)
+        return run(core.undepend, engine, id, on, request_id=request_id, **who())
 
     @mcp.tool()
     def heartbeat(id: str, token: str,
                   ttl_minutes: float = DEFAULT_TTL_MINUTES) -> CallToolResult:
         """Extend the lease on an issue this agent claimed."""
-        return run(lambda: core.heartbeat(engine, id, actor, token, ttl=_ttl(ttl_minutes)))
+        return run(lambda: core.heartbeat(engine, id, current(), token, ttl=_ttl(ttl_minutes)))
 
     return mcp
 

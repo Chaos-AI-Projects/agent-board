@@ -366,3 +366,49 @@ class TemplateStep(Base):
     body: Mapped[str] = mapped_column(Text, default="", server_default="")
 
     template: Mapped[Template] = relationship(back_populates="steps")
+
+
+class OAuthClient(Base):
+    """A client registered for remote MCP (MS-649), its metadata as JSON."""
+
+    __tablename__ = "oauth_client"
+
+    client_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    info: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(Timestamp())
+
+
+class OAuthCode(Base):
+    """An authorization code, stored as its SHA-256 and deleted when used."""
+
+    __tablename__ = "oauth_code"
+
+    code_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    client_id: Mapped[str] = mapped_column(ForeignKey("oauth_client.client_id"), index=True)
+    email: Mapped[str] = mapped_column(String(200))
+    scopes: Mapped[str] = mapped_column(Text)
+    code_challenge: Mapped[str] = mapped_column(String(128))
+    redirect_uri: Mapped[str] = mapped_column(Text)
+    redirect_uri_explicit: Mapped[bool] = mapped_column(Boolean)
+    resource: Mapped[str | None] = mapped_column(Text)
+    expires_at: Mapped[datetime] = mapped_column(Timestamp())
+
+
+class OAuthToken(Base):
+    """An access or refresh token, stored as its SHA-256.
+
+    One grant is the pair a code or a refresh produced; revoking either
+    token revokes the grant.
+    """
+
+    __tablename__ = "oauth_token"
+
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16))
+    grant_id: Mapped[str] = mapped_column(String(64), index=True)
+    client_id: Mapped[str] = mapped_column(ForeignKey("oauth_client.client_id"), index=True)
+    email: Mapped[str] = mapped_column(String(200), index=True)
+    scopes: Mapped[str] = mapped_column(Text)
+    resource: Mapped[str | None] = mapped_column(Text)
+    expires_at: Mapped[datetime] = mapped_column(Timestamp())
+    revoked_at: Mapped[datetime | None] = mapped_column(Timestamp())

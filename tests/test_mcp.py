@@ -221,3 +221,21 @@ def test_a_bad_create_batch_is_an_error_and_writes_nothing(migrated):
                  items=[{"project": "MS", "title": "a"}, {"project": "NOPE", "title": "b"}])
     assert err["code"] == 1
     assert core.search(migrated) == []
+
+
+def test_a_callable_actor_is_resolved_on_every_call(migrated):
+    # Remote MCP (MS-649) serves many agents from one server: the actor is
+    # whoever the request's token names, looked up per call.
+    first, second = ready(board(migrated), "a"), ready(migrated, "b")
+    actors = iter(["alice@example.com", "bob@example.com"])
+
+    async def run():
+        server = build_server(migrated, lambda: next(actors))
+        async with create_connected_server_and_client_session(server) as client:
+            await client.call_tool("next", {})
+            await client.call_tool("next", {})
+
+    anyio.run(run)
+    holders = {i: core.show(migrated, i)["lease_holder"] for i in (first, second)}
+    assert holders == {first: "alice@example.com", second: "bob@example.com"}
+    assert core.show(migrated, first)["events"][-1]["actor_kind"] == "agent"
