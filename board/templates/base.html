@@ -62,6 +62,10 @@
   .column h2 .hide-lane { float: right; border: none; background: none; cursor: pointer; color: #5e6c84; font-size: 16px; line-height: 1; padding: 0 2px; }
   .column h2 .hide-lane:hover { color: #172b4d; }
   .hidden-lanes { margin-top: 4px; }
+  .board-controls { display: flex; align-items: flex-start; gap: 16px; }
+  .filter-banner { margin-left: auto; position: relative; }
+  .board-controls > details[open]:not(.filter-banner) { flex: 1; }
+  .view-panel { position: absolute; right: 0; top: 100%; z-index: 10; width: max-content; max-width: 90vw; background: #fff; border: 1px solid #dfe1e6; border-radius: 4px; padding: 8px 12px; box-shadow: 0 2px 6px rgba(9, 30, 66, 0.2); }
   table.projects { background: #fff; border-collapse: collapse; margin-bottom: 16px; }
   table.projects th, table.projects td { padding: 4px 12px; text-align: left; border-bottom: 1px solid #dfe1e6; }
 </style>

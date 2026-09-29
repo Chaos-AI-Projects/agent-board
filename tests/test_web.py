@@ -1058,11 +1058,11 @@ def test_the_banner_sits_above_the_kanban_collapsed(client, board):
 def test_the_banner_summary_reads_all_or_the_subset(client, board):
     two_projects(board)
     core.create_project(board, "DR", "doc-review")
-    assert banner_summary(client.get("/").text) == "Projects: all"
+    assert banner_summary(client.get("/").text) == "View"
     client.post("/preferences/projects", data={"project": ["MS", "BR"]})
     b = client.get("/").text
     # Board order, not form order.
-    assert banner_summary(b) == "Projects: BR, MS (2 of 3)"
+    assert banner_summary(b) == "View: BR, MS"
     assert re.search(r'<input type="checkbox" name="project" value="DR">', banner(b))
 
 
@@ -1138,6 +1138,44 @@ def test_the_preferences_page_still_saves_every_key(client, board):
         "projects": ["MS"], "lanes": ["ready"], "timezone": ""}
 
 
+# --- the banner is "View", right of the toggles (MS-653) -------------------------
+
+
+def controls_row(html):
+    m = re.search(r'<div class="board-controls">(.*?)</details>\s*</div>', html, re.S)
+    assert m, "no controls row"
+    return m.group(0)
+
+
+def test_the_toggles_and_the_view_banner_share_one_row_view_last(client, board):
+    two_projects(board)
+    html = client.get("/").text
+    row = controls_row(html)
+    assert banner(html) in row
+    assert row.index("<summary>New issue</summary>") < row.index('class="filter-banner"')
+    assert row.index(banner(html)) + len(banner(html)) == row.rindex("</details>") + len("</details>")
+    assert html.index(row) < html.index('<div class="kanban">')
+
+
+def test_the_view_banner_is_right_aligned_and_its_panel_anchored_right(client, board):
+    html = client.get("/").text
+    assert re.search(r"\.board-controls \{[^}]*display: flex", html)
+    assert re.search(r"\.filter-banner \{[^}]*margin-left: auto", html)
+    assert re.search(r"\.view-panel \{[^}]*position: absolute[^}]*right: 0", html)
+    assert '<div class="view-panel">' in banner(html)
+    # An opened toggle keeps the full row width its form had before MS-653.
+    assert re.search(r"\.board-controls > details\[open\]:not\(\.filter-banner\) \{[^}]*flex: 1", html)
+
+
+def test_the_view_panel_holds_the_project_form_and_show_buttons(client, board):
+    two_projects(board)
+    client.post("/preferences/lanes/hide", data={"lane": "done"})
+    b = banner(client.get("/").text)
+    panel = b[b.index('<div class="view-panel">'):]
+    assert 'action="/preferences/projects"' in panel
+    assert 'action="/preferences/lanes/show"' in panel
+
+
 # --- a hide control on each swim lane (MS-651) ---------------------------------
 
 
@@ -1170,11 +1208,13 @@ def test_hiding_a_lane_removes_exactly_that_lane_in_order(client, board):
     assert lanes(client.get("/").text) == rest[1:]
 
 
-def test_hidden_lanes_are_named_in_the_banner_with_a_show_button(client, board):
+def test_hidden_lanes_show_only_inside_the_opened_view_banner(client, board):
     client.post("/preferences/lanes/hide", data={"lane": "cancelled"})
     client.post("/preferences/lanes/hide", data={"lane": "done"})
     html = client.get("/").text
-    assert banner_summary(html) == "Projects: all · Hidden lanes: done, cancelled"
+    # The collapsed summary says nothing about hidden lanes (MS-653).
+    assert banner_summary(html) == "View"
+    assert html.count("Hidden lanes") == banner(html).count("Hidden lanes") == 1
     shows = re.findall(r'<form method="post" action="/preferences/lanes/show">'
                        r'<input type="hidden" name="lane" value="([^"]+)">', banner(html))
     assert shows == ["done", "cancelled"]
