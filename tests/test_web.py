@@ -1138,6 +1138,123 @@ def test_the_preferences_page_still_saves_every_key(client, board):
         "projects": ["MS"], "lanes": ["ready"], "timezone": ""}
 
 
+# --- a hide control on each swim lane (MS-651) ---------------------------------
+
+
+ALL_LANES = list(core.TRANSITIONS)
+
+
+def hide_buttons(html):
+    """The lanes whose heading carries a hide control."""
+    return re.findall(r'<form method="post" action="/preferences/lanes/hide">'
+                      r'<input type="hidden" name="lane" value="([^"]+)">', html)
+
+
+def saved_lanes(client):
+    return web.read_prefs(client.cookies.get(web.PREFS_COOKIE))["lanes"]
+
+
+def test_every_lane_heading_has_a_hide_control(client, board):
+    html = client.get("/").text
+    assert hide_buttons(html) == ALL_LANES
+    assert 'title="Hide this lane"' in html
+
+
+def test_hiding_a_lane_removes_exactly_that_lane_in_order(client, board):
+    r = client.post("/preferences/lanes/hide", data={"lane": "processing"})
+    assert r.status_code == 303 and r.headers["location"] == "/"
+    rest = [s for s in ALL_LANES if s != "processing"]
+    assert saved_lanes(client) == rest
+    assert lanes(client.get("/").text) == rest
+    client.post("/preferences/lanes/hide", data={"lane": "backlog"})
+    assert lanes(client.get("/").text) == rest[1:]
+
+
+def test_hidden_lanes_are_named_in_the_banner_with_a_show_button(client, board):
+    client.post("/preferences/lanes/hide", data={"lane": "cancelled"})
+    client.post("/preferences/lanes/hide", data={"lane": "done"})
+    html = client.get("/").text
+    assert banner_summary(html) == "Projects: all · Hidden lanes: done, cancelled"
+    shows = re.findall(r'<form method="post" action="/preferences/lanes/show">'
+                       r'<input type="hidden" name="lane" value="([^"]+)">', banner(html))
+    assert shows == ["done", "cancelled"]
+
+
+def test_no_hidden_lanes_leaves_the_summary_and_show_buttons_out(client, board):
+    html = client.get("/").text
+    assert "Hidden lanes" not in html and "/preferences/lanes/show" not in html
+
+
+def test_showing_a_lane_restores_it_in_board_order(client, board):
+    client.post("/preferences", data={"lane": ["done", "ready"]})
+    r = client.post("/preferences/lanes/show", data={"lane": "backlog"})
+    assert r.status_code == 303 and r.headers["location"] == "/"
+    assert lanes(client.get("/").text) == ["backlog", "ready", "done"]
+
+
+def test_showing_the_last_hidden_lane_saves_all(client, board):
+    client.post("/preferences/lanes/hide", data={"lane": "onhold"})
+    client.post("/preferences/lanes/show", data={"lane": "onhold"})
+    assert saved_lanes(client) == []
+    assert lanes(client.get("/").text) == ALL_LANES
+
+
+def test_hiding_down_to_one_lane_leaves_no_hide_button(client, board):
+    client.post("/preferences", data={"lane": ["ready", "done"]})
+    assert hide_buttons(client.get("/").text) == ["ready", "done"]
+    client.post("/preferences/lanes/hide", data={"lane": "done"})
+    html = client.get("/").text
+    assert lanes(html) == ["ready"]
+    assert hide_buttons(html) == []
+
+
+def test_hiding_the_last_visible_lane_is_refused(client, board):
+    client.post("/preferences", data={"lane": ["ready"]})
+    r = client.post("/preferences/lanes/hide", data={"lane": "ready"})
+    assert r.status_code == 422 and "set-cookie" not in r.headers
+    assert saved_lanes(client) == ["ready"]
+
+
+def test_a_lane_save_keeps_projects_and_timezone(client, board):
+    two_projects(board)
+    client.post("/preferences", data={"project": ["BR"], "timezone": "Asia/Tokyo"})
+    client.post("/preferences/lanes/hide", data={"lane": "done"})
+    assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
+        "projects": ["BR"], "lanes": [s for s in ALL_LANES if s != "done"],
+        "timezone": "Asia/Tokyo"}
+    client.post("/preferences/lanes/show", data={"lane": "done"})
+    assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
+        "projects": ["BR"], "lanes": [], "timezone": "Asia/Tokyo"}
+
+
+@pytest.mark.parametrize("action", ["hide", "show"])
+@pytest.mark.parametrize("sent", [{}, {"lane": "nonsense"}])
+def test_an_unknown_lane_is_refused(client, board, action, sent):
+    client.post("/preferences/lanes/hide", data={"lane": "done"})
+    r = client.post(f"/preferences/lanes/{action}", data=sent)
+    assert r.status_code == 422 and "set-cookie" not in r.headers
+    assert saved_lanes(client) == [s for s in ALL_LANES if s != "done"]
+
+
+@pytest.mark.parametrize("action", ["hide", "show"])
+def test_the_lane_controls_are_same_origin_posts_only(client, board, action):
+    r = client.post(f"/preferences/lanes/{action}", data={"lane": "done"},
+                    headers={"origin": "https://evil.example"})
+    assert r.status_code == 403 and "set-cookie" not in r.headers
+
+
+def test_the_hide_control_sits_outside_the_drag_lists(client, board):
+    ready(board, "a card")
+    html = client.get("/").text
+    for cards in re.findall(r'<div class="cards"[^>]*>.*?</div>', html, re.S):
+        assert "/preferences/lanes/hide" not in cards
+    # Every remaining lane still carries a drop list after a hide.
+    client.post("/preferences/lanes/hide", data={"lane": "onhold"})
+    html = client.get("/").text
+    drops = re.findall(r'<div class="cards" data-state="([^"]+)">', html)
+    assert drops == lanes(html)
+
+
 def test_the_localstorage_hide_closed_toggle_is_gone(client, board):
     html = client.get("/").text
     assert "hide-closed" not in html and "localStorage" not in html

@@ -736,8 +736,9 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         columns = [(state, [w for w in workflows if w["state"] == state],
                     [i for i in loose if i["state"] == state])
                    for state in prefs["lanes"]]
+        hidden = [s for s in core.TRANSITIONS if s not in prefs["lanes"]]
         return page(request, "board.html", view=view, columns=columns, now=view["now"],
-                    tracked=prefs["projects"])
+                    tracked=prefs["projects"], hidden=hidden)
 
     @app.get("/search", response_class=HTMLResponse)
     def search_page(request: Request, q: str = "", project: str = "", label: str = "",
@@ -785,6 +786,28 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
             return error(request, 422, "Tick at least one project to track.")
         prefs = read_prefs(request.cookies.get(PREFS_COOKIE))
         prefs["projects"] = [] if len(picked) == len(known) else picked
+        return saved(prefs)
+
+    @app.post("/preferences/lanes/{action}")
+    async def save_lane_toggle(request: Request, action: str):
+        """A lane's hide control, or a hidden lane's show button: lanes only."""
+        if action not in ("hide", "show"):
+            return error(request, 404, "No such lane action.")
+        lane = (await request.form()).get("lane")
+        known = list(core.TRANSITIONS)
+        if lane not in known:
+            return error(request, 422, "No such lane.")
+        prefs = read_prefs(request.cookies.get(PREFS_COOKIE))
+        shown = set(_chosen(prefs["lanes"], known))
+        if action == "hide":
+            # [] means every lane, so hiding the last one would bring them all back.
+            if shown == {lane}:
+                return error(request, 422, "The last visible lane cannot be hidden.")
+            shown.discard(lane)
+        else:
+            shown.add(lane)
+        picked = [k for k in known if k in shown]
+        prefs["lanes"] = [] if len(picked) == len(known) else picked
         return saved(prefs)
 
     def saved(prefs):

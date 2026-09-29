@@ -25,16 +25,19 @@
 {% endif %}
 {% set all_tracked = tracked|length == view.projects|length %}
 <details class="filter-banner">
-  <summary>Projects: {% if all_tracked %}all{% else %}{{ tracked|join(", ") }} ({{ tracked|length }} of {{ view.projects|length }}){% endif %}</summary>
+  <summary>Projects: {% if all_tracked %}all{% else %}{{ tracked|join(", ") }} ({{ tracked|length }} of {{ view.projects|length }}){% endif %}{% if hidden %} &middot; Hidden lanes: {{ hidden|join(", ") }}{% endif %}</summary>
   <form method="post" action="/preferences/projects">
     {% for p in view.projects %}<label><input type="checkbox" name="project" value="{{ p.key }}"{% if p.key in tracked %} checked{% endif %}> {{ p.key }} ({{ p.name }})</label>{% endfor %}
     <button>Apply</button>
   </form>
+  {% if hidden %}<div class="hidden-lanes">Hidden lanes:
+    {% for state in hidden %}<form method="post" action="/preferences/lanes/show"><input type="hidden" name="lane" value="{{ state }}"><button>Show {{ state }}</button></form>{% endfor %}
+  </div>{% endif %}
 </details>
 <div class="kanban">
 {% for state, workflows, issues in columns %}
 <section class="column" data-state="{{ state }}">
-  <h2>{{ state }} ({{ workflows|length + issues|length }})</h2>
+  <h2>{{ state }} ({{ workflows|length + issues|length }}){% if columns|length > 1 %}<form method="post" action="/preferences/lanes/hide"><input type="hidden" name="lane" value="{{ state }}"><button class="hide-lane" title="Hide this lane" aria-label="Hide the {{ state }} lane">&times;</button></form>{% endif %}</h2>
   {% if workflows %}<div class="workflows">
   {% for wf in workflows %}
   <article class="card workflow-card" data-workflow="{{ wf.id }}" data-href="/issues/{{ wf.target }}">
