@@ -132,6 +132,30 @@ def test_0003_renames_stored_states_and_downgrade_restores_them(engine):
     assert _stored_states(engine) == (OLD_STATES, [(s, s) for s in OLD_STATES] + [(None, None)])
 
 
+def test_0008_backfills_colour_buckets_in_creation_order(engine):
+    # Keys inserted MS, PE, BR, so key order (BR first) would fail this. Each
+    # project's first issue is also staggered in that order, which is what
+    # PostgreSQL, having no rowid, falls back on.
+    store.upgrade(engine, "0007")
+    t0 = now()
+    with engine.begin() as conn:
+        for n, key in enumerate(["MS", "PE", "BR"]):
+            conn.execute(text("INSERT INTO project (key, name, next_number) "
+                              "VALUES (:k, 'p', 2)"), {"k": key})
+            conn.execute(text(
+                "INSERT INTO issue (id, project_key, title, body, state, rank, version, "
+                "created_at, updated_at) VALUES (:id, :k, 't', '', 'backlog', :n, 1, "
+                ":at, :at)"), {"id": f"{key}-1", "k": key, "n": n,
+                               "at": t0 + timedelta(minutes=n)})
+    store.upgrade(engine)
+    with engine.connect() as conn:
+        rows = conn.execute(text("SELECT key, colour_bucket FROM project")).all()
+    assert dict(rows) == {"MS": 0, "PE": 1, "BR": 2}
+
+    store.downgrade(engine, "0007")
+    assert "colour_bucket" not in {c["name"] for c in inspect(engine).get_columns("project")}
+
+
 def test_a_migration_that_breaks_a_foreign_key_commits_nothing(engine):
     if engine.dialect.name != "sqlite":
         pytest.skip("the foreign-key guard in env.py is SQLite's")

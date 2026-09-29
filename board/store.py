@@ -193,6 +193,8 @@ class Project(Base):
     key: Mapped[str] = mapped_column(String(16), primary_key=True)
     name: Mapped[str] = mapped_column(String(200))
     next_number: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    # One of core.BUCKETS hue buckets, fixed at creation (MS-655).
+    colour_bucket: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     issues: Mapped[list[Issue]] = relationship(back_populates="project")
 

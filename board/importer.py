@@ -33,7 +33,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 from board import store
-from board.core import BoardError, _event
+from board.core import BoardError, _event, new_bucket
 from board.store import Issue, Project
 
 DEFAULT_BACKLOG_PY = "/home/overlord/brain/backlog.py"
@@ -79,7 +79,7 @@ def import_backlog(engine, backlog, root: str | Path | None = None, *,
         for name, its in files.items():
             key = projects[name]
             lines = (root / name).read_text().splitlines()
-            s.add(Project(key=key, name=Path(name).stem,
+            s.add(Project(key=key, name=Path(name).stem, colour_bucket=new_bucket(s, key),
                           next_number=max(_number(it) for it in its) + 1))
             s.flush()
             for it in its:

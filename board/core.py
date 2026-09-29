@@ -96,10 +96,34 @@ def create_project(engine, key: str, name: str) -> dict:
                          f"not {key!r}")
     try:
         with store.session(engine) as s, s.begin():
-            s.add(Project(key=key, name=name))
+            s.add(Project(key=key, name=name, colour_bucket=new_bucket(s, key)))
     except IntegrityError:
         raise Conflict(f"project {key!r} already exists") from None
     return {"key": key, "name": name}
+
+
+# Card colours come from BUCKETS hues, 360/BUCKETS degrees apart (MS-655). The
+# first BUCKETS projects each take the lowest empty bucket; after that a
+# project's bucket depends only on its key, never on what came before it.
+BUCKETS = 10
+
+
+def key_bucket(key: str) -> int:
+    """The bucket a key hashes to. sha256, because hash() is salted per process."""
+    return int.from_bytes(hashlib.sha256(key.encode()).digest()[:4], "big") % BUCKETS
+
+
+def new_bucket(s, key: str) -> int:
+    """The bucket a project created now in session `s` takes."""
+    held = set(s.scalars(select(Project.colour_bucket)))
+    empty = [b for b in range(BUCKETS) if b not in held]
+    return empty[0] if empty else key_bucket(key)
+
+
+def colour_buckets(engine) -> dict[str, int]:
+    """Every project's stored bucket, by key."""
+    with store.session(engine) as s:
+        return dict(s.execute(select(Project.key, Project.colour_bucket)).all())
 
 
 def projects(engine) -> list[dict]:

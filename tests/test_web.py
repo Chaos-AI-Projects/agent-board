@@ -1899,18 +1899,31 @@ def test_the_issue_page_draws_declared_dependencies(board, client):
 # --- project colour (MS-652) -----------------------------------------------------
 
 
-LIVE_KEYS = ("MS", "DR", "AB", "HC", "GS", "BR", "PE")
-
-
 def hue(colour):
     return int(re.search(r"hsl\((\d+)", colour).group(1))
 
 
-def test_a_project_colour_is_a_hue_from_the_key_alone():
-    c = web.project_colour("MS")
-    assert c == web.project_colour("MS")
+def lightness(colour):
+    return int(re.search(r"hsl\(\d+ \d+% (\d+)%", colour).group(1))
+
+
+def test_a_project_colour_comes_from_its_bucket_and_key():
+    c = web.project_colour("MS", 3)
+    assert c == web.project_colour("MS", 3)
     assert set(c) == {"bg", "border"}
-    assert 0 <= hue(c["bg"]) < 360 and hue(c["bg"]) == hue(c["border"])
+    assert hue(c["bg"]) == hue(c["border"])
+    # Within +-10 deg of the bucket's base hue, 36 deg apart.
+    assert abs(hue(c["bg"]) - 3 * 36) <= 10
+    assert 88 <= lightness(c["bg"]) <= 96 and 40 <= lightness(c["border"]) <= 50
+
+
+def test_the_ten_buckets_have_distinct_hues():
+    hues = [hue(web.project_colour("MS", b)["bg"]) for b in range(10)]
+    assert len(set(hues)) == 10
+
+
+def test_two_projects_sharing_a_bucket_differ_in_shade():
+    assert web.project_colour("MS", 0) != web.project_colour("BR", 0)
 
 
 def test_a_project_colour_is_the_same_in_a_fresh_process():
@@ -1919,15 +1932,24 @@ def test_a_project_colour_is_the_same_in_a_fresh_process():
     import sys
     out = subprocess.run(
         [sys.executable, "-c", "import json; from board import web; "
-         "print(json.dumps(web.project_colour('MS')))"],
+         "print(json.dumps(web.project_colour('MS', 4)))"],
         capture_output=True, text=True, check=True,
         env={"PYTHONHASHSEED": "12345", "PATH": ""}).stdout
-    assert json.loads(out) == web.project_colour("MS")
+    assert json.loads(out) == web.project_colour("MS", 4)
 
 
-def test_the_live_project_keys_get_distinct_hues():
-    hues = [hue(web.project_colour(k)["bg"]) for k in LIVE_KEYS]
-    assert len(set(hues)) == len(hues)
+def colour(engine, key):
+    return web.project_colour(key, core.colour_buckets(engine)[key])
+
+
+def test_the_board_colours_by_the_stored_bucket_not_the_key_hash(board, client):
+    # DR is the second project, so bucket 1; its key hash would say 4.
+    core.create_project(board, "DR", "doc-review")
+    assert core.colour_buckets(board)["DR"] == 1 != core.key_bucket("DR")
+    issue_id = core.create(board, "DR", "x", actor=CHAOS, actor_kind=HUMAN, state="ready")["id"]
+    c = card(client.get("/").text, issue_id)
+    assert web.project_colour("DR", 1)["bg"] in c
+    assert web.project_colour("DR", core.key_bucket("DR"))["bg"] not in c
 
 
 def test_a_card_is_tinted_with_its_projects_colour(board, client):
@@ -1936,7 +1958,7 @@ def test_a_card_is_tinted_with_its_projects_colour(board, client):
     dr = core.create(board, "DR", "other", actor=CHAOS, actor_kind=HUMAN, state="ready")["id"]
     html = client.get("/").text
     for key, issue_id in (("MS", ms), ("DR", dr)):
-        c = web.project_colour(key)
+        c = colour(board, key)
         assert c["bg"] in card(html, issue_id) and c["border"] in card(html, issue_id)
 
 
@@ -1944,19 +1966,19 @@ def test_a_leased_card_keeps_its_lease_class_beside_the_project_colour(board, cl
     live = ready(board)
     core.next(board, "run-4")
     c = card(client.get("/").text, live)
-    assert "lease-live" in c and web.project_colour("MS")["border"] in c
+    assert "lease-live" in c and colour(board, "MS")["border"] in c
 
 
 def test_search_results_carry_the_project_colour(board, client):
     issue_id = ready(board, "findme")
     html = client.get("/search", params={"q": "findme"}).text
     hit = re.search(rf'<li class="hit" data-id="{issue_id}"[^>]*>', html).group(0)
-    assert web.project_colour("MS")["bg"] in hit
+    assert colour(board, "MS")["bg"] in hit
 
 
 def test_a_single_project_workflow_card_takes_that_projects_colour(board, client):
     wf = release(board)
-    assert web.project_colour("MS")["border"] in wf_card(client.get("/").text, wf["id"])
+    assert colour(board, "MS")["border"] in wf_card(client.get("/").text, wf["id"])
 
 
 def test_a_mixed_project_workflow_card_keeps_the_workflow_green(board, client):
@@ -1969,6 +1991,6 @@ def test_a_mixed_project_workflow_card_keeps_the_workflow_green(board, client):
 
 def test_the_issue_page_and_projects_list_show_the_key_in_its_colour(board, client):
     issue_id = ready(board)
-    colour = web.project_colour("MS")["border"]
-    assert colour in client.get(f"/issues/{issue_id}").text
-    assert colour in project_row(client.get("/projects").text, "MS")
+    border = colour(board, "MS")["border"]
+    assert border in client.get(f"/issues/{issue_id}").text
+    assert border in project_row(client.get("/projects").text, "MS")

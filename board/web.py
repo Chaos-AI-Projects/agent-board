@@ -129,15 +129,22 @@ def filesize(n: int) -> str:
     return f"{n / 1024:.1f} KB" if n < 1024 * 1024 else f"{n / (1024 * 1024):.1f} MB"
 
 
-def project_colour(key: str) -> dict:
-    """A project's card colours, from a hue hashed out of its key (MS-652).
+def project_colour(key: str, bucket: int | None = None) -> dict:
+    """A project's card colours: a hue from its bucket, a shade from its key (MS-655).
 
-    The key, not the name, because a rename must not recolour every card.
-    sha256 rather than hash(), which Python salts per process. Only the hue
-    varies, so dark text stays readable on every tint.
+    The bucket is the one stored at creation; None falls back to the key's
+    hash bucket. The key, not the name, sets the shade, because a rename must
+    not recolour every card, and sha256 rather than hash(), which Python salts
+    per process. Two projects sharing a bucket differ by up to 10 deg of hue
+    and a small lightness step; saturation stays MS-652's so dark text reads
+    on every tint.
     """
-    h = int.from_bytes(hashlib.sha256(key.encode()).digest()[:4], "big") % 360
-    return {"bg": f"hsl({h} 70% 92%)", "border": f"hsl({h} 65% 45%)"}
+    if bucket is None:
+        bucket = core.key_bucket(key)
+    shade = int.from_bytes(hashlib.sha256(key.encode()).digest()[4:8], "big")
+    h = (bucket * 360 // core.BUCKETS + shade % 21 - 10) % 360
+    step = (shade // 21) % 3 - 1
+    return {"bg": f"hsl({h} 70% {92 + 3 * step}%)", "border": f"hsl({h} 65% {45 + 4 * step}%)"}
 
 
 templates.env.globals["project_colour"] = project_colour
@@ -579,7 +586,9 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
     def page(request, name, status=200, **ctx):
         me = who(request)
         saved_tz = read_prefs(request.cookies.get(PREFS_COOKIE))["timezone"]
+        buckets = core.colour_buckets(engine)
         ctx |= {"me": me.email if me else None, "lease_status": lease_status,
+                "project_colour": lambda key: project_colour(key, buckets.get(key)),
                 "tz": zone(saved_tz) or default_tz, "inline_types": INLINE_TYPES,
                 "sign_in": google is not None,
                 "moves": lambda issue: sorted(core.TRANSITIONS[issue["state"]])}

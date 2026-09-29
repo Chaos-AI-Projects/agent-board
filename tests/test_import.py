@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from board import store
+from board import core, store
 
 BACKLOG_PY = Path(os.environ.get("BACKLOG_PY", "/home/overlord/brain/backlog.py"))
 LIVE_BACKLOG = BACKLOG_PY.parent / "backlog"
@@ -201,3 +201,11 @@ def test_import_maps_each_backlog_state_to_its_lane(tmp_path):
     url = imported(tmp_path, root)
     for n, (state, lane) in enumerate(lanes.items(), 1):
         assert json.loads(board(url, "show", f"MS-{n}").stdout)["state"] == lane, state
+
+
+def test_imported_projects_each_take_an_empty_colour_bucket(tmp_path):
+    # MS-655: an import is project creation too, so no project is left without a hue.
+    root = write_backlog(tmp_path / "backlog", memory_solution=[item("MS-1", "a", "ready")],
+                         brain=[item("BR-1", "b", "ready")])
+    url = imported(tmp_path, root)
+    assert sorted(core.colour_buckets(store.make_engine(url)).values()) == [0, 1]

@@ -1336,3 +1336,45 @@ def test_a_long_workflow_title_still_replays(board):
     items = [{"project": "MS", "title": "a"}]
     first = batch(board, items, workflow_title=title, request_id="r1")
     assert batch(board, items, workflow_title=title, request_id="r1") == first
+
+
+# --- project colour buckets (MS-655) ---------------------------------------------
+
+
+def key_hash_bucket(key):
+    import hashlib
+    return int.from_bytes(hashlib.sha256(key.encode()).digest()[:4], "big") % 10
+
+
+def test_new_projects_take_buckets_in_creation_order(migrated):
+    for key in ("ZZ", "AA", "MM"):
+        core.create_project(migrated, key, key.lower())
+    assert core.colour_buckets(migrated) == {"ZZ": 0, "AA": 1, "MM": 2}
+
+
+def test_a_new_project_takes_the_lowest_empty_bucket(migrated):
+    for key in ("P0", "P1", "P2"):
+        core.create_project(migrated, key, "p")
+    core.delete_project(migrated, "P1")
+    core.create_project(migrated, "NEW", "n")
+    assert core.colour_buckets(migrated)["NEW"] == 1
+
+
+def test_an_eleventh_project_takes_its_key_hash_bucket_whatever_came_first(migrated):
+    ten = [f"P{n}" for n in range(10)]
+    for order in (ten, ten[::-1]):
+        for key in order:
+            core.create_project(migrated, key, "p")
+        assert sorted(core.colour_buckets(migrated).values()) == list(range(10))
+        for key in ("ELEVEN", "TWELVE", "X"):
+            core.create_project(migrated, key, "p")
+            assert core.colour_buckets(migrated)[key] == key_hash_bucket(key)
+        for key in core.colour_buckets(migrated):
+            core.delete_project(migrated, key)
+
+
+def test_a_rename_keeps_the_bucket(migrated):
+    core.create_project(migrated, "AA", "a")
+    core.create_project(migrated, "BB", "b")
+    core.rename_project(migrated, "BB", "renamed")
+    assert core.colour_buckets(migrated) == {"AA": 0, "BB": 1}
