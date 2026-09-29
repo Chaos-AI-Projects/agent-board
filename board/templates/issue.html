@@ -16,6 +16,15 @@
   {% endif %}
 </div>
 
+{% for key, heading, linked in (("waits-on", "Waits on", issue.depends_on), ("blocks", "Blocks", issue.blocks)) if linked %}
+<section class="dependencies" data-dep="{{ key }}">
+<h2>{{ heading }}</h2>
+<ul>{% for d in linked %}
+<li><a href="/issues/{{ d.id }}">{{ d.id }}</a> {{ d.title }} &middot; <b class="state state-{{ d.state }}">{{ d.state }}</b></li>
+{% endfor %}</ul>
+</section>
+{% endfor %}
+
 {% if wf %}
 <section class="workflow">
 <h2>{% if issue.plan %}Plan{% else %}Workflow{% endif %}: {{ wf.title }}</h2>

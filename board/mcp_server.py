@@ -138,6 +138,21 @@ def build_server(engine, actor: str) -> FastMCP:
         return run(core.plan, engine, id, steps, token=token, request_id=request_id, **who)
 
     @mcp.tool()
+    def depend(id: str, on: str, request_id: str | None = None) -> CallToolResult:
+        """Make issue `id` wait until issue `on` is done; `next` skips it until then.
+
+        Once any step of a workflow has a dependency, that workflow's steps
+        wait only on their own dependencies, so steps without one run in
+        parallel. A self-dependency or a cycle is refused.
+        """
+        return run(core.depend, engine, id, on, request_id=request_id, **who)
+
+    @mcp.tool()
+    def undepend(id: str, on: str, request_id: str | None = None) -> CallToolResult:
+        """Remove the dependency of issue `id` on issue `on`."""
+        return run(core.undepend, engine, id, on, request_id=request_id, **who)
+
+    @mcp.tool()
     def heartbeat(id: str, token: str,
                   ttl_minutes: float = DEFAULT_TTL_MINUTES) -> CallToolResult:
         """Extend the lease on an issue this agent claimed."""

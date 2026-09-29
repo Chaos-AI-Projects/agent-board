@@ -1440,3 +1440,132 @@ def test_a_plan_under_an_agents_lease_is_refused_409(board, client):
     r = client.post(f"/issues/{iid}/plan", headers=AS_CHAOS, data={"steps": "a"})
     assert r.status_code == 409
     assert core.show(board, iid)["state"] == "processing"
+
+
+# --- MS-646: dependencies on the issue page and in the chart ------------------------
+
+
+def depend(engine, iid, on):
+    return core.depend(engine, iid, on, actor=CHAOS, actor_kind=HUMAN)
+
+
+def dep_section(html, heading):
+    m = re.search(rf'<section class="dependencies"[^>]*data-dep="{heading}"[^>]*>.*?</section>',
+                  html, re.S)
+    return m.group(0) if m else None
+
+
+def test_the_issue_page_lists_what_it_waits_on_and_what_it_blocks(board, client):
+    a, b, c = ready(board, "first thing"), ready(board, "second"), ready(board, "third")
+    depend(board, b, a)
+    depend(board, c, b)
+    html = client.get(f"/issues/{b}").text
+    waits, blocks = dep_section(html, "waits-on"), dep_section(html, "blocks")
+    assert waits and "Waits on" in waits and f'href="/issues/{a}"' in waits
+    assert "first thing" in waits and '<b class="state state-ready">ready</b>' in waits
+    assert blocks and "Blocks" in blocks and f'href="/issues/{c}"' in blocks
+    assert f'href="/issues/{a}"' not in blocks
+
+
+def test_an_issue_without_dependencies_shows_neither_list(board, client):
+    a = ready(board, "alone")
+    html = client.get(f"/issues/{a}").text
+    assert dep_section(html, "waits-on") is None and dep_section(html, "blocks") is None
+
+
+def dag_wf(deps, done=()):
+    """A fake workflow of steps MS-1.. whose `deps` maps a step number to what it waits on."""
+    n = max([*deps, *(d for ds in deps.values() for d in ds)])
+    return {"steps": [{"id": f"MS-{i}", "title": f"step {i}",
+                       "state": "done" if i in done else "ready",
+                       "depends_on": [f"MS-{d}" for d in deps.get(i, [])]}
+                      for i in range(1, n + 1)]}
+
+
+def dag(wf, here):
+    """(source lines, edge set, gateway node ids) of a dependency chart."""
+    src = [l.strip() for l in web.workflow_diagram(wf, here).splitlines()]
+    edges = set()
+    for l in src:
+        if "-->" in l:
+            parts = [p.strip() for p in l.split("-->")]
+            assert len(parts) == 2, l
+            edges.add(tuple(parts))
+    gateways = {m.group(1) for l in src if (m := re.fullmatch(r'(g\w+)\{"#43;"\}', l))}
+    return src, edges, gateways
+
+
+def succ(edges, node):
+    return {b for a, b in edges if a == node}
+
+
+def pred(edges, node):
+    return {a for a, b in edges if b == node}
+
+
+def test_a_fork_and_a_join_each_get_a_parallel_gateway():
+    # 1 -> {2, 3} -> 4
+    src, edges, gws = dag(dag_wf({2: [1], 3: [1], 4: [2, 3]}), "MS-2")
+    assert len(gws) == 2
+    assert succ(edges, "ev_start") == {"s0"}
+    (fork,) = succ(edges, "s0")
+    assert fork in gws and succ(edges, fork) == {"s1", "s2"}
+    (join,) = pred(edges, "s3")
+    assert join in gws and pred(edges, join) == {"s1", "s2"}
+    assert succ(edges, "s3") == {"ev_end"}
+    assert "class s1 here" in src
+    assert all(f"class {g} gateway" in src for g in gws)
+
+
+def test_a_strict_workflow_draws_no_gateway():
+    assert '{"#43;"}' not in web.workflow_diagram(fake_wf(4), "MS-2")
+    wf = dag_wf({2: [1]})
+    for st in wf["steps"]:
+        st["depends_on"] = []
+    assert '{"#43;"}' not in web.workflow_diagram(wf, "MS-2")
+
+
+def test_parallel_starts_and_ends_meet_the_events_through_gateways():
+    # Two independent chains: 1 -> 2 and 3 -> 4. Any declared dependency makes it a DAG.
+    _, edges, gws = dag(dag_wf({2: [1], 4: [3]}), "MS-1")
+    (fork,) = succ(edges, "ev_start")
+    assert fork in gws and succ(edges, fork) == {"s0", "s2"}
+    (join,) = pred(edges, "ev_end")
+    assert join in gws and pred(edges, join) == {"s1", "s3"}
+
+
+def test_a_dependency_outside_the_workflow_is_not_drawn_but_frees_the_steps():
+    wf = {"steps": [{"id": "MS-1", "title": "a", "state": "ready", "depends_on": ["MS-99"]},
+                    {"id": "MS-2", "title": "b", "state": "ready", "depends_on": []}]}
+    src, edges, gws = dag(wf, "MS-1")
+    assert not any("MS-99" in l for l in src if "-->" in l)
+    (fork,) = succ(edges, "ev_start")
+    assert succ(edges, fork) == {"s0", "s1"}
+
+
+def test_the_window_counts_dependency_layers_not_positions():
+    # Twelve layers, each of two parallel steps: 1,2 | 3,4 | ... | 23,24.
+    deps = {}
+    for layer in range(1, 12):
+        for k in (1, 2):
+            deps[2 * layer + k] = [2 * layer - 1, 2 * layer]
+    wf = dag_wf(deps)
+    src, edges, _ = dag(wf, "MS-11")  # layer 5 (0-based)
+    tasks = [re.match(r"(s\d+)\(", l).group(1) for l in src if re.match(r"s\d+\(", l)]
+    # Layers 2..8 are drawn: fourteen steps, s4..s17.
+    assert tasks == [f"s{n}" for n in range(4, 18)]
+    more = {m.group(1): unescape_label(m.group(2)) for l in src
+            if (m := re.fullmatch(r'(more_\w+)\["(.*)"\]', l))}
+    assert more == {"more_before": "+4 earlier", "more_after": "+6 later"}
+    assert succ(edges, "ev_start") == {"more_before"}
+    assert pred(edges, "ev_end") == {"more_after"}
+
+
+def test_the_issue_page_draws_declared_dependencies(board, client):
+    core.create_template(board, "fan", "Fan", ["design", "left", "right", "join"])
+    wf = core.instantiate(board, "fan", "MS", actor=CHAOS, actor_kind=HUMAN)
+    design, left, right, join = [s["id"] for s in wf["steps"]]
+    for step, on in ((left, design), (right, design), (join, left), (join, right)):
+        depend(board, step, on)
+    src = mermaid_source(client.get(f"/issues/{left}").text)
+    assert src.count('{"#43;"}') == 2

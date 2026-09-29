@@ -19,12 +19,13 @@ import re
 import secrets
 from datetime import timedelta
 
-from sqlalchemy import and_, exists, func, or_, select, update
+from sqlalchemy import and_, exists, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import aliased
 
 from board import store
-from board.store import Artifact, Attachment, Event, Issue, Label, Project, Template, TemplateStep, Workflow
+from board.store import (Artifact, Attachment, Dependency, Event, Issue, Label, Project, Template,
+                         TemplateStep, Workflow)
 
 DEFAULT_TTL = timedelta(minutes=90)
 
@@ -508,6 +509,93 @@ def plan(engine, issue_id: str, steps: list[dict], *, actor: str, actor_kind: st
                   [steps, actor, actor_kind, token, preempt])
 
 
+def depend(engine, issue_id: str, on: str, *, actor: str, actor_kind: str,
+           request_id: str | None = None) -> dict:
+    """Make `issue_id` wait until `on` is done (MS-646).
+
+    `next` skips an issue while anything it depends on is not done. Once any
+    step of a workflow declares a dependency, that workflow drops its strict
+    order and each step waits only on its own dependencies. Declaring one is
+    planning, not work on the issue, so it needs no lease. A self-dependency
+    or an edge that would close a cycle is refused; one that already exists
+    changes nothing.
+    """
+    key = _scoped("depend", issue_id, request_id)
+
+    def body(s):
+        _lock_dependencies(s)
+        issue = _get(s, issue_id, lock=True)
+        target = _get(s, on)
+        if issue.id == target.id:
+            raise BoardError(f"{issue.id} cannot depend on itself")
+        if s.get(Dependency, (issue.id, target.id)) is not None:
+            return _view(s, issue)
+        if _reaches(s, target.id, issue.id):
+            raise BoardError(f"{issue.id} -> {target.id} would close a cycle: "
+                             f"{target.id} already waits on {issue.id}")
+        now = store.db_now(s)
+        s.add(Dependency(issue_id=issue.id, depends_on_id=target.id, created_at=now,
+                         created_by=actor))
+        issue.version += 1
+        issue.updated_at = now
+        _event(s, issue.id, now, actor, actor_kind, "depend", None, None,
+               f"waits on {target.id}", key)
+        return _view(s, issue)
+
+    return _write(engine, key, body, _replay_view, [on, actor, actor_kind])
+
+
+# The advisory lock key every `depend` takes; any constant will do.
+_DEPENDENCY_LOCK = 646
+
+
+def _lock_dependencies(s):
+    """Serialise dependency writes, so two cannot each miss half of a cycle.
+
+    Two `depend` calls that would close a cycle lock different issue rows, and
+    under PostgreSQL's READ COMMITTED neither sees the other's uncommitted
+    edge. This transaction-scoped advisory lock orders them. SQLite needs
+    none: BEGIN IMMEDIATE already serialises writers.
+    """
+    bind = s.get_bind() if hasattr(s, "get_bind") else s
+    if bind.dialect.name == "postgresql":
+        s.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _DEPENDENCY_LOCK})
+
+
+def undepend(engine, issue_id: str, on: str, *, actor: str, actor_kind: str,
+             request_id: str | None = None) -> dict:
+    """Remove the dependency of `issue_id` on `on`; a missing one is `NotFound`."""
+    key = _scoped("undepend", issue_id, request_id)
+
+    def body(s):
+        issue = _get(s, issue_id, lock=True)
+        dep = s.get(Dependency, (issue.id, on))
+        if dep is None:
+            raise NotFound(f"{issue.id} does not depend on {on!r}")
+        s.delete(dep)
+        now = store.db_now(s)
+        issue.version += 1
+        issue.updated_at = now
+        _event(s, issue.id, now, actor, actor_kind, "undepend", None, None,
+               f"no longer waits on {on}", key)
+        return _view(s, issue)
+
+    return _write(engine, key, body, _replay_view, [on, actor, actor_kind])
+
+
+def _reaches(s, start, goal):
+    """Whether `goal` is among the issues `start` waits on, directly or not."""
+    seen, frontier = {start}, [start]
+    while frontier:
+        found = s.scalars(select(Dependency.depends_on_id)
+                          .where(Dependency.issue_id.in_(frontier))).all()
+        if goal in found:
+            return True
+        frontier = [i for i in set(found) if i not in seen]
+        seen.update(frontier)
+    return False
+
+
 def heartbeat(engine, issue_id: str, worker: str, token: str, *,
               ttl: timedelta = DEFAULT_TTL) -> dict:
     """Push the lease expiry forward. Not a state change, so no event.
@@ -593,6 +681,8 @@ def _candidates(now, project):
     it on SQLite, where BEGIN IMMEDIATE already serialises the callers.
     """
     earlier = aliased(Issue)
+    blocker = aliased(Issue)
+    sibling = aliased(Issue)
     q = (
         select(Issue)
         .where(
@@ -603,8 +693,15 @@ def _candidates(now, project):
                      Issue.lease_expires_at < now),
             ),
             ~exists().where(Artifact.issue_id == Issue.id, Artifact.closes.is_(True)),
+            ~exists().where(Dependency.issue_id == Issue.id,
+                            blocker.id == Dependency.depends_on_id,
+                            blocker.state != "done"),
             or_(
                 Issue.workflow_id.is_(None),
+                # A step of a workflow that declares dependencies waits only
+                # on its own (MS-646); otherwise the workflow is strict.
+                exists().where(sibling.workflow_id == Issue.workflow_id,
+                               Dependency.issue_id == sibling.id),
                 ~exists().where(earlier.workflow_id == Issue.workflow_id,
                                 earlier.position < Issue.position,
                                 earlier.state != "done"),
@@ -666,9 +763,15 @@ def _resume_origin(s, step, now):
     An origin a human has moved off `onhold` meanwhile is left where it is.
     """
     wf = step.workflow
-    if wf is None or wf.origin_issue_id is None or wf.steps[-1].state != "done":
+    if wf is None or wf.origin_issue_id is None:
         return
+    # Lock the origin before reading the steps. Parallel steps (MS-646) can
+    # finish together, and under READ COMMITTED each would see the other still
+    # open; the lock orders them and the fresh read sees the first one's commit.
     origin = _get(s, wf.origin_issue_id, lock=True)
+    states = list(s.scalars(select(Issue.state).where(Issue.workflow_id == wf.id)))
+    if not states or any(st != "done" for st in states):
+        return
     if origin.state != "onhold":
         return
     origin.state = "ready"
@@ -880,16 +983,29 @@ def _view(s, issue):
         "workflow": (_workflow_view(s, issue.workflow) | {"position": issue.position}
                      if issue.workflow is not None else None),
         "plan": _workflow_view(s, issue.plan) if issue.plan is not None else None,
+        "depends_on": _linked(s, Dependency.depends_on_id, Dependency.issue_id, issue.id),
+        "blocks": _linked(s, Dependency.issue_id, Dependency.depends_on_id, issue.id),
     }
 
 
+def _linked(s, far, near, issue_id):
+    """The issues at the `far` end of this issue's dependency rows, in id order."""
+    rows = s.execute(select(Issue.id, Issue.title, Issue.state)
+                     .join(Dependency, Issue.id == far).where(near == issue_id)
+                     .order_by(Issue.id))
+    return [{"id": i, "title": t, "state": st} for i, t, st in rows]
+
+
 def _workflow_state(steps):
-    """PRD section 5: done when the last step is done, need-input when any is.
+    """PRD section 5: done when every step is done, need-input when any is.
+
+    In a strict workflow every step is done once the last one is; with
+    declared dependencies (MS-646) the last position can finish first.
 
     A workflow nobody has started sits in `ready` when its first step is
     ready, because that is the step `next` would hand out.
     """
-    if steps and steps[-1].state == "done":
+    if _all_done(steps):
         return "done"
     if any(st.state == "need-input" for st in steps):
         return "need-input"
@@ -900,13 +1016,24 @@ def _workflow_state(steps):
     return "backlog"
 
 
+def _all_done(steps):
+    return bool(steps) and all(st.state == "done" for st in steps)
+
+
 def _workflow_view(s, wf):
     s.refresh(wf)
+    # Each step's dependencies, inside the workflow or not, for the chart (MS-646).
+    deps = {st.id: [] for st in wf.steps}
+    for issue_id, on in s.execute(
+            select(Dependency.issue_id, Dependency.depends_on_id)
+            .where(Dependency.issue_id.in_(list(deps)))
+            .order_by(Dependency.depends_on_id)):
+        deps[issue_id].append(on)
     return {
         "id": wf.id,
         "title": wf.title,
         "origin_issue_id": wf.origin_issue_id,
         "state": _workflow_state(wf.steps),
         "steps": [{"id": st.id, "position": st.position, "title": st.title,
-                   "state": st.state} for st in wf.steps],
+                   "state": st.state, "depends_on": deps[st.id]} for st in wf.steps],
     }

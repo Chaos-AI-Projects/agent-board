@@ -332,3 +332,41 @@ def test_a_second_plan_exits_5(url):
     ok(board(url, "plan", issue_id, "--step", "a", "--token", token))
     proc = board(url, "--actor-kind", "human", "plan", issue_id, "--step", "b", actor=CHAOS)
     assert proc.returncode == 5, proc.stderr
+
+
+# --- dependencies (MS-646) ---------------------------------------------------
+
+
+def test_depend_holds_an_issue_back_until_its_dependency_is_done(url):
+    first, second = ready(url, "first"), ready(url, "second")
+    out = ok(board(url, "depend", first, "--on", second))
+    assert [d["id"] for d in out["depends_on"]] == [second]
+    assert claim(url)["issue"]["id"] == second
+    assert board(url, "next", actor="worker-2").returncode == 3
+
+
+def test_undepend_releases_the_issue(url):
+    first, second = ready(url, "first"), ready(url, "second")
+    ok(board(url, "depend", first, "--on", second))
+    out = ok(board(url, "undepend", first, "--on", second))
+    assert out["depends_on"] == []
+    assert [e["kind"] for e in events(url, first)][-2:] == ["depend", "undepend"]
+
+
+def test_a_dependency_cycle_is_a_json_error(url):
+    first, second = ready(url, "first"), ready(url, "second")
+    ok(board(url, "depend", first, "--on", second))
+    proc = board(url, "depend", second, "--on", first)
+    assert proc.returncode == 1
+    assert json.loads(proc.stderr)["error"] == "BoardError"
+
+
+def test_undepend_of_a_missing_edge_is_a_json_error(url):
+    first, second = ready(url, "first"), ready(url, "second")
+    proc = board(url, "undepend", first, "--on", second)
+    assert proc.returncode == 1
+    assert json.loads(proc.stderr)["error"] == "NotFound"
+
+
+def test_depend_needs_on(url):
+    assert board(url, "depend", ready(url)).returncode == 2

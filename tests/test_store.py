@@ -20,6 +20,7 @@ TABLES = {
     "workflow",
     "template",
     "template_step",
+    "dependency",
 }
 
 
@@ -361,7 +362,7 @@ def test_0004_adds_the_attachment_table_and_downgrade_drops_only_it(engine):
     assert "attachment" in inspect(engine).get_table_names()
     store.downgrade(engine, "0003")
     names = set(inspect(engine).get_table_names())
-    assert "attachment" not in names and TABLES - {"attachment"} <= names
+    assert "attachment" not in names and TABLES - {"attachment", "dependency"} <= names
 
 
 def test_0005_adds_workflow_origin_and_downgrade_drops_only_it(engine):
@@ -372,3 +373,11 @@ def test_0005_adds_workflow_origin_and_downgrade_drops_only_it(engine):
     cols = {c["name"] for c in inspect(engine).get_columns("workflow")}
     assert "origin_issue_id" not in cols
     assert "attachment" in inspect(engine).get_table_names()
+
+
+def test_0006_adds_the_dependency_table_and_downgrade_drops_only_it(engine):
+    store.upgrade(engine, "0006")
+    assert "dependency" in inspect(engine).get_table_names()
+    store.downgrade(engine, "0005")
+    names = set(inspect(engine).get_table_names())
+    assert "dependency" not in names and TABLES - {"dependency"} <= names

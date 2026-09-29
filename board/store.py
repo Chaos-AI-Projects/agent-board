@@ -308,6 +308,18 @@ class Label(Base):
     issue: Mapped[Issue] = relationship(back_populates="labels")
 
 
+class Dependency(Base):
+    """`issue_id` waits until `depends_on_id` is done (MS-646)."""
+
+    __tablename__ = "dependency"
+
+    issue_id: Mapped[str] = mapped_column(ForeignKey("issue.id"), primary_key=True)
+    depends_on_id: Mapped[str] = mapped_column(ForeignKey("issue.id"), primary_key=True,
+                                               index=True)
+    created_at: Mapped[datetime] = mapped_column(Timestamp())
+    created_by: Mapped[str] = mapped_column(String(200))
+
+
 class Workflow(Base):
     """An ordered group of issues. Its state is computed from the steps."""
 

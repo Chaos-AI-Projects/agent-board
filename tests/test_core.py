@@ -9,7 +9,7 @@ import threading
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from board import core, store
 
@@ -939,3 +939,235 @@ def test_an_origin_moved_off_hold_by_a_human_is_left_alone(board):
     core.transition(board, claim["issue"]["id"], "done", note="did a", actor="w2",
                     actor_kind=AGENT, token=claim["lease_token"])
     assert core.show(board, iid)["state"] == "backlog"
+
+
+# --- MS-646: dependencies between issues ------------------------------------------
+
+
+def depend(engine, iid, on, **kw):
+    return core.depend(engine, iid, on, actor=CHAOS, actor_kind=HUMAN, **kw)
+
+
+def finish(engine, claim, note="did it"):
+    core.transition(engine, claim["issue"]["id"], "done", note=note,
+                    actor=claim["issue"]["lease_holder"], actor_kind=AGENT,
+                    token=claim["lease_token"])
+
+
+def test_next_skips_an_issue_until_what_it_depends_on_is_done(board):
+    blocked = ready(board, "blocked", rank=10)
+    first = ready(board, "first", rank=20)
+    depend(board, blocked, first)
+    claim = core.next(board, "w1")
+    assert claim["issue"]["id"] == first
+    assert core.next(board, "w2") is None
+    finish(board, claim)
+    assert core.next(board, "w2")["issue"]["id"] == blocked
+
+
+def test_depend_is_listed_both_ways_and_logged(board):
+    a, b = ready(board, "a"), ready(board, "b")
+    view = depend(board, b, a)
+    assert [d["id"] for d in view["depends_on"]] == [a]
+    assert view["depends_on"][0]["state"] == "ready"
+    assert [d["id"] for d in core.show(board, a)["blocks"]] == [b]
+    ev = events(board, b)[-1]
+    assert (ev["kind"], ev["actor"]) == ("depend", CHAOS)
+    assert a in ev["note"]
+
+
+def test_undepend_removes_the_edge_and_logs_it(board):
+    a, b = ready(board, "a", rank=20), ready(board, "b", rank=10)
+    depend(board, b, a)
+    view = core.undepend(board, b, a, actor=CHAOS, actor_kind=HUMAN)
+    assert view["depends_on"] == []
+    assert events(board, b)[-1]["kind"] == "undepend"
+    assert core.next(board, "w1")["issue"]["id"] == b
+
+
+def test_undepend_of_a_missing_edge_is_not_found(board):
+    a, b = ready(board, "a"), ready(board, "b")
+    with pytest.raises(core.NotFound):
+        core.undepend(board, b, a, actor=CHAOS, actor_kind=HUMAN)
+
+
+def test_depend_twice_is_a_no_op(board):
+    a, b = ready(board, "a"), ready(board, "b")
+    depend(board, b, a)
+    view = depend(board, b, a)
+    assert [d["id"] for d in view["depends_on"]] == [a]
+    assert [e["kind"] for e in events(board, b)].count("depend") == 1
+
+
+def test_a_self_dependency_is_refused(board):
+    a = ready(board, "a")
+    with pytest.raises(core.BoardError):
+        depend(board, a, a)
+    assert core.show(board, a)["depends_on"] == []
+
+
+def test_an_edge_that_closes_a_cycle_is_refused_and_writes_nothing(board):
+    a, b, c = ready(board, "a"), ready(board, "b"), ready(board, "c")
+    depend(board, b, a)
+    depend(board, c, b)
+    with pytest.raises(core.BoardError, match="cycle"):
+        depend(board, a, c)
+    assert core.show(board, a)["depends_on"] == []
+    assert "depend" not in [e["kind"] for e in events(board, a)]
+
+
+def test_depend_on_an_unknown_issue_is_not_found(board):
+    a = ready(board, "a")
+    with pytest.raises(core.NotFound):
+        depend(board, a, "MS-999")
+    with pytest.raises(core.NotFound):
+        depend(board, "MS-999", a)
+
+
+def test_a_workflow_with_no_declared_dependencies_stays_strict(board):
+    core.create_template(board, "release", "Release", ["build", "test", "ship"])
+    wf = core.instantiate(board, "release", "MS", actor=CHAOS, actor_kind=HUMAN)
+    loose_a, loose_b = ready(board, "loose a"), ready(board, "loose b")
+    depend(board, loose_b, loose_a)
+    first = core.next(board, "w1")
+    assert first["issue"]["id"] == wf["steps"][0]["id"]
+    # The strict workflow holds its step 2 back; the loose one is next.
+    assert core.next(board, "w2")["issue"]["id"] == loose_a
+
+
+def test_once_a_step_declares_dependencies_steps_run_in_parallel(board):
+    core.create_template(board, "fan", "Fan", ["design", "left", "right", "join"])
+    wf = core.instantiate(board, "fan", "MS", actor=CHAOS, actor_kind=HUMAN)
+    design, left, right, join = [s["id"] for s in wf["steps"]]
+    depend(board, left, design)
+    depend(board, right, design)
+    depend(board, join, left)
+    depend(board, join, right)
+    claim = core.next(board, "w1")
+    assert claim["issue"]["id"] == design
+    assert core.next(board, "w2") is None
+    finish(board, claim)
+    a, b = core.next(board, "w2"), core.next(board, "w3")
+    assert {a["issue"]["id"], b["issue"]["id"]} == {left, right}
+    assert core.next(board, "w4") is None
+    finish(board, a)
+    assert core.next(board, "w4") is None
+    finish(board, b)
+    assert core.next(board, "w4")["issue"]["id"] == join
+
+
+def test_a_step_with_no_dependency_in_a_declared_workflow_starts_at_once(board):
+    core.create_template(board, "two", "Two", ["first", "second"])
+    wf = core.instantiate(board, "two", "MS", actor=CHAOS, actor_kind=HUMAN)
+    first, second = [s["id"] for s in wf["steps"]]
+    other = ready(board, "outside")
+    depend(board, first, other)
+    # `second` declares nothing, and the workflow is no longer strict.
+    assert core.next(board, "w1")["issue"]["id"] == second
+
+
+def test_a_dependency_across_workflows_is_honoured(board):
+    core.create_template(board, "one", "One", ["only"])
+    wf1 = core.instantiate(board, "one", "MS", actor=CHAOS, actor_kind=HUMAN)
+    wf2 = core.instantiate(board, "one", "MS", actor=CHAOS, actor_kind=HUMAN)
+    a, b = wf1["steps"][0]["id"], wf2["steps"][0]["id"]
+    core.edit(board, a, actor=CHAOS, expected_version=1, rank=100)
+    depend(board, b, a)
+    claim = core.next(board, "w1")
+    assert claim["issue"]["id"] == a
+    assert core.next(board, "w2") is None
+    finish(board, claim)
+    assert core.next(board, "w2")["issue"]["id"] == b
+
+
+def test_a_parallel_workflow_is_done_only_when_every_step_is(board):
+    core.create_template(board, "two", "Two", ["first", "second"])
+    wf = core.instantiate(board, "two", "MS", actor=CHAOS, actor_kind=HUMAN)
+    first, second = [s["id"] for s in wf["steps"]]
+    # Never authorized, so `first` stays blocked while `second` finishes.
+    other = core.create(board, "MS", "outside", actor=CHAOS, actor_kind=HUMAN)["id"]
+    depend(board, first, other)
+    claim = core.next(board, "w1")
+    assert claim["issue"]["id"] == second
+    finish(board, claim)
+    assert core.show(board, second)["workflow"]["state"] != "done"
+
+
+def test_depend_replays_on_the_same_request_id(board):
+    a, b = ready(board, "a"), ready(board, "b")
+    depend(board, b, a, request_id="r1")
+    depend(board, b, a, request_id="r1")
+    assert [e["kind"] for e in events(board, b)].count("depend") == 1
+
+
+def test_a_workflows_steps_list_what_each_depends_on(board):
+    core.create_template(board, "fan", "Fan", ["design", "left", "right"])
+    wf = core.instantiate(board, "fan", "MS", actor=CHAOS, actor_kind=HUMAN)
+    design, left, right = [s["id"] for s in wf["steps"]]
+    other = ready(board, "outside")
+    depend(board, left, design)
+    depend(board, right, design)
+    depend(board, right, other)
+    steps = core.show(board, design)["workflow"]["steps"]
+    assert [st["depends_on"] for st in steps] == [[], [design], sorted([design, other])]
+
+
+def test_a_concurrent_depend_cannot_close_a_cycle(board):
+    """Each side of a cycle locks a different row, so the graph needs one lock of its own."""
+    if board.dialect.name != "postgresql":
+        pytest.skip("BEGIN IMMEDIATE serialises SQLite writers; this race is PostgreSQL-only")
+    a, b = ready(board, "a"), ready(board, "b")
+    outcome = {}
+
+    def other_side():
+        try:
+            depend(board, a, b)
+            outcome["result"] = "written"
+        except core.BoardError as e:
+            outcome["result"] = str(e)
+
+    # A concurrent `depend(b, on=a)`, holding the dependency lock, not yet committed.
+    with board.connect() as conn:
+        tx = conn.begin()
+        core._lock_dependencies(conn)
+        conn.execute(store.Dependency.__table__.insert().values(
+            issue_id=b, depends_on_id=a, created_at=func.current_timestamp(), created_by=CHAOS))
+        t = threading.Thread(target=other_side)
+        t.start()
+        t.join(0.5)
+        tx.commit()
+    t.join(10)
+    assert "cycle" in outcome["result"]
+    assert core.show(board, a)["depends_on"] == []
+
+
+def test_parallel_last_steps_finishing_together_still_resume_the_origin(board):
+    """Each finisher sees the other step open unless the origin lock orders them."""
+    if board.dialect.name != "postgresql":
+        pytest.skip("BEGIN IMMEDIATE serialises SQLite writers; this race is PostgreSQL-only")
+    iid, token = claimed(board)
+    view = plan(board, iid, token, steps=("left", "right"))
+    left, right = [st["id"] for st in view["plan"]["steps"]]
+    never = core.create(board, "MS", "never", actor=CHAOS, actor_kind=HUMAN)["id"]
+    depend(board, left, never)
+    claim = core.next(board, "w2")
+    assert claim["issue"]["id"] == right
+    outcome = {}
+
+    def finish_right():
+        finish(board, claim)
+        outcome["done"] = True
+
+    # `left` finishing in a concurrent transaction that has reached the origin lock.
+    with board.connect() as conn:
+        tx = conn.begin()
+        conn.execute(select(store.Issue).where(store.Issue.id == iid).with_for_update())
+        conn.execute(store.Issue.__table__.update().where(store.Issue.id == left)
+                     .values(state="done"))
+        t = threading.Thread(target=finish_right)
+        t.start()
+        t.join(0.5)
+        tx.commit()
+    t.join(10)
+    assert outcome == {"done": True}
+    assert core.show(board, iid)["state"] == "ready"

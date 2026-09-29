@@ -227,16 +227,48 @@ def _diagram_window(wf: dict, here: str | None) -> tuple[int, int]:
     return lo, min(len(steps), lo + width)
 
 
+def _dependency_layers(steps: list[dict]) -> tuple[dict[str, int], dict[str, list[str]]]:
+    """Each step's layer, and its dependencies inside the workflow (MS-646).
+
+    A step with no dependency inside the workflow is layer 0; any other sits
+    one layer past its deepest dependency. A dependency on an issue outside
+    the workflow is not drawn: it only frees the workflow from strict order.
+    Core refuses cycles, so the steps always settle.
+    """
+    ids = {st["id"] for st in steps}
+    deps = {st["id"]: [d for d in st.get("depends_on", ()) if d in ids] for st in steps}
+    layer: dict[str, int] = {}
+    while len(layer) < len(deps):
+        settled = len(layer)
+        for i, on in deps.items():
+            if i not in layer and all(d in layer for d in on):
+                layer[i] = 1 + max((layer[d] for d in on), default=-1)
+        if len(layer) == settled:
+            raise ValueError("dependency cycle in workflow")
+    return layer, deps
+
+
+def _layer_window(layers: int, at: int) -> tuple[int, int]:
+    """The `[lo, hi)` layers the chart draws, `_diagram_window`'s rule over layers."""
+    width = 2 * DIAGRAM_REACH + 1
+    lo = min(max(0, at - DIAGRAM_REACH), max(0, layers - width))
+    return lo, min(layers, lo + width)
+
+
 def workflow_diagram(wf: dict, here: str | None) -> str:
     """The workflow as Mermaid `flowchart LR` source in BPMN notation (MS-645).
 
     A start event (circle), one rounded task per step, an end event (double
-    circle), joined by one sequence flow; the workflow is strictly ordered, so
-    there are no gateways. Only the window around the current step is drawn:
-    the steps outside it collapse into a "+N earlier" / "+N later" node that
-    opens the full step list. Node ids are positional (`s0`, `s1`, ...) so no
-    issue id is ever parsed as syntax; the id, title and state appear only
-    inside the escaped label. The step whose id is `here` is the one outlined.
+    circle). Only the window around the current step is drawn: the steps
+    outside it collapse into a "+N earlier" / "+N later" node that opens the
+    full step list. Node ids are positional (`s0`, `s1`, ...) so no issue id
+    is ever parsed as syntax; the id, title and state appear only inside the
+    escaped label. The step whose id is `here` is the one outlined.
+
+    A workflow with no declared dependencies is strictly ordered: one sequence
+    flow, no gateways. Once any step declares one (MS-646) the chart draws the
+    dependency graph instead, with a parallel gateway at every fork and join,
+    and the window counts dependency layers rather than positions.
     """
     lines = ["flowchart LR"]
     for state, fill in _STATE_FILLS.items():
@@ -244,42 +276,111 @@ def workflow_diagram(wf: dict, here: str | None) -> str:
     lines.append("  classDef here stroke:#0052cc,stroke-width:3px")
     lines.append("  classDef event fill:#ffffff,stroke:#42526e,stroke-width:2px")
     lines.append("  classDef more fill:#ffffff,stroke:#6b778c,stroke-dasharray:4 3")
+    lines.append("  classDef gateway fill:#ffffff,stroke:#42526e")
     steps = wf["steps"]
-    lo, hi = _diagram_window(wf, here)
-    # `end` is a flowchart keyword, so the events carry a prefix. The event and
-    # collapse labels are one line, which mermaid renders without markdown, so
-    # they take a bare `#43;` for `+`: `_mermaid_text`'s `#92;` would show.
+    # `end` is a flowchart keyword, so the events carry a prefix. The event,
+    # collapse and gateway labels are one line, which mermaid renders without
+    # markdown, so they take a bare `#43;` for `+`: `_mermaid_text`'s `#92;` would show.
+    # Both events are declared before any flow names them, so each keeps its shape.
     lines.append('  ev_start(("start"))')
-    chain = ["ev_start"]
-    if lo:
-        lines.append(f'  more_before["#43;{lo} earlier"]')
-        chain.append("more_before")
-    for n in range(lo, hi):
-        step = steps[n]
-        label = "<br/>".join(_mermaid_text(part)
-                             for part in (step["id"], step["title"], step["state"]))
-        lines.append(f'  s{n}("{label}")')
-        chain.append(f"s{n}")
-    if hi < len(steps):
-        lines.append(f'  more_after["#43;{len(steps) - hi} later"]')
-        chain.append("more_after")
     lines.append('  ev_end((("end")))')
-    chain.append("ev_end")
-    lines.append("  " + " --> ".join(chain))
-    for n in range(lo, hi):
+    if any(st.get("depends_on") for st in steps):
+        shown, more = _dag_flows(lines, wf, here)
+    else:
+        shown, more = _strict_flows(lines, wf, here)
+    for n in shown:
         step = steps[n]
         lines.append(f'  click s{n} "/issues/{quote(step["id"], safe="")}"')
         # One class per line: Mermaid reads `a,b` as a single class name.
         lines.append(f"  class s{n} {_state_class(step['state'])}")
         if step["id"] == here:
             lines.append(f"  class s{n} here")
-    for node in ("more_before", "more_after"):
-        if node in chain:
-            lines.append(f'  click {node} "#{STEP_LIST_ANCHOR}"')
-            lines.append(f"  class {node} more")
+    for node in more:
+        lines.append(f'  click {node} "#{STEP_LIST_ANCHOR}"')
+        lines.append(f"  class {node} more")
     lines.append("  class ev_start event")
     lines.append("  class ev_end event")
     return "\n".join(lines)
+
+
+def _task(lines: list[str], steps: list[dict], n: int) -> None:
+    step = steps[n]
+    label = "<br/>".join(_mermaid_text(part)
+                         for part in (step["id"], step["title"], step["state"]))
+    lines.append(f'  s{n}("{label}")')
+
+
+def _strict_flows(lines: list[str], wf: dict, here: str | None):
+    """A strictly ordered workflow: one chain through the window of positions."""
+    steps = wf["steps"]
+    lo, hi = _diagram_window(wf, here)
+    chain = ["ev_start"]
+    if lo:
+        lines.append(f'  more_before["#43;{lo} earlier"]')
+        chain.append("more_before")
+    for n in range(lo, hi):
+        _task(lines, steps, n)
+        chain.append(f"s{n}")
+    if hi < len(steps):
+        lines.append(f'  more_after["#43;{len(steps) - hi} later"]')
+        chain.append("more_after")
+    chain.append("ev_end")
+    lines.append("  " + " --> ".join(chain))
+    return range(lo, hi), [n for n in ("more_before", "more_after") if n in chain]
+
+
+def _dag_flows(lines: list[str], wf: dict, here: str | None):
+    """A workflow with declared dependencies: its graph through a window of layers.
+
+    Every dependency inside the workflow is a sequence flow; a step with none
+    starts from the start event, and a step nothing waits on flows to the end.
+    Steps outside the window collapse into the "+N" nodes and their flows
+    follow them. A node with several outgoing flows forks through a parallel
+    gateway (diamond, "+"), and one with several incoming flows joins through one.
+    """
+    steps = wf["steps"]
+    layer, deps = _dependency_layers(steps)
+    ids = [st["id"] for st in steps]
+    centre = here if here in layer else workflow_target(wf)
+    lo, hi = _layer_window(max(layer.values()) + 1, layer.get(centre, 0))
+    node = {}
+    for n, i in enumerate(ids):
+        node[i] = ("more_before" if layer[i] < lo
+                   else "more_after" if layer[i] >= hi else f"s{n}")
+    before = sum(1 for i in ids if layer[i] < lo)
+    after = sum(1 for i in ids if layer[i] >= hi)
+    if before:
+        lines.append(f'  more_before["#43;{before} earlier"]')
+    shown = [n for n, i in enumerate(ids) if lo <= layer[i] < hi]
+    for n in shown:
+        _task(lines, steps, n)
+    if after:
+        lines.append(f'  more_after["#43;{after} later"]')
+
+    waited_on = {d for on in deps.values() for d in on}
+    flows: list[tuple[str, str]] = []
+    for i in ids:
+        sources = [node[d] for d in deps[i]] or ["ev_start"]
+        for a in sources:
+            if a != node[i] and (a, node[i]) not in flows:
+                flows.append((a, node[i]))
+        if i not in waited_on and (node[i], "ev_end") not in flows:
+            flows.append((node[i], "ev_end"))
+    out = {a: sum(1 for x, _ in flows if x == a) for a, _ in flows}
+    into = {b: sum(1 for _, y in flows if y == b) for _, b in flows}
+    forks = [a for a in dict.fromkeys(a for a, _ in flows) if out[a] > 1]
+    joins = [b for b in dict.fromkeys(b for _, b in flows) if into[b] > 1]
+    for g in [f"gf_{a}" for a in forks] + [f"gj_{b}" for b in joins]:
+        lines.append(f'  {g}{{"#43;"}}')
+    for a in forks:
+        lines.append(f"  {a} --> gf_{a}")
+    for a, b in flows:
+        lines.append(f"  {'gf_' + a if a in forks else a} --> {'gj_' + b if b in joins else b}")
+    for b in joins:
+        lines.append(f"  gj_{b} --> {b}")
+    for g in [f"gf_{a}" for a in forks] + [f"gj_{b}" for b in joins]:
+        lines.append(f"  class {g} gateway")
+    return shown, [n for n in ("more_before", "more_after") if n in node.values()]
 
 
 def _local(request: Request) -> auth.Identity | None:

@@ -70,7 +70,7 @@ def claimed(engine):
 def test_the_tools_are_the_cli_operations(migrated):
     names = {t.name for t in list_tools(migrated)}
     assert names == {"next", "show", "transition", "annotate", "link", "create",
-                     "instantiate", "heartbeat", "plan"}
+                     "instantiate", "heartbeat", "plan", "depend", "undepend"}
 
 
 def test_next_claims_as_the_server_actor_and_returns_the_token(migrated):
@@ -175,3 +175,25 @@ def test_plan_without_the_lease_is_code_4(migrated):
     issue_id = ready(migrated)
     out = failed(migrated, "plan", id=issue_id, steps=[{"title": "a"}])
     assert (out["error"], out["code"]) == ("LeaseLost", 4)
+
+
+def test_depend_holds_an_issue_back_until_its_dependency_is_done(migrated):
+    first, second = ready(board(migrated), "first"), ready(migrated, "second")
+    out = ok(migrated, "depend", id=first, on=second)
+    assert [d["id"] for d in out["depends_on"]] == [second]
+    assert core.show(migrated, first)["events"][-1]["actor"] == WORKER
+    assert ok(migrated, "next")["issue"]["id"] == second
+    assert ok(migrated, "next") == {"issue": None}
+
+
+def test_undepend_removes_the_dependency(migrated):
+    first, second = ready(board(migrated), "first"), ready(migrated, "second")
+    ok(migrated, "depend", id=first, on=second)
+    assert ok(migrated, "undepend", id=first, on=second)["depends_on"] == []
+
+
+def test_a_dependency_cycle_is_code_1(migrated):
+    first, second = ready(board(migrated), "first"), ready(migrated, "second")
+    ok(migrated, "depend", id=first, on=second)
+    err = failed(migrated, "depend", id=second, on=first)
+    assert (err["error"], err["code"]) == ("BoardError", 1)

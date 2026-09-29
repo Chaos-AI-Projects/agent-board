@@ -139,6 +139,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--preempt", action="store_true")
     writes(sp)
 
+    sp = op("depend", help="make an issue wait until another is done")
+    sp.add_argument("id")
+    sp.add_argument("--on", required=True, help="the issue it waits on")
+    writes(sp, token=False)
+
+    sp = op("undepend", help="remove a dependency; exit 1 if there is none")
+    sp.add_argument("id")
+    sp.add_argument("--on", required=True, help="the issue it no longer waits on")
+    writes(sp, token=False)
+
     sp = op("heartbeat", help="extend the lease on a claimed issue")
     sp.add_argument("id")
     sp.add_argument("--token", required=True)
@@ -187,6 +197,10 @@ def _run(engine, a) -> dict | None:
         case "plan":
             return core.plan(engine, a.id, [{"title": t} for t in a.steps], token=a.token,
                              request_id=a.request_id, preempt=a.preempt, **who)
+        case "depend":
+            return core.depend(engine, a.id, a.on, request_id=a.request_id, **who)
+        case "undepend":
+            return core.undepend(engine, a.id, a.on, request_id=a.request_id, **who)
         case "heartbeat":
             return core.heartbeat(engine, a.id, a.actor, a.token, ttl=a.ttl)
         case "import-backlog":
