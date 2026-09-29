@@ -38,6 +38,12 @@ writes as the reader, so an uploaded page opening on its origin could act as the
 Times are stored in UTC and shown in a zone: the one saved in `board_prefs`,
 else `BOARD_TIMEZONE`, else UTC. An unknown name in either is skipped, and
 one in the environment is logged rather than stopping the board.
+
+With Google sign-in configured (`board.signin`, MS-648) the board logs a browser
+in by itself. The actor is then, in order: a verified assertion, a Bearer
+token, the session cookie. Local mode is off, and every path but `/login` and
+`/auth/callback` needs one of the three. An anonymous browser GET is sent to
+`/login` and comes back to where it was; anything else gets 401.
 """
 
 from __future__ import annotations
@@ -60,7 +66,7 @@ from fastapi.templating import Jinja2Templates
 from markdown_it import MarkdownIt
 from markupsafe import Markup
 
-from board import auth, core, store
+from board import auth, core, signin, store
 
 ACTOR_HEADER = "Cf-Access-Authenticated-User-Email"
 ACTOR_ENV = "BOARD_WEB_ACTOR"
@@ -511,9 +517,17 @@ def _chosen(saved: list[str], known: list[str]) -> list[str]:
     return picked or list(known)
 
 
-def create_app(engine=None, authenticator: auth.Authenticator | None = None) -> FastAPI:
+_FROM_ENV = object()
+# Reachable signed out: the sign-in flow itself, and signing out.
+SIGNIN_PATHS = frozenset({"/login", signin.CALLBACK_PATH, "/logout"})
+
+
+def create_app(engine=None, authenticator: auth.Authenticator | None = None,
+               sign_in=_FROM_ENV) -> FastAPI:
     engine = engine if engine is not None else store.make_engine()
     authn = authenticator if authenticator is not None else auth.Authenticator.from_env(os.environ)
+    # A half-configured sign-in raises here, so the board refuses to start.
+    google = signin.SignIn.from_env(os.environ) if sign_in is _FROM_ENV else sign_in
     app = FastAPI(title="agent-board")
     default_tz = zone(os.environ.get(TZ_ENV))
     if default_tz is None and os.environ.get(TZ_ENV, "").strip():
@@ -524,8 +538,12 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None) -> 
     def who(request) -> auth.Identity | None:
         # Resolved once per request: a Bearer token costs a Google round trip.
         if not hasattr(request.state, "identity"):
-            request.state.identity = (authn.identify(request.headers) if authn.verified
-                                      else _local(request))
+            found = authn.identify(request.headers) if authn.verified else None
+            if found is None and google is not None:
+                found = google.session(request.cookies.get(signin.SESSION_COOKIE))
+            if found is None and not authn.verified and google is None:
+                found = _local(request)
+            request.state.identity = found
         return request.state.identity
 
     def actor(request) -> auth.Identity:
@@ -539,6 +557,7 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None) -> 
         saved_tz = read_prefs(request.cookies.get(PREFS_COOKIE))["timezone"]
         ctx |= {"me": me.email if me else None, "lease_status": lease_status,
                 "tz": zone(saved_tz) or default_tz, "inline_types": INLINE_TYPES,
+                "sign_in": google is not None,
                 "moves": lambda issue: sorted(core.TRANSITIONS[issue["state"]])}
         return templates.TemplateResponse(request, name, ctx, status_code=status)
 
@@ -556,10 +575,49 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None) -> 
             return HTMLResponse("unknown host refused", status_code=403)
         if request.method == "POST" and not _same_origin(request):
             return HTMLResponse("cross-origin post refused", status_code=403)
+        if (google is not None and request.url.path not in SIGNIN_PATHS
+                and await run_in_threadpool(who, request) is None):
+            if request.method == "GET" and "text/html" in request.headers.get("accept", ""):
+                path = request.url.path + (f"?{request.url.query}" if request.url.query else "")
+                return RedirectResponse(f"/login?next={quote(path, safe='')}", status_code=303)
+            return HTMLResponse("sign in first", status_code=401)
         return await call_next(request)
+
+    if google is not None:
+        @app.get("/login")
+        def login(request: Request, next: str = "/"):
+            url, flow = google.start(request.headers["host"], next)
+            r = RedirectResponse(url, status_code=303)
+            r.set_cookie(signin.FLOW_COOKIE, flow, max_age=signin.FLOW_SECONDS,
+                         path=signin.CALLBACK_PATH, httponly=True, secure=True, samesite="lax")
+            return r
+
+        @app.get(signin.CALLBACK_PATH)
+        def callback(request: Request):
+            done = google.finish(request.query_params, request.cookies.get(signin.FLOW_COOKIE))
+            if done is None:
+                r = error(request, 401, "Sign-in failed. Start again from /login.")
+            else:
+                identity, next_path = done
+                r = RedirectResponse(next_path, status_code=303)
+                r.set_cookie(signin.SESSION_COOKIE, google.session_cookie(identity),
+                             max_age=google.session_seconds, httponly=True, secure=True,
+                             samesite="lax")
+            r.delete_cookie(signin.FLOW_COOKIE, path=signin.CALLBACK_PATH, httponly=True,
+                            secure=True, samesite="lax")
+            return r
+
+        @app.post("/logout")
+        def logout(request: Request):
+            request.state.identity = None
+            r = page(request, "signed_out.html")
+            r.delete_cookie(signin.SESSION_COOKIE, httponly=True, secure=True, samesite="lax")
+            return r
 
     @app.exception_handler(Unauthenticated)
     async def unauthenticated(request, _exc):
+        if google is not None:
+            return error(request, 401, "Sign in first, at /login.")
         if authn.verified:
             return error(request, 401, "No verified, allowed credential on this request: "
                          "writes need an IAP or Access assertion, or a Google token.")

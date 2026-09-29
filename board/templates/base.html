@@ -61,7 +61,7 @@
 </style>
 </head>
 <body>
-<header><a href="/">agent-board</a><a href="/search">Search</a><a href="/preferences">Preferences</a><a href="/projects">Projects</a><span>{{ me or "not signed in" }}</span></header>
+<header><a href="/">agent-board</a><a href="/search">Search</a><a href="/preferences">Preferences</a><a href="/projects">Projects</a><span>{{ me or "not signed in" }}</span>{% if sign_in and me %}<form method="post" action="/logout" style="margin:0"><button type="submit">Sign out</button></form>{% elif sign_in %}<a href="/login">Sign in</a>{% endif %}</header>
 <main>{% block main %}{% endblock %}</main>
 </body>
 </html>

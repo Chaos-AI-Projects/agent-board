@@ -149,6 +149,19 @@ anything else is a human. `BOARD_ALLOWED_EMAILS`, comma-separated, gates all thr
 an empty allowlist refuses everyone, and a half-configured one, such as a team domain with no AUD,
 refuses rather than falling back to local mode.
 
+The board can also sign a browser in by itself, with no proxy in front. Set all three of
+`BOARD_GOOGLE_OAUTH_CLIENT_ID`, `BOARD_GOOGLE_OAUTH_CLIENT_SECRET` (a Google OAuth *web* client) and
+`BOARD_SESSION_SECRET` (at least 32 characters); any one without the others refuses to start.
+`/login` runs Google's OpenID Connect code flow with PKCE, and `/auth/callback` checks the ID token
+and sets a signed session cookie lasting `BOARD_SESSION_HOURS` (default 168). Register
+`https://<board host>/auth/callback` as the client's redirect URI; on 127.0.0.1 or localhost the
+board uses `http://` instead. `BOARD_ALLOWED_EMAILS` gates sign-in and is re-checked on every
+request. A signed-in actor is a human, and a proxy assertion or Bearer token still wins over the
+session cookie. With sign-in on, local mode is off, every page needs a credential, an anonymous
+browser is sent to `/login` and back, and anything else gets 401. Sign out is `POST /logout`. It deletes the cookie in that browser only: the session is stateless, so a
+copied cookie stays valid until it expires, its email leaves the allowlist, or `BOARD_SESSION_SECRET`
+changes.
+
 A card's lease renders three ways:
 
 - **live**, "Held by run-2 until T", with a solid blue edge;
