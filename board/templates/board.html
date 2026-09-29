@@ -23,6 +23,14 @@
   </form>
 </details>
 {% endif %}
+{% set all_tracked = tracked|length == view.projects|length %}
+<details class="filter-banner">
+  <summary>Projects: {% if all_tracked %}all{% else %}{{ tracked|join(", ") }} ({{ tracked|length }} of {{ view.projects|length }}){% endif %}</summary>
+  <form method="post" action="/preferences/projects">
+    {% for p in view.projects %}<label><input type="checkbox" name="project" value="{{ p.key }}"{% if p.key in tracked %} checked{% endif %}> {{ p.key }} ({{ p.name }})</label>{% endfor %}
+    <button>Apply</button>
+  </form>
+</details>
 <div class="kanban">
 {% for state, workflows, issues in columns %}
 <section class="column" data-state="{{ state }}">

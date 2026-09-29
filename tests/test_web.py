@@ -1028,6 +1028,116 @@ def test_preferences_are_a_same_origin_post_only(client, board):
     assert r.status_code == 403
 
 
+# --- project filter banner on the dashboard (MS-650) ---------------------------
+
+
+def banner(html):
+    """The project filter banner above the kanban."""
+    m = re.search(r'<details class="filter-banner"[^>]*>.*?</details>', html, re.S)
+    assert m, "no filter banner"
+    return m.group(0)
+
+
+def banner_summary(html):
+    m = re.search(r"<summary>(.*?)</summary>", banner(html), re.S)
+    return " ".join(unescape(m.group(1)).split())
+
+
+def test_the_banner_sits_above_the_kanban_collapsed(client, board):
+    two_projects(board)
+    html = client.get("/").text
+    b = banner(html)
+    assert html.index(b) < html.index('<div class="kanban">')
+    assert "<details class=\"filter-banner\">" in b  # no open attribute
+    assert 'action="/preferences/projects"' in b and 'method="post"' in b
+    assert re.search(r'<input type="checkbox" name="project" value="BR" checked>', b)
+    assert re.search(r'<input type="checkbox" name="project" value="MS" checked>', b)
+    assert "<button>Apply</button>" in b
+
+
+def test_the_banner_summary_reads_all_or_the_subset(client, board):
+    two_projects(board)
+    core.create_project(board, "DR", "doc-review")
+    assert banner_summary(client.get("/").text) == "Projects: all"
+    client.post("/preferences/projects", data={"project": ["MS", "BR"]})
+    b = client.get("/").text
+    # Board order, not form order.
+    assert banner_summary(b) == "Projects: BR, MS (2 of 3)"
+    assert re.search(r'<input type="checkbox" name="project" value="DR">', banner(b))
+
+
+def test_applying_a_subset_filters_loose_and_workflow_cards(client, board):
+    ms, br = two_projects(board)
+    wf = release(board)
+    marker = f'data-workflow="{wf["id"]}"'
+    r = client.post("/preferences/projects", data={"project": ["BR"]})
+    assert r.status_code == 303 and r.headers["location"] == "/"
+    html = client.get("/").text
+    assert f'data-id="{br}"' in html and f'data-id="{ms}"' not in html
+    assert marker not in html
+    client.post("/preferences/projects", data={"project": ["MS"]})
+    html = client.get("/").text
+    assert f'data-id="{ms}"' in html and marker in html and f'data-id="{br}"' not in html
+
+
+def test_the_banner_writes_the_same_cookie_as_the_preferences_page(client, board):
+    two_projects(board)
+    r = client.post("/preferences/projects", data={"project": ["BR"]})
+    cookie = r.headers["set-cookie"]
+    assert cookie.startswith(f"{web.PREFS_COOKIE}=")
+    assert "samesite=lax" in cookie.lower() and "max-age=31536000" in cookie.lower()
+    html = client.get("/preferences").text
+    assert re.search(r'<input type="checkbox" name="project" value="BR" checked>', html)
+    assert re.search(r'<input type="checkbox" name="project" value="MS">', html)
+
+
+def test_a_banner_save_keeps_the_saved_lanes_and_timezone(client, board):
+    two_projects(board)
+    client.post("/preferences", data={"project": ["MS"], "lane": ["done", "ready"],
+                                      "timezone": "Asia/Tokyo"})
+    client.post("/preferences/projects", data={"project": ["BR"]})
+    assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
+        "projects": ["BR"], "lanes": ["ready", "done"], "timezone": "Asia/Tokyo"}
+    assert lanes(client.get("/").text) == ["ready", "done"]
+
+
+def test_a_banner_save_of_every_project_saves_all(client, board):
+    two_projects(board)
+    client.post("/preferences/projects", data={"project": ["BR"]})
+    client.post("/preferences/projects", data={"project": ["MS", "BR", "ZZ"]})
+    assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE))["projects"] == []
+    core.create_project(board, "XX", "later")
+    later = core.create(board, "XX", "new", actor=CHAOS, actor_kind=HUMAN,
+                        state="ready")["id"]
+    assert f'data-id="{later}"' in client.get("/").text
+
+
+@pytest.mark.parametrize("sent", [{}, {"project": ["ZZ"]}])
+def test_a_banner_save_with_no_project_ticked_is_refused(client, board, sent):
+    two_projects(board)
+    client.post("/preferences/projects", data={"project": ["BR"]})
+    r = client.post("/preferences/projects", data=sent)
+    assert r.status_code == 422
+    assert "at least one project" in r.text
+    assert "set-cookie" not in r.headers
+    assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE))["projects"] == ["BR"]
+
+
+def test_the_banner_save_is_a_same_origin_post_only(client, board):
+    two_projects(board)
+    r = client.post("/preferences/projects", data={"project": ["BR"]},
+                    headers={"origin": "https://evil.example"})
+    assert r.status_code == 403 and "set-cookie" not in r.headers
+
+
+def test_the_preferences_page_still_saves_every_key(client, board):
+    two_projects(board)
+    client.post("/preferences/projects", data={"project": ["BR"]})
+    client.post("/preferences", data={"project": ["MS"], "lane": ["ready"]})
+    assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
+        "projects": ["MS"], "lanes": ["ready"], "timezone": ""}
+
+
 def test_the_localstorage_hide_closed_toggle_is_gone(client, board):
     html = client.get("/").text
     assert "hide-closed" not in html and "localStorage" not in html

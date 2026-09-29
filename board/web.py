@@ -736,7 +736,8 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         columns = [(state, [w for w in workflows if w["state"] == state],
                     [i for i in loose if i["state"] == state])
                    for state in prefs["lanes"]]
-        return page(request, "board.html", view=view, columns=columns, now=view["now"])
+        return page(request, "board.html", view=view, columns=columns, now=view["now"],
+                    tracked=prefs["projects"])
 
     @app.get("/search", response_class=HTMLResponse)
     def search_page(request: Request, q: str = "", project: str = "", label: str = "",
@@ -770,6 +771,23 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         # An unknown zone is saved blank, which means the default.
         tz = (f.get("timezone") or "").strip()
         prefs["timezone"] = tz if zone(tz) else ""
+        return saved(prefs)
+
+    @app.post("/preferences/projects")
+    async def save_project_filter(request: Request):
+        """The dashboard banner's save: projects only, lanes and timezone kept."""
+        f = await request.form()
+        known = [p["key"] for p in core.overview(engine)["projects"]]
+        picked = [k for k in known if k in f.getlist("project")]
+        # An empty board is never what was meant; on /preferences an empty
+        # group means all, but here it would read as a filter that hid everything.
+        if not picked:
+            return error(request, 422, "Tick at least one project to track.")
+        prefs = read_prefs(request.cookies.get(PREFS_COOKIE))
+        prefs["projects"] = [] if len(picked) == len(known) else picked
+        return saved(prefs)
+
+    def saved(prefs):
         r = back()
         # safe="": a bare "/" (Asia/Tokyo) makes Starlette quote the whole value.
         r.set_cookie(PREFS_COOKIE, quote(json.dumps(prefs, separators=(",", ":")), safe=""),
