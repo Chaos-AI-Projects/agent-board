@@ -395,21 +395,24 @@ def test_a_twelve_step_workflow_draws_seven_tasks_between_two_collapse_nodes():
 
 
 @pytest.mark.parametrize("here, window, before, after", [
-    ("MS-1", range(0, 7), None, "+5 later"),
-    ("MS-2", range(0, 7), None, "+5 later"),
-    ("MS-12", range(5, 12), "+5 earlier", None),
-    ("MS-10", range(5, 12), "+5 earlier", None),
+    # Chaos, 2026-09-29: at either end the chart stops at 3 per side rather
+    # than sliding the window inward to keep drawing seven.
+    ("MS-1", range(0, 4), None, "+8 later"),
+    ("MS-2", range(0, 5), None, "+7 later"),
+    ("MS-12", range(8, 12), "+8 earlier", None),
+    ("MS-10", range(6, 12), "+6 earlier", None),
 ])
-def test_at_either_end_the_window_still_holds_seven_tasks(here, window, before, after):
+def test_at_either_end_the_window_stops_at_three_per_side(here, window, before, after):
     tasks, more, chain, _ = chart(fake_wf(12), here)
     assert tasks == [f"s{n}" for n in window]
     assert more.get("more_before") == before and more.get("more_after") == after
     assert chain[0] == "ev_start" and chain[-1] == "ev_end"
 
 
-def test_seven_steps_or_fewer_collapse_nothing():
-    tasks, more, _, _ = chart(fake_wf(7), "MS-7")
-    assert tasks == [f"s{n}" for n in range(7)] and more == {}
+@pytest.mark.parametrize("n, here", [(4, "MS-1"), (4, "MS-4"), (7, "MS-4")])
+def test_nothing_collapses_when_every_step_is_within_three(n, here):
+    tasks, more, _, _ = chart(fake_wf(n), here)
+    assert tasks == [f"s{k}" for k in range(n)] and more == {}
 
 
 def test_an_origin_page_centres_on_the_first_step_not_done():
@@ -419,7 +422,7 @@ def test_an_origin_page_centres_on_the_first_step_not_done():
     assert more == {"more_before": "+5 earlier"}
     assert not any(l.endswith(" here") and l.startswith("class ") for l in src)
     tasks, more, _, _ = chart(fake_wf(12, done=12), "MS-99")
-    assert tasks == [f"s{n}" for n in range(7)]
+    assert tasks == [f"s{n}" for n in range(4)]
 
 
 def test_an_origin_page_with_a_long_plan_draws_the_chart_and_lists_every_step(board, client):
@@ -446,7 +449,7 @@ def test_a_collapse_node_label_is_escaped_like_a_step_label():
     assert re.fullmatch(r"[A-Za-z0-9 #;]*", label), label
     # One line, so mermaid 11.4.1 renders no markdown there: a `#92;` escape would
     # show as a literal backslash (checked in jsdom), unlike a step's 3-line label.
-    assert label == "#43;5 later"
+    assert label == "#43;8 later"
 
 
 HOSTILE = 'a "quoted" [bracket] --> x;\nclick s0 "javascript:alert(1)" %%{init}%% <b>'
@@ -1559,6 +1562,20 @@ def test_the_window_counts_dependency_layers_not_positions():
     assert more == {"more_before": "+4 earlier", "more_after": "+6 later"}
     assert succ(edges, "ev_start") == {"more_before"}
     assert pred(edges, "ev_end") == {"more_after"}
+
+
+def test_at_the_first_layer_the_chart_stops_at_three_layers_after():
+    deps = {}
+    for layer in range(1, 12):
+        for k in (1, 2):
+            deps[2 * layer + k] = [2 * layer - 1, 2 * layer]
+    src, edges, _ = dag(dag_wf(deps), "MS-1")  # layer 0
+    tasks = [re.match(r"(s\d+)\(", l).group(1) for l in src if re.match(r"s\d+\(", l)]
+    # Layers 0..3 are drawn: eight steps, s0..s7; nothing is hidden before.
+    assert tasks == [f"s{n}" for n in range(8)]
+    more = {m.group(1): unescape_label(m.group(2)) for l in src
+            if (m := re.fullmatch(r'(more_\w+)\["(.*)"\]', l))}
+    assert more == {"more_after": "+16 later"}
 
 
 def test_the_issue_page_draws_declared_dependencies(board, client):

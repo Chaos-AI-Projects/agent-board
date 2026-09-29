@@ -215,16 +215,20 @@ def _diagram_window(wf: dict, here: str | None) -> tuple[int, int]:
     """The `[lo, hi)` slice of steps the chart draws.
 
     It centres on the step whose id is `here`, else (an origin issue's page)
-    on the step the workflow's link opens, and is clamped to the list so it
-    always holds `2 * DIAGRAM_REACH + 1` steps when there are that many.
+    on the step the workflow's link opens, and reaches `DIAGRAM_REACH` steps
+    either side. Near an end it is cut short there rather than slid inward,
+    so step 1 of 12 draws steps 1 to 4 (Chaos, 2026-09-29).
     """
     steps = wf["steps"]
     ids = [st["id"] for st in steps]
     centre = here if here in ids else workflow_target(wf)
     at = ids.index(centre) if centre in ids else 0
-    width = 2 * DIAGRAM_REACH + 1
-    lo = min(max(0, at - DIAGRAM_REACH), max(0, len(steps) - width))
-    return lo, min(len(steps), lo + width)
+    return _reach(len(steps), at)
+
+
+def _reach(count: int, at: int) -> tuple[int, int]:
+    """`[lo, hi)` around `at`, `DIAGRAM_REACH` either side, cut to `[0, count)`."""
+    return max(0, at - DIAGRAM_REACH), min(count, at + DIAGRAM_REACH + 1)
 
 
 def _dependency_layers(steps: list[dict]) -> tuple[dict[str, int], dict[str, list[str]]]:
@@ -250,9 +254,7 @@ def _dependency_layers(steps: list[dict]) -> tuple[dict[str, int], dict[str, lis
 
 def _layer_window(layers: int, at: int) -> tuple[int, int]:
     """The `[lo, hi)` layers the chart draws, `_diagram_window`'s rule over layers."""
-    width = 2 * DIAGRAM_REACH + 1
-    lo = min(max(0, at - DIAGRAM_REACH), max(0, layers - width))
-    return lo, min(layers, lo + width)
+    return _reach(layers, at)
 
 
 def workflow_diagram(wf: dict, here: str | None) -> str:
