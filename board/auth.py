@@ -10,6 +10,10 @@ Three credentials each resolve to one actor email:
   Google's tokeninfo for its email. This path is on only when
   `BOARD_GOOGLE_CLIENT_IDS` names the OAuth clients a token may come from:
   unpinned, any site Chaos signed in to with Google could replay his token.
+  A service account's access token minted without `userinfo.email` has no
+  email, only the account's numeric ID in `azp`; when that ID is in both
+  `BOARD_GOOGLE_CLIENT_IDS` and `BOARD_SA_MAP`, it acts as the mapped email
+  (MS-658).
 - `Authorization: Bearer <Google-signed ID token>` for a service account,
   audience `BOARD_SA_AUDIENCE`. A token minted without its email carries
   only the account's numeric ID in `sub`; `BOARD_SA_MAP` (`id=email,...`)
@@ -148,13 +152,16 @@ class Authenticator:
         allowed = _split(env.get(ALLOWED_ENV))
         team, aud = get(CF_TEAM_ENV), get(CF_AUD_ENV)
         sa_map = _sa_map(env.get(SA_MAP_ENV))
-        if sa_map and not get(SA_AUDIENCE_ENV):
-            raise ValueError(f"{SA_MAP_ENV} is set but {SA_AUDIENCE_ENV} is not, so it maps nothing")
+        # The ID-token path maps any ID; the access-token path only IDs also pinned as clients.
+        client_ids = _split(env.get(CLIENT_IDS_ENV))
+        if sa_map and not get(SA_AUDIENCE_ENV) and not sa_map.keys() & client_ids:
+            raise ValueError(f"{SA_MAP_ENV} is set but {SA_AUDIENCE_ENV} is not and no mapped ID "
+                             f"is in {CLIENT_IDS_ENV}, so it maps nothing")
         return cls(allowed=allowed, iap_audience=get(IAP_AUDIENCE_ENV),
                    cf_team=_team(team) if team and aud else None,
                    cf_aud=aud if team else None,
                    sa_audience=get(SA_AUDIENCE_ENV),
-                   client_ids=_split(env.get(CLIENT_IDS_ENV)),
+                   client_ids=client_ids,
                    sa_map=sa_map,
                    configured=any(get(name) for name in CONFIG_ENVS),
                    keys=keys, tokeninfo=tokeninfo)
@@ -224,12 +231,19 @@ class Authenticator:
         if not self.client_ids or not token:
             return None
         info = self.tokeninfo(token)
-        if not isinstance(info, dict) or str(info.get("email_verified")).lower() != "true":
+        if not isinstance(info, dict):
             return None
         try:
             if int(info.get("expires_in", 0)) <= 0:
                 return None
         except (TypeError, ValueError):
+            return None
+        # A service account's token minted without userinfo.email names only
+        # its numeric ID, in azp (MS-658). Never aud: that is the audience.
+        azp = str(info.get("azp", ""))
+        if azp in self.client_ids and azp in self.sa_map:
+            return Identity(self.sa_map[azp], AGENT)
+        if str(info.get("email_verified")).lower() != "true":
             return None
         if not ({str(info.get("aud", "")).lower(),
                                      str(info.get("azp", "")).lower()} & self.client_ids):

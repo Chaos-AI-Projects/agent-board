@@ -174,7 +174,11 @@ are then ignored, and a write needs one of three credentials:
   `BOARD_CF_TEAM_DOMAIN` (`<team>.cloudflareaccess.com`) and `BOARD_CF_AUD`;
 - `Authorization: Bearer <Google access token>`, resolved through Google's tokeninfo. This path is
   off until `BOARD_GOOGLE_CLIENT_IDS`, comma-separated, names the OAuth clients a token may come
-  from, such as gcloud's. Unpinned, any site you signed in to with Google could replay your token;
+  from, such as gcloud's. Unpinned, any site you signed in to with Google could replay your token.
+  A service account's access token minted without the `userinfo.email` scope has no email, only the
+  account's numeric ID in `azp`. It is refused unless that ID is in both `BOARD_GOOGLE_CLIENT_IDS`
+  and `BOARD_SA_MAP`, below. Then it acts as the mapped email, an agent, even when tokeninfo also
+  returns an email;
 - `Authorization: Bearer <service-account ID token>` with audience `BOARD_SA_AUDIENCE`. Only a
   `*.gserviceaccount.com` email counts. Mint the token with its email included
   (`gcloud auth print-identity-token --include-email`, or `includeEmail` in iamcredentials).
@@ -182,8 +186,11 @@ are then ignored, and a write needs one of three credentials:
   `BOARD_SA_MAP` maps that ID to an email, as in `112233445566778899001=overlord@board.example`
   (comma-separated). The mapped email is the actor, it must be in `BOARD_ALLOWED_EMAILS`, and
   it is an agent whatever its domain. A mapped ID uses the mapped email even when its token also
-  carries one. The board refuses to start on a malformed or duplicate entry, or on a map set without
-  `BOARD_SA_AUDIENCE`. Two IDs mapped to one email share one actor in the history.
+  carries one. Two IDs mapped to one email share one actor in the history.
+
+The board refuses to start on a malformed or duplicate `BOARD_SA_MAP` entry. It also refuses a map
+that can match nothing: one set without `BOARD_SA_AUDIENCE` when none of its IDs is in
+`BOARD_GOOGLE_CLIENT_IDS`.
 
 The actor kind follows the email on every path: a `*.gserviceaccount.com` address is an agent and
 anything else is a human. The exception is an ID mapped by `BOARD_SA_MAP`, which is an agent whatever

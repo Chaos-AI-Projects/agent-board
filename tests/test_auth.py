@@ -2,7 +2,8 @@
 
 Three credentials each resolve to one actor email: a signed IAP or Cloudflare
 Access assertion (human), a Google OAuth access token checked against
-tokeninfo (human), and a Google service-account ID token (agent). Keys are
+tokeninfo (human, or a mapped service account's agent), and a Google
+service-account ID token (agent). Keys are
 generated here and tokeninfo is stubbed, so nothing touches the network.
 """
 
@@ -262,10 +263,76 @@ def test_a_map_without_a_service_account_audience_refuses_to_start():
         authn({auth.SA_MAP_ENV: f"{SA_ID}={MAPPED}", auth.ALLOWED_ENV: MAPPED})
 
 
-def test_the_map_is_ignored_on_the_cloudflare_and_access_token_paths():
+def test_the_map_is_ignored_on_the_cloudflare_path_and_by_sub_on_access_tokens():
     assert who(MAPPED_ENV, {auth.CF_HEADER: cf(sub=SA_ID, email="x@evil.test")}) is None
     TOKENINFO["mapped-sub-token"] = info(email="x@evil.test") | {"sub": SA_ID}
     assert who(MAPPED_ENV, {"Authorization": "Bearer mapped-sub-token"}) is None
+
+
+# --- BOARD_SA_MAP on the access-token path: tokeninfo's azp, no email (MS-658) ---
+
+
+def sa_info(azp=SA_ID, expires_in="3599", **kw):
+    """Tokeninfo for a service account's access token minted without userinfo.email."""
+    return {"azp": azp, "aud": azp, "expires_in": expires_in, "scope": "openid"} | kw
+
+
+TOKENINFO.update({"sa-access-token": sa_info(),
+                  "sa-expired-token": sa_info(expires_in="0"),
+                  "sa-unmapped-token": sa_info(azp="999"),
+                  "sa-aud-only-token": sa_info(azp="555") | {"aud": SA_ID},
+                  "sa-with-email-token": sa_info(email=BOT, email_verified="true")})
+
+ACCESS_MAPPED_ENV = {auth.ALLOWED_ENV: f"{CHAOS}, {MAPPED}",
+                     auth.CLIENT_IDS_ENV: f"{CLIENT}, {SA_ID}, 999, 555",
+                     auth.SA_MAP_ENV: f"{SA_ID}={MAPPED}"}
+
+
+def test_a_mapped_azp_in_the_client_ids_acts_as_its_mapped_email():
+    got = who(ACCESS_MAPPED_ENV, {"Authorization": "Bearer sa-access-token"})
+    assert got == auth.Identity(MAPPED, "agent")
+
+
+def test_a_mapped_azp_not_in_the_client_ids_is_refused():
+    env = ACCESS_MAPPED_ENV | {auth.CLIENT_IDS_ENV: CLIENT, auth.SA_AUDIENCE_ENV: SA_AUD}
+    assert who(env, {"Authorization": "Bearer sa-access-token"}) is None
+
+
+def test_an_unmapped_azp_without_an_email_is_refused():
+    assert who(ACCESS_MAPPED_ENV, {"Authorization": "Bearer sa-unmapped-token"}) is None
+
+
+def test_the_access_map_keys_on_azp_never_aud():
+    assert who(ACCESS_MAPPED_ENV, {"Authorization": "Bearer sa-aud-only-token"}) is None
+
+
+def test_the_allowlist_still_gates_an_access_mapped_email():
+    env = ACCESS_MAPPED_ENV | {auth.ALLOWED_ENV: CHAOS}
+    assert who(env, {"Authorization": "Bearer sa-access-token"}) is None
+
+
+def test_an_expired_mapped_access_token_is_refused():
+    assert who(ACCESS_MAPPED_ENV, {"Authorization": "Bearer sa-expired-token"}) is None
+
+
+def test_the_access_map_wins_over_an_email_in_the_same_token():
+    got = who(ACCESS_MAPPED_ENV, {"Authorization": "Bearer sa-with-email-token"})
+    assert got == auth.Identity(MAPPED, "agent")
+
+
+def test_a_human_access_token_behaves_as_before_with_a_map_set():
+    got = who(ACCESS_MAPPED_ENV, {"Authorization": "Bearer good-token"})
+    assert got == auth.Identity(CHAOS, "human")
+
+
+def test_a_map_with_only_client_ids_starts():
+    a = authn(ACCESS_MAPPED_ENV)
+    assert a.sa_map == {SA_ID: MAPPED}
+
+
+def test_a_map_whose_ids_are_not_client_ids_refuses_to_start_without_an_audience():
+    with pytest.raises(ValueError):
+        authn(ACCESS_MAPPED_ENV | {auth.CLIENT_IDS_ENV: CLIENT})
 
 
 # --- the allowlist and the modes -------------------------------------------------
