@@ -196,6 +196,78 @@ def test_an_id_token_is_refused_when_no_service_account_audience_is_set():
     assert who(env, {"Authorization": f"Bearer {sa()}"}) is None
 
 
+# --- BOARD_SA_MAP: a service account's ID token that carries no email (MS-656) ---
+
+SA_ID = "112233445566778899001"
+MAPPED = "overlord@board.example"
+
+
+def bare_sa(sub=SA_ID, aud=SA_AUD, key=GOOGLE_KEY, iss="https://accounts.google.com", **kw):
+    """An ID token minted without include_email: Google's claims carry sub, no email."""
+    return sign(key, "RS256", iss=iss, aud=aud, sub=sub, azp=sub, **kw)
+
+
+MAPPED_ENV = FULL | {auth.SA_MAP_ENV: f" {SA_ID} = {MAPPED.upper()} ",
+                     auth.ALLOWED_ENV: f"{CHAOS}, {BOT}, {MAPPED}"}
+
+
+def test_an_emailless_token_is_refused_without_a_map():
+    assert who(FULL, {"Authorization": f"Bearer {bare_sa()}"}) is None
+
+
+def test_a_mapped_service_account_id_acts_as_its_mapped_email():
+    got = who(MAPPED_ENV, {"Authorization": f"Bearer {bare_sa()}"})
+    assert got == auth.Identity(MAPPED, "agent")
+
+
+def test_the_allowlist_still_gates_the_mapped_email():
+    env = MAPPED_ENV | {auth.ALLOWED_ENV: f"{CHAOS}, {BOT}"}
+    assert who(env, {"Authorization": f"Bearer {bare_sa()}"}) is None
+
+
+def test_an_unmapped_id_is_refused():
+    assert who(MAPPED_ENV, {"Authorization": f"Bearer {bare_sa(sub='999')}"}) is None
+
+
+def test_a_mapped_id_still_needs_a_valid_google_signature_and_audience():
+    for token in (bare_sa(key=ROGUE_KEY), bare_sa(aud="https://other"),
+                  bare_sa(iss="https://evil.test")):
+        assert who(MAPPED_ENV, {"Authorization": f"Bearer {token}"}) is None
+
+
+def test_the_map_applies_only_to_service_account_id_tokens():
+    assert who(MAPPED_ENV, {auth.IAP_HEADER: iap(sub=SA_ID, email="x@evil.test")}) is None
+
+
+def test_the_map_wins_over_an_email_in_the_same_token():
+    token = sa(sub=SA_ID)
+    assert who(MAPPED_ENV, {"Authorization": f"Bearer {token}"}) == auth.Identity(MAPPED, "agent")
+
+
+def test_an_unmapped_token_with_an_email_behaves_as_before():
+    assert who(MAPPED_ENV, {"Authorization": f"Bearer {sa(sub='999')}"}) == auth.Identity(BOT, "agent")
+
+
+@pytest.mark.parametrize("bad", ["justanid", f"{SA_ID}=", f"={MAPPED}",
+                                 f"{SA_ID}=a@b.c,{SA_ID}=d@e.f", f"{SA_ID}=not-an-email",
+                                 f"{BOT}={MAPPED}", f"accounts.google.com:{SA_ID}={MAPPED}",
+                                 f"{SA_ID}=a@", f"{SA_ID}=a@b@c", f"{SA_ID}=a b@c"])
+def test_a_malformed_map_refuses_to_start(bad):
+    with pytest.raises(ValueError):
+        authn(FULL | {auth.SA_MAP_ENV: bad})
+
+
+def test_a_map_without_a_service_account_audience_refuses_to_start():
+    with pytest.raises(ValueError):
+        authn({auth.SA_MAP_ENV: f"{SA_ID}={MAPPED}", auth.ALLOWED_ENV: MAPPED})
+
+
+def test_the_map_is_ignored_on_the_cloudflare_and_access_token_paths():
+    assert who(MAPPED_ENV, {auth.CF_HEADER: cf(sub=SA_ID, email="x@evil.test")}) is None
+    TOKENINFO["mapped-sub-token"] = info(email="x@evil.test") | {"sub": SA_ID}
+    assert who(MAPPED_ENV, {"Authorization": "Bearer mapped-sub-token"}) is None
+
+
 # --- the allowlist and the modes -------------------------------------------------
 
 
@@ -270,6 +342,19 @@ def test_a_service_account_writes_as_an_agent(board, monkeypatch):
     assert r.status_code == 303
     last = core.show(board, iid)["events"][-1]
     assert (last["actor"], last["actor_kind"]) == (BOT, "agent")
+
+
+def test_a_mapped_service_account_writes_as_its_mapped_email(board, monkeypatch):
+    monkeypatch.delenv(web.PORT_ENV, raising=False)
+    monkeypatch.delenv(web.HOSTS_ENV, raising=False)
+    app = web.create_app(board, authenticator=authn(MAPPED_ENV))
+    client = TestClient(app, base_url=LOCAL, follow_redirects=False)
+    iid = ready(board)
+    r = client.post(f"/issues/{iid}/note", data={"note": "from a bare token"},
+                    headers={"Authorization": f"Bearer {bare_sa()}"})
+    assert r.status_code == 303
+    last = core.show(board, iid)["events"][-1]
+    assert (last["actor"], last["actor_kind"]) == (MAPPED, "agent")
 
 
 def test_verified_mode_refuses_the_bare_header_and_board_web_actor(board, monkeypatch):

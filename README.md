@@ -141,11 +141,17 @@ are then ignored, and a write needs one of three credentials:
   from, such as gcloud's. Unpinned, any site you signed in to with Google could replay your token;
 - `Authorization: Bearer <service-account ID token>` with audience `BOARD_SA_AUDIENCE`. Only a
   `*.gserviceaccount.com` email counts. Mint the token with its email included
-  (`gcloud auth print-identity-token --include-email`, or `includeEmail` in iamcredentials),
-  because a token without one is refused.
+  (`gcloud auth print-identity-token --include-email`, or `includeEmail` in iamcredentials).
+  A token without one carries only the account's numeric ID in `sub`, and is refused unless
+  `BOARD_SA_MAP` maps that ID to an email, as in `112233445566778899001=overlord@board.example`
+  (comma-separated). The mapped email is the actor, it must be in `BOARD_ALLOWED_EMAILS`, and
+  it is an agent whatever its domain. A mapped ID uses the mapped email even when its token also
+  carries one. The board refuses to start on a malformed or duplicate entry, or on a map set without
+  `BOARD_SA_AUDIENCE`. Two IDs mapped to one email share one actor in the history.
 
 The actor kind follows the email on every path: a `*.gserviceaccount.com` address is an agent and
-anything else is a human. `BOARD_ALLOWED_EMAILS`, comma-separated, gates all three. A verifier with
+anything else is a human. The exception is an ID mapped by `BOARD_SA_MAP`, which is an agent whatever
+its email's domain. `BOARD_ALLOWED_EMAILS`, comma-separated, gates all three. A verifier with
 an empty allowlist refuses everyone, and a half-configured one, such as a team domain with no AUD,
 refuses rather than falling back to local mode.
 

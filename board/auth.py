@@ -11,11 +11,14 @@ Three credentials each resolve to one actor email:
   `BOARD_GOOGLE_CLIENT_IDS` names the OAuth clients a token may come from:
   unpinned, any site Chaos signed in to with Google could replay his token.
 - `Authorization: Bearer <Google-signed ID token>` for a service account,
-  audience `BOARD_SA_AUDIENCE`.
+  audience `BOARD_SA_AUDIENCE`. A token minted without its email carries
+  only the account's numeric ID in `sub`; `BOARD_SA_MAP` (`id=email,...`)
+  names the email such an ID acts as (MS-656). A mapped ID is an agent.
 
 The actor kind follows the email, whichever path proved it: a
 `*.gserviceaccount.com` address is an agent and anything else is a human, so
-a service account behind IAP is still an agent. `BOARD_ALLOWED_EMAILS` gates
+a service account behind IAP is still an agent. The one exception is an ID
+mapped by `BOARD_SA_MAP`, which is an agent whatever its email's domain. `BOARD_ALLOWED_EMAILS` gates
 all three. Setting any of these variables switches the board to verified
 mode, where the bare `Cf-Access-Authenticated-User-Email` header and
 `BOARD_WEB_ACTOR` are ignored. A half-configured verifier refuses rather than
@@ -41,6 +44,7 @@ CF_TEAM_ENV = "BOARD_CF_TEAM_DOMAIN"
 CF_AUD_ENV = "BOARD_CF_AUD"
 SA_AUDIENCE_ENV = "BOARD_SA_AUDIENCE"
 CLIENT_IDS_ENV = "BOARD_GOOGLE_CLIENT_IDS"
+SA_MAP_ENV = "BOARD_SA_MAP"
 
 IAP_HEADER = "x-goog-iap-jwt-assertion"
 CF_HEADER = "Cf-Access-Jwt-Assertion"
@@ -55,7 +59,7 @@ TIMEOUT = 5
 LEEWAY = 60
 USER_AGENT = "agent-board"
 CONFIG_ENVS = (ALLOWED_ENV, IAP_AUDIENCE_ENV, CF_TEAM_ENV, CF_AUD_ENV, SA_AUDIENCE_ENV,
-               CLIENT_IDS_ENV)
+               CLIENT_IDS_ENV, SA_MAP_ENV)
 
 HUMAN = "human"
 AGENT = "agent"
@@ -105,9 +109,26 @@ def _split(value: str | None) -> frozenset[str]:
     return frozenset(v.strip().lower() for v in (value or "").split(",") if v.strip())
 
 
+def _sa_map(value: str | None) -> dict[str, str]:
+    """BOARD_SA_MAP as {service-account id: email}; a malformed entry refuses to start."""
+    found: dict[str, str] = {}
+    for entry in (value or "").split(","):
+        if not entry.strip():
+            continue
+        sub, sep, email = (part.strip() for part in entry.partition("="))
+        local, at, domain = email.partition("@")
+        if (not sep or not sub.isdigit() or not at or not local or not domain
+                or "@" in domain or any(c.isspace() for c in email)):
+            raise ValueError(f"{SA_MAP_ENV}: {entry.strip()!r} is not id=email")
+        if sub in found:
+            raise ValueError(f"{SA_MAP_ENV}: {sub} is mapped twice")
+        found[sub] = email.lower()
+    return found
+
+
 class Authenticator:
     def __init__(self, *, allowed=frozenset(), iap_audience=None, cf_team=None, cf_aud=None,
-                 sa_audience=None, client_ids=frozenset(), configured=False,
+                 sa_audience=None, client_ids=frozenset(), sa_map=None, configured=False,
                  keys: Keys = fetch_key, tokeninfo: TokenInfo = fetch_tokeninfo):
         self.allowed = frozenset(allowed)
         self.iap_audience = iap_audience
@@ -115,6 +136,7 @@ class Authenticator:
         self.cf_aud = cf_aud
         self.sa_audience = sa_audience
         self.client_ids = frozenset(client_ids)
+        self.sa_map = dict(sa_map or {})
         self.configured = configured
         self.keys = keys
         self.tokeninfo = tokeninfo
@@ -125,11 +147,15 @@ class Authenticator:
         get = lambda name: (env.get(name) or "").strip() or None  # noqa: E731
         allowed = _split(env.get(ALLOWED_ENV))
         team, aud = get(CF_TEAM_ENV), get(CF_AUD_ENV)
+        sa_map = _sa_map(env.get(SA_MAP_ENV))
+        if sa_map and not get(SA_AUDIENCE_ENV):
+            raise ValueError(f"{SA_MAP_ENV} is set but {SA_AUDIENCE_ENV} is not, so it maps nothing")
         return cls(allowed=allowed, iap_audience=get(IAP_AUDIENCE_ENV),
                    cf_team=_team(team) if team and aud else None,
                    cf_aud=aud if team else None,
                    sa_audience=get(SA_AUDIENCE_ENV),
                    client_ids=_split(env.get(CLIENT_IDS_ENV)),
+                   sa_map=sa_map,
                    configured=any(get(name) for name in CONFIG_ENVS),
                    keys=keys, tokeninfo=tokeninfo)
 
@@ -137,7 +163,7 @@ class Authenticator:
     def verified(self) -> bool:
         """Verified mode: any verifier setting is present, even an incomplete one."""
         return bool(self.configured or self.allowed or self.iap_audience or self.cf_team
-                    or self.sa_audience or self.client_ids)
+                    or self.sa_audience or self.client_ids or self.sa_map)
 
     def identify(self, headers: Mapping[str, str]) -> Identity | None:
         """The allowed actor a request's credentials prove, or None."""
@@ -186,6 +212,8 @@ class Authenticator:
             return None
         claims = self._jwt(token, GOOGLE_KEYS_URL, "RS256", audience=self.sa_audience,
                            issuer=GOOGLE_ISSUERS)
+        if claims and str(claims.get("sub", "")) in self.sa_map:
+            return Identity(self.sa_map[str(claims["sub"])], AGENT)
         if not claims or claims.get("email_verified") is not True:
             return None
         found = self._email(claims)
