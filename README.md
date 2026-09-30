@@ -4,8 +4,17 @@ An issue and kanban board built for agents first: a claim-with-lease `next`, an 
 history, and a web board Chaos can edit. The spec is `product-specs/agent-issue-board.md` in the
 brain vault, and the technical design is `product-specs/agent-issue-board-design.md` beside it.
 
-Slices 1 to 5 of 6 are in: the schema in `board.store`, the operations in `board.core`, the
-`board` CLI in `board.cli`, the web board in `board.web`, and the MCP server in `board.mcp_server`.
+All six slices are in, each in its own module:
+
+- the schema in `board.store`;
+- the operations in `board.core`;
+- the `board` CLI in `board.cli`;
+- the web board in `board.web`;
+- the MCP server in `board.mcp_server`;
+- the backlog import in `board.importer`.
+
+The web board's credentials live in `board.auth`, its Google sign-in in `board.signin`, and remote
+MCP in `board.oauth` and `board.remote`.
 
 ## Operations
 
@@ -96,18 +105,45 @@ the full step list kept collapsed under the chart as the no-JS fallback. `/workf
 the same issue page the card opens. Loose issues sit below the workflows in each column, and dragging one to another column
 is a state change.
 
-The board at `/` is a view only, and searching is its own page. `/search` lists matching issues as a
-flat list linking to each `/issues/<id>`, and shows nothing until a filter is given. `/preferences`
-picks which projects the board tracks and which lanes it shows. The choice is saved per browser in
-the `board_prefs` cookie: percent-encoded JSON, `{"projects": [...], "lanes": [...]}`, SameSite=Lax,
-kept for a year. With no cookie, the board shows every project and every lane. Unknown keys, projects
-and lanes are ignored, and a group left with nothing usable shows all of it. Ticking every box saves
-"all", so a project added later is tracked too. A workflow card shows
-when any of its steps is in a tracked project, because a workflow has no project of its own.
+The board at `/` is a view only. Every page's header has a search box, which sends its text to
+`/search` as `q`. The header's "Advanced search" link opens `/search` itself, whose form adds the
+project, label and assignee filters. `/search` lists matching issues as a flat list linking to each
+`/issues/<id>`, and shows nothing until a filter is given.
 
-An issue page shows its body as rendered markdown. The raw body is editable only after opening
-"Edit body", and a save that never opened it posts the body unchanged. Both note fields are
-textareas.
+Three controls pick what the board shows, and all three save to one per-browser cookie:
+
+- the "View" panel above the board ticks which projects it tracks and posts to
+  `/preferences/projects`. Unticking every project is refused with 422 rather than hiding the whole
+  board. The panel also lists hidden lanes, each with a Show button;
+- the × in a lane's heading hides that lane, through `/preferences/lanes/hide`. The last visible
+  lane cannot be hidden, and Show posts to `/preferences/lanes/show`;
+- `/preferences` sets projects, lanes and the timezone together.
+
+The cookie is `board_prefs`: percent-encoded JSON, `{"projects": [...], "lanes": [...],
+"timezone": "..."}`, HttpOnly, SameSite=Lax, kept for a year. Each control keeps the parts it does
+not set. With no cookie, the board shows every project and every lane. Unknown keys, projects and
+lanes are ignored, and a group left with nothing usable shows all of it. Ticking every box saves
+"all", so a project added later is tracked too. A workflow card shows when any of its steps is in a
+tracked project, because a workflow has no project of its own.
+
+Times are stored in UTC and shown in one zone. It is the IANA name saved at `/preferences`, else
+`BOARD_TIMEZONE`, else UTC. An unknown name is skipped in either place. On `/preferences` it is
+saved blank, and in the environment it is logged as a warning rather than stopping the board.
+
+Each project's cards have their own colour. A project takes one of 10 hues when it is created: the
+lowest one no project holds yet, or, once all 10 are held, one picked by the SHA-256 of its key. The
+hue is stored with the project, so adding or deleting another project never recolours it. The
+key's hash also shifts the shade a little, so two projects sharing a hue usually differ. A rename never recolours a card, because the
+name plays no part.
+
+`/projects` lists every project and creates new ones. A project's name can be changed there, but not
+its key, because every issue id carries the key. Delete appears only for a project with no issues.
+
+An issue page shows its body as rendered markdown. Its "Edit issue" control opens a form with the
+title, the raw body, rank, labels, state and files. Both note fields are textareas. An open issue that
+is neither a workflow step nor already planned also offers "Plan as workflow". Each line typed there becomes
+a `ready` step, as `plan` does. A step's page and a planned issue's page both show the workflow
+chart.
 
 Files can be attached from the new-issue form, the Edit issue form and the Note form. A note's
 files show under that note in the history, and the rest are listed under Attachments on the issue
@@ -181,10 +217,10 @@ back to `ready`. A note never needs the lease.
 ## MCP server
 
 `board-mcp` serves the CLI's operations as MCP tools over stdio, for an agent working in a
-conversation. The tools are `next`, `show`, `transition`, `annotate`, `link`, `create`, `instantiate`,
+conversation. `board-web` serves the same tools remotely, as described under Remote MCP below. The tools are `next`, `show`, `transition`, `annotate`, `link`, `create`, `instantiate`,
 `create_batch`, `plan`, `depend`, `undepend` and `heartbeat`, with the CLI's names and arguments. `migrate` and `edit` are left out.
 
-One server is one agent. `BOARD_ACTOR` names it when the server starts, and every write is recorded
+One stdio server is one agent. `BOARD_ACTOR` names it when the server starts, and every write is recorded
 as `agent`. The lease token `next` returns is the `token` argument of each later write, and TTLs are
 `ttl_minutes`.
 
@@ -199,6 +235,32 @@ as a tool error whose text is the CLI's error JSON plus the exit code the CLI wo
 {"mcpServers": {"board": {"command": "board-mcp",
   "env": {"BOARD_DATABASE_URL": "...", "BOARD_ACTOR": "overlord"}}}}
 ```
+
+### Remote MCP
+
+`board-web` also serves the same tools over Streamable HTTP at `/mcp`, for a client such as a
+claude.ai connector that cannot start a local process. It exists only when Google sign-in is
+configured. Without sign-in, `/mcp` and the routes below are not mounted.
+
+The board is its own OAuth 2.1 authorization server, as the MCP authorization spec asks, with
+dynamic client registration and PKCE. The MCP SDK serves these paths:
+
+- `/.well-known/oauth-authorization-server` and `/.well-known/oauth-protected-resource/mcp`, the
+  metadata a client reads first;
+- `/register`, `/authorize`, `/token` and `/revoke`.
+
+`/authorize` sends the browser to `/oauth/consent`, which needs a signed-in session and asks to
+Allow or Deny the client. Allow issues a code for the signed-in email. An access token lasts an hour
+and a refresh token 30 days, and a refresh rotates both. The database stores only each token's
+SHA-256, and each code too, so a copy of the database grants nothing. `/revoke` also takes a public client that sends no
+`client_secret`.
+
+A request to `/mcp` needs `Authorization: Bearer` with a token the board issued, or with one of the
+two Bearer tokens verified mode accepts above: a Google access token or a service-account ID token. Anything else gets 401 naming the
+metadata URL. The email behind the token must be in `BOARD_ALLOWED_EMAILS`, re-checked on every call,
+so removing an email cuts off its grants without revoking them. That email is the actor of each
+tool call, recorded as an `agent`. The issuer is `https://` plus the first `BOARD_WEB_HOSTS` entry,
+or the loopback URL when that is unset.
 
 ## Database
 
@@ -229,7 +291,8 @@ BOARD_WEB_ACTOR=you@example.com board-web
 ```
 
 Then open http://127.0.0.1:28090. A fresh board has no projects, and a card needs one. Create one
-with `board create-project KEY NAME`, which prints it as JSON and exits 5 if the key is taken:
+at `/projects`, or with `board create-project KEY NAME`, which prints it as JSON and exits 5 if the
+key is taken:
 
 ```bash
 board create-project MS memory-solution
