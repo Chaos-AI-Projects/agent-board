@@ -14,6 +14,12 @@ email, recorded as kind `agent`.
 
 The issuer is `https://` plus the first BOARD_WEB_HOSTS entry, since that is
 the name clients reach the board by; with none set it is the loopback URL.
+
+Without sign-in there is no provider (MS-664). If BOARD_SA_AUDIENCE is set,
+`/mcp` is still served, but alone: no authorization server and no
+protected-resource metadata, since there is nothing for a client to be sent
+to. Only a Google Bearer token `auth.Authenticator` accepts gets in: in
+practice a service account's ID token for that audience.
 """
 
 from __future__ import annotations
@@ -55,16 +61,19 @@ def issuer(hosts: list[str], loopback: str) -> str:
 
 
 class Verifier:
-    """A Bearer token the board issued, else a Google one, for an allowed email."""
+    """A Bearer token the board issued, else a Google one, for an allowed email.
 
-    def __init__(self, provider: oauth.Provider, authn: auth.Authenticator,
+    With no provider only the Google path is open."""
+
+    def __init__(self, provider: oauth.Provider | None, authn: auth.Authenticator,
                  allowed: Callable[[str], bool]):
         self.provider = provider
         self.authn = authn
         self.allowed = allowed
 
     async def verify_token(self, token: str) -> AccessToken | None:
-        found = await self.provider.load_access_token(token)
+        found = (await self.provider.load_access_token(token)
+                 if self.provider is not None else None)
         if found is not None:
             return found if found.subject and self.allowed(found.subject) else None
         who = await run_in_threadpool(self.authn.identify, {"authorization": f"Bearer {token}"})
@@ -115,9 +124,11 @@ def _actor() -> str:
     return token.subject
 
 
-def build(engine, provider: oauth.Provider, authn: auth.Authenticator,
+def build(engine, provider: oauth.Provider | None, authn: auth.Authenticator,
           allowed: Callable[[str], bool], issuer_url: str):
-    """The routes to mount, and a lifespan that runs the MCP session manager."""
+    """The routes to mount, and a lifespan that runs the MCP session manager.
+
+    With no provider the routes are `/mcp` alone."""
     base = AnyHttpUrl(issuer_url)
     resource = AnyHttpUrl(issuer_url.rstrip("/") + MCP_PATH)
     manager = StreamableHTTPSessionManager(
@@ -129,8 +140,18 @@ def build(engine, provider: oauth.Provider, authn: auth.Authenticator,
     guarded = AuthenticationMiddleware(
         AuthContextMiddleware(RequireAuthMiddleware(
             handle, required_scopes=[],
-            resource_metadata_url=build_resource_metadata_url(resource))),
+            resource_metadata_url=(build_resource_metadata_url(resource)
+                                   if provider is not None else None))),
         backend=BearerAuthBackend(Verifier(provider, authn, allowed)))
+    endpoint = Route(MCP_PATH, endpoint=guarded, methods=["GET", "POST", "DELETE"])
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_app):
+        async with manager.run():
+            yield
+
+    if provider is None:
+        return [endpoint], lifespan
 
     auth_routes = create_auth_routes(
         provider, base,
@@ -144,12 +165,6 @@ def build(engine, provider: oauth.Provider, authn: auth.Authenticator,
         *auth_routes,
         *create_protected_resource_routes(resource, [base], scopes_supported=[SCOPE],
                                           resource_name="agent-board"),
-        Route(MCP_PATH, endpoint=guarded, methods=["GET", "POST", "DELETE"]),
+        endpoint,
     ]
-
-    @contextlib.asynccontextmanager
-    async def lifespan(_app):
-        async with manager.run():
-            yield
-
     return routes, lifespan

@@ -256,11 +256,16 @@ as a tool error whose text is the CLI's error JSON plus the exit code the CLI wo
 ### Remote MCP
 
 `board-web` also serves the same tools over Streamable HTTP at `/mcp`, for a client such as a
-claude.ai connector that cannot start a local process. It exists only when Google sign-in is
-configured. Without sign-in, `/mcp` and the routes below are not mounted.
+claude.ai connector that cannot start a local process. It exists when Google sign-in is
+configured, or when `BOARD_SA_AUDIENCE` is set without it. With neither, nothing below is mounted.
 
-The board is its own OAuth 2.1 authorization server, as the MCP authorization spec asks, with
-dynamic client registration and PKCE. The MCP SDK serves these paths:
+With `BOARD_SA_AUDIENCE` and no sign-in, `/mcp` is mounted alone. There is no authorization server
+and no metadata, so the board issues no tokens. The way in is a Bearer token verified mode already
+accepts: a service-account ID token with that audience, or a Google access token when
+`BOARD_GOOGLE_CLIENT_IDS` is set, for an email allowed as above. A 401 there names no metadata URL.
+
+With sign-in, the board is its own OAuth 2.1 authorization server, as the MCP authorization spec
+asks, with dynamic client registration and PKCE. The MCP SDK serves these paths:
 
 - `/.well-known/oauth-authorization-server` and `/.well-known/oauth-protected-resource/mcp`, the
   metadata a client reads first;

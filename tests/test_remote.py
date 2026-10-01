@@ -3,7 +3,8 @@
 The board is its own OAuth authorization server: the SDK serves discovery,
 dynamic registration, `/authorize`, `/token` and `/revoke` over the
 provider, and `/mcp` takes a Bearer token that is either one the board
-issued or an MS-631 Google access token. None of it exists without sign-in.
+issued or an MS-631 Google access token. Without sign-in, only `/mcp` exists,
+and only when BOARD_SA_AUDIENCE is set (MS-664).
 """
 
 import asyncio
@@ -11,9 +12,12 @@ import base64
 import hashlib
 import json
 import os
+import time
 from urllib.parse import parse_qs, urlsplit
 
+import jwt
 import pytest
+from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 
 from board import auth, core, signin, web
@@ -321,3 +325,84 @@ def test_the_board_shares_one_allowlist_across_its_checks(migrated, monkeypatch,
                         classmethod(lambda cls, env: seen.append(real(env)) or seen[-1]))
     web.create_app(migrated)
     assert len(seen) == 1
+
+
+# --- service account only: /mcp without sign-in (MS-664) ---------------------
+
+BOT = "board-agent@proj.iam.gserviceaccount.com"
+SA_AUD = f"{ORIGIN}/mcp"
+SA_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+SA_ENV = {auth.SA_AUDIENCE_ENV: SA_AUD, auth.ALLOWED_ENV: BOT}
+
+
+def sa_keys(url, _token):
+    assert url == auth.GOOGLE_KEYS_URL
+    return SA_KEY.public_key()
+
+
+def sa_token(email=BOT):
+    now = int(time.time())
+    return jwt.encode({"iat": now, "exp": now + 300, "iss": "https://accounts.google.com",
+                       "aud": SA_AUD, "email": email, "email_verified": True},
+                      SA_KEY, algorithm="RS256", headers={"kid": "k1"})
+
+
+@pytest.fixture
+def sa_board(migrated, monkeypatch):
+    monkeypatch.delenv(web.PORT_ENV, raising=False)
+    monkeypatch.setenv(web.HOSTS_ENV, HOST)
+    core.create_project(migrated, "MS", "memory-solution")
+    app = web.create_app(migrated, authenticator=auth.Authenticator.from_env(
+        SA_ENV, keys=sa_keys), sign_in=None)
+    with TestClient(app, base_url=ORIGIN, follow_redirects=False) as c:
+        yield c
+
+
+def test_sa_only_serves_mcp_as_the_service_account(sa_board, migrated):
+    bearer = sa_token()
+    assert initialize(sa_board, bearer).status_code == 200
+    made = create_issue(sa_board, bearer)
+    r = rpc(sa_board, bearer, "tools/call", {"name": "show", "arguments": {"id": made["id"]}},
+            id=3)
+    assert r.status_code == 200, r.text
+    assert not body(r)["result"].get("isError"), r.text
+    events = core.show(migrated, made["id"])["events"]
+    assert (events[0]["actor"], events[0]["actor_kind"]) == (BOT, auth.AGENT)
+
+
+def test_sa_only_mcp_without_a_token_is_401(sa_board):
+    r = initialize(sa_board, None)
+    assert r.status_code == 401
+    assert "resource_metadata" not in r.headers["www-authenticate"]
+
+
+def test_sa_only_mcp_refuses_an_email_not_allowed(sa_board):
+    stranger = sa_token("stranger@proj.iam.gserviceaccount.com")
+    assert initialize(sa_board, stranger).status_code == 401
+
+
+def test_sa_only_mcp_takes_a_cross_origin_post(sa_board):
+    headers = dict(MCP_HEADERS, authorization=f"Bearer {sa_token()}",
+                   origin="https://claude.ai")
+    r = sa_board.post("/mcp", headers=headers, json={
+        "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-06-18", "capabilities": {},
+            "clientInfo": {"name": "test", "version": "0"}}})
+    assert r.status_code == 200, r.text
+
+
+def test_sa_only_has_no_authorization_server(sa_board):
+    for path in ("/.well-known/oauth-authorization-server",
+                 "/.well-known/oauth-protected-resource/mcp", "/authorize", "/revoke"):
+        assert sa_board.get(path).status_code == 404, path
+    for path in ("/register", "/token", "/revoke"):
+        assert sa_board.post(path, data={}).status_code in (404, 405), path
+
+
+def test_no_mcp_when_verified_without_the_sa_audience(migrated, monkeypatch):
+    monkeypatch.setenv(web.HOSTS_ENV, HOST)
+    env = {auth.ALLOWED_ENV: CHAOS, auth.CLIENT_IDS_ENV: GOOGLE_CLIENT}
+    app = web.create_app(migrated, authenticator=auth.Authenticator.from_env(
+        env, tokeninfo=tokeninfo), sign_in=None)
+    with TestClient(app, base_url=ORIGIN) as c:
+        assert initialize(c, "google-token").status_code in (404, 405)

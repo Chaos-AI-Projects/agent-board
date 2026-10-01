@@ -561,12 +561,15 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
     # A half-configured sign-in raises here, so the board refuses to start.
     google = (signin.SignIn.from_env(os.environ, allowed=allowed) if sign_in is _FROM_ENV
               else sign_in)
-    # The remote-MCP authorization server and /mcp exist only beside sign-in (MS-649).
+    # The remote-MCP authorization server exists only beside sign-in (MS-649).
+    # Without it, /mcp alone still serves a service account's ID token (MS-664).
     provider = oauth.Provider(engine, secret=google.secret) if google is not None else None
+    remote_mcp = provider is not None or bool(authn.verified and authn.sa_audience)
     mcp_routes, lifespan = [], None
-    if provider is not None:
+    if remote_mcp:
+        listed = google.allowed if google is not None else authn.allowed
         mcp_routes, lifespan = remote.build(
-            engine, provider, authn, lambda email: email in google.allowed,
+            engine, provider, authn, lambda email: email in listed,
             remote.issuer(_hosts_env(), f"127.0.0.1:{_port()}"))
     app = FastAPI(title="agent-board", lifespan=lifespan)
     app.router.routes.extend(mcp_routes)
@@ -625,7 +628,7 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         if request.headers.get("host", "").lower() not in hosts:
             return HTMLResponse("unknown host refused", status_code=403)
         # The remote-MCP paths carry their own authentication, or grant nothing.
-        if google is not None and request.url.path in remote.PATHS:
+        if remote_mcp and request.url.path in remote.PATHS:
             return await call_next(request)
         if request.method == "POST" and not _same_origin(request):
             return HTMLResponse("cross-origin post refused", status_code=403)
