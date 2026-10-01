@@ -18,6 +18,9 @@ Three credentials each resolve to one actor email:
   audience `BOARD_SA_AUDIENCE`. A token minted without its email carries
   only the account's numeric ID in `sub`; `BOARD_SA_MAP` (`id=email,...`)
   names the email such an ID acts as (MS-656). A mapped ID is an agent.
+  A bearer with two dots is tried here first, then against tokeninfo,
+  because a service account's access token (`ya29.c.<...>`) has the same
+  shape.
 
 The actor kind follows the email, whichever path proved it: a
 `*.gserviceaccount.com` address is an agent and anything else is a human, so
@@ -182,7 +185,11 @@ class Authenticator:
             found = self._cf(h[CF_HEADER.lower()])
         elif h.get("authorization", "").lower().startswith("bearer "):
             token = h["authorization"][len("bearer "):].strip()
-            found = self._id_token(token) if token.count(".") == 2 else self._access(token)
+            # A service account's access token can also carry two dots
+            # (ya29.c.<...>), so a JWT shape is only a hint: fall back to tokeninfo.
+            if token.count(".") == 2:
+                found = self._id_token(token)
+            found = found or self._access(token)
         if found is None or found.email not in self.allowed:
             return None
         return found

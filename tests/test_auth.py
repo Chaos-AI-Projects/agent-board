@@ -335,6 +335,41 @@ def test_a_map_whose_ids_are_not_client_ids_refuses_to_start_without_an_audience
         authn(ACCESS_MAPPED_ENV | {auth.CLIENT_IDS_ENV: CLIENT})
 
 
+# A service account's access token can carry two dots, like a JWT (ya29.c.<...>).
+# identify must not stop at the ID-token path for it.
+
+TOKENINFO.update({"ya29.c.sa-access": sa_info(), "ya29.c.human-access": info()})
+
+
+def test_a_two_dot_service_account_access_token_falls_back_to_tokeninfo():
+    got = who(ACCESS_MAPPED_ENV, {"Authorization": "Bearer ya29.c.sa-access"})
+    assert got == auth.Identity(MAPPED, "agent")
+
+
+def test_a_two_dot_access_token_falls_back_with_a_service_account_audience_set():
+    env = ACCESS_MAPPED_ENV | {auth.SA_AUDIENCE_ENV: SA_AUD}
+    got = who(env, {"Authorization": "Bearer ya29.c.sa-access"})
+    assert got == auth.Identity(MAPPED, "agent")
+
+
+def test_a_two_dot_human_access_token_falls_back_to_tokeninfo():
+    got = who(FULL, {"Authorization": "Bearer ya29.c.human-access"})
+    assert got == auth.Identity(CHAOS, "human")
+
+
+def test_a_two_dot_token_neither_path_accepts_is_refused():
+    # Regression guard: refused before the fallback too.
+    assert who(FULL, {"Authorization": "Bearer ya29.c.unknown"}) is None
+
+
+# Google's tokeninfo for an ID token carries exp, never expires_in.
+TOKENINFO["id.token.foreign"] = {"azp": SA_ID, "aud": "someone-else", "exp": "9999999999"}
+
+
+def test_an_id_token_the_jwt_path_refuses_is_not_admitted_by_tokeninfo():
+    env = ACCESS_MAPPED_ENV | {auth.SA_AUDIENCE_ENV: SA_AUD}
+    assert who(env, {"Authorization": "Bearer id.token.foreign"}) is None
+
 # --- the allowlist and the modes -------------------------------------------------
 
 
