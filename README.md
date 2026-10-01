@@ -140,7 +140,9 @@ name plays no part.
 its key, because every issue id carries the key. Delete appears only for a project with no issues.
 
 An issue page shows its body as rendered markdown. Its "Edit issue" control opens a form with the
-title, the raw body, rank, labels, state and files. Both note fields are textareas. An open issue that
+title, the raw body, rank, labels and files. State changes live in the Note form: its State select
+offers the current state and the moves allowed from it, and its one textarea is either a plain note
+or the state change's reason. Done and need-input need that reason. An open issue that
 is neither a workflow step nor already planned also offers "Plan as workflow". Each line typed there becomes
 a `ready` step, as `plan` does. A step's page and a planned issue's page both show the workflow
 chart.

@@ -879,8 +879,11 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         issue = core.show(engine, issue_id)
         # A step shows the workflow it belongs to; an origin shows its plan (MS-644).
         wf = issue["workflow"] or issue["plan"]
+        # The note form offers where the issue is now plus the moves allowed from there.
+        here = issue["state"]
+        states = [s for s in core.TRANSITIONS if s == here or s in core.TRANSITIONS[here]]
         return page(request, "issue.html", issue=issue, now=core.overview(engine)["now"],
-                    states=list(core.TRANSITIONS), wf=wf,
+                    states=states, wf=wf,
                     diagram=workflow_diagram(wf, issue["id"]) if wf else None,
                     steps=workflow_list(wf, issue["id"]) if wf else None)
 
@@ -913,30 +916,33 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
                   actor_kind=me.kind)
         return back(issue_id)
 
-    @app.post("/issues/{issue_id}/edit")
-    async def edit(request: Request, issue_id: str):
-        me = await run_in_threadpool(actor, request)
-        f = await request.form()
+    async def edit_or_take_over(request, me, issue_id, form, files, action, **changes):
+        """`core.edit`, answering a live lease with the take-over page for `action`."""
         current = core.show(engine, issue_id)
-        state = f.get("state")
-        files = await save_uploads(f)
         try:
             core.edit(engine, issue_id, actor=me.email, actor_kind=me.kind,
-                      expected_version=int(f.get("version", -1)),
-                      preempt=f.get("preempt") == "1",
-                      title=f.get("title"), body=f.get("body"),
-                      rank=_form_int(f.get("rank")), labels=_form_labels(f.get("labels")),
-                      state=state if state and state != current["state"] else None,
-                      note=f.get("note") or None, attachments=files)
+                      expected_version=int(form.get("version", -1)),
+                      preempt=form.get("preempt") == "1", attachments=files, **changes)
         except core.LeaseHeld as held:
             # A file input cannot be refilled, so the page names the files to attach again.
-            fields = {k: v for k, v in f.items() if k not in ("preempt", "files")}
+            fields = {k: v for k, v in form.items() if k not in ("preempt", "files")}
             return page(request, "takeover.html", 409, issue=current, held=held,
-                        fields=fields, dropped=[a["filename"] for a in files])
+                        fields=fields, dropped=[a["filename"] for a in files], action=action)
         except core.Conflict:
             return error(request, 409, f"{issue_id} changed since you loaded it. "
                          "Reload the card to see what changed, then save again.", issue_id)
         return back(issue_id)
+
+    @app.post("/issues/{issue_id}/edit")
+    async def edit(request: Request, issue_id: str):
+        # State and note moved to the note form (MS-661). A cached old form still
+        # posts them; they are ignored rather than refused.
+        me = await run_in_threadpool(actor, request)
+        f = await request.form()
+        files = await save_uploads(f)
+        return await edit_or_take_over(
+            request, me, issue_id, f, files, "edit", title=f.get("title"), body=f.get("body"),
+            rank=_form_int(f.get("rank")), labels=_form_labels(f.get("labels")))
 
     @app.post("/issues/{issue_id}/move")
     async def move(request: Request, issue_id: str):
@@ -954,9 +960,20 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
 
     @app.post("/issues/{issue_id}/note")
     async def note(request: Request, issue_id: str):
+        """A note, or a state change carrying that note as its reason (MS-661).
+
+        A note alone never needs the lease. A state change goes through
+        `core.edit`, so it is version-checked and a live lease offers a take-over.
+        The select is compared with the state the form showed, not the live one,
+        so a plain note on a card that moved meanwhile stays a note.
+        """
         me = await run_in_threadpool(actor, request)
         f = await request.form()
         files = await save_uploads(f)
+        state = f.get("state")
+        if state and state != f.get("from_state"):
+            return await edit_or_take_over(request, me, issue_id, f, files, "note",
+                                           state=state, note=f.get("note") or None)
         core.annotate(engine, issue_id, f.get("note", ""), actor=me.email, actor_kind=me.kind,
                       attachments=files)
         return back(issue_id)

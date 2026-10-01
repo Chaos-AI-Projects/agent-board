@@ -70,7 +70,12 @@ def column(html, state):
 def edit_form(issue, **fields):
     return {"version": str(issue["version"]), "title": issue["title"],
             "body": issue["body"], "rank": str(issue["rank"]),
-            "labels": ", ".join(issue["labels"]), "state": issue["state"]} | fields
+            "labels": ", ".join(issue["labels"])} | fields
+
+
+def note_form(issue, note="", **fields):
+    return {"version": str(issue["version"]), "state": issue["state"],
+            "from_state": issue["state"], "note": note} | fields
 
 
 # --- the board page -------------------------------------------------------------
@@ -108,7 +113,9 @@ def test_ms660_the_issue_page_explains_its_state_and_each_option(board, client):
                      + re.escape(core.LANE_HINTS["ready"]) + "</span>", html)
     select = re.search(r'<select name="state".*?</select>', html, re.S).group(0)
     options = re.findall(r'<option title="([^"]*)"[^>]*>([^<]+)</option>', select)
-    assert options == [(hint, state) for state, hint in core.LANE_HINTS.items()]
+    # MS-661: the select offers only where the card is and where it may go next.
+    assert options == [(hint, state) for state, hint in core.LANE_HINTS.items()
+                       if state == "ready" or state in core.TRANSITIONS["ready"]]
 
 
 def test_row7_an_expired_lease_renders_differently_from_a_live_one(board, client):
@@ -589,7 +596,7 @@ def test_a_board_rule_is_shown_not_raised(board, client):
     core.edit(board, iid, actor=CHAOS, expected_version=core.show(board, iid)["version"],
               title="t", preempt=True)
     issue = core.show(board, iid)
-    r = client.post(f"/issues/{iid}/edit", data=edit_form(issue, state="done"),
+    r = client.post(f"/issues/{iid}/note", data=note_form(issue, state="done"),
                     headers=AS_CHAOS)
     assert r.status_code == 422
     assert "needs a note" in r.text
@@ -773,7 +780,7 @@ def test_ms637_the_issue_page_is_read_only_until_edit_issue_is_opened(board, cli
     attrs, inside, outside = edit_control(html)
     assert "open" not in attrs, "closed by default"
     assert f'action="/issues/{iid}/edit"' in inside
-    for field in ("title", "body", "rank", "labels", "state"):
+    for field in ("title", "body", "rank", "labels"):
         assert f'name="{field}"' in inside
         assert f'name="{field}"' not in outside, f"{field} is editable outside the control"
     assert re.search(r'<textarea name="body">Some \*\*bold\*\* text</textarea>', inside)
@@ -796,17 +803,120 @@ def test_ms639_edit_issue_comes_before_the_note_form(board, client):
     assert edit < note, "the Edit issue control sits above the note form"
 
 
-def test_ms637_the_state_change_note_shows_only_when_the_state_changes(board, client):
-    """Visible in the HTML for no-JS users; JS hides it until the state select moves."""
+def test_ms661_edit_issue_has_no_state_select_and_no_note_box(board, client):
+    iid = ready(board)
+    _, inside, _ = edit_control(client.get(f"/issues/{iid}").text)
+    assert 'name="state"' not in inside
+    assert 'name="note"' not in inside
+    assert "data-state-note" not in inside
+
+
+def test_ms661_the_note_form_carries_the_state_select(board, client):
+    """Only the moves allowed from here, plus where the issue is now, selected."""
     iid = ready(board)
     html = client.get(f"/issues/{iid}").text
-    _, inside, _ = edit_control(html)
-    note = re.search(r"<label([^>]*)>[^<]*<textarea name=\"note\"", inside)
-    assert note and "data-state-note" in note.group(1)
-    assert "hidden" not in note.group(1), "the server does not hide it; JS does"
-    assert re.search(r'<select name="state"[^>]*data-current="ready"', inside)
-    script = re.search(r"<script>(.*?)</script>", html, re.S)
-    assert script and "data-state-note" in script.group(1) and "data-current" in script.group(1)
+    form = issue_forms(html)[f"/issues/{iid}/note"]
+    select = re.search(r'<select name="state"[^>]*data-current="ready"[^>]*>(.*?)</select>',
+                       form, re.S)
+    assert select, "the note form has the state select"
+    options = re.findall(r"<option[^>]*>([^<]+)</option>", select.group(1))
+    allowed = [s for s in core.TRANSITIONS if s == "ready" or s in core.TRANSITIONS["ready"]]
+    assert options == allowed
+    assert re.search(r"<option[^>]*selected[^>]*>ready</option>", select.group(1))
+    assert f'name="version" value="{core.show(board, iid)["version"]}"' in form
+    assert len(re.findall(r'name="note"', form)) == 1, "one note box serves both"
+    # Without JS the button reads Save; the script relabels it Add note.
+    assert "<button>Save</button>" in form
+    script = re.search(r"<script>(.*?)</script>", html[html.index(form):], re.S)
+    assert script and "Add note" in script.group(1) and "data-current" in script.group(1)
+
+
+def test_ms661_a_note_with_the_state_unchanged_annotates(board, client):
+    iid = ready(board)
+    issue = core.show(board, iid)
+    r = client.post(f"/issues/{iid}/note", data=note_form(issue, "just a note"),
+                    headers=AS_CHAOS)
+    assert r.status_code == 303
+    after = core.show(board, iid)
+    assert after["state"] == "ready"
+    assert [(e["kind"], e["note"]) for e in after["events"]][-1] == ("annotate", "just a note")
+
+
+def test_ms661_a_note_with_a_new_state_moves_the_card_and_keeps_the_note(board, client):
+    iid = ready(board)
+    issue = core.show(board, iid)
+    r = client.post(f"/issues/{iid}/note",
+                    data=note_form(issue, "parking this for **now**", state="onhold"),
+                    headers=AS_CHAOS)
+    assert r.status_code == 303
+    after = core.show(board, iid)
+    assert after["state"] == "onhold"
+    last = after["events"][-1]
+    assert (last["kind"], last["from_state"], last["to_state"], last["note"]) == \
+        ("transition", "ready", "onhold", "parking this for **now**")
+    assert not any(e["kind"] == "annotate" for e in after["events"]), "one event, not two"
+    assert "<strong>now</strong>" in client.get(f"/issues/{iid}").text
+
+
+def test_ms661_a_state_change_needs_no_note_unless_core_demands_one(board, client):
+    iid = ready(board)
+    r = client.post(f"/issues/{iid}/note", data=note_form(core.show(board, iid), state="onhold"),
+                    headers=AS_CHAOS)
+    assert r.status_code == 303
+    assert core.show(board, iid)["state"] == "onhold"
+
+
+def test_ms661_need_input_without_a_note_is_refused(board, client):
+    iid = ready(board)
+    core.next(board, "run-2")
+    core.edit(board, iid, actor=CHAOS, expected_version=core.show(board, iid)["version"],
+              title="t", preempt=True)
+    issue = core.show(board, iid)
+    r = client.post(f"/issues/{iid}/note", data=note_form(issue, state="need-input"),
+                    headers=AS_CHAOS)
+    assert r.status_code == 422
+    assert "needs a note" in r.text
+    assert core.show(board, iid)["state"] == "processing"
+
+
+def test_ms661_a_state_change_under_a_live_lease_offers_a_take_over(board, client):
+    iid = ready(board)
+    core.next(board, "run-2")
+    issue = core.show(board, iid)
+    refused = client.post(f"/issues/{iid}/note",
+                          data=note_form(issue, "stop, spec changed", state="need-input"),
+                          headers=AS_CHAOS)
+    assert refused.status_code == 409 and "Take over?" in refused.text
+    assert re.search(rf'<form[^>]*action="/issues/{iid}/note"', refused.text)
+    assert core.show(board, iid)["state"] == "processing"
+    taken = client.post(f"/issues/{iid}/note",
+                        data=note_form(issue, "stop, spec changed", state="need-input",
+                                       preempt="1"),
+                        headers=AS_CHAOS)
+    assert taken.status_code == 303
+    assert core.show(board, iid)["state"] == "need-input"
+
+
+def test_ms661_a_stale_state_change_is_a_conflict(board, client):
+    iid = ready(board)
+    stale = core.show(board, iid)
+    core.edit(board, iid, actor=CHAOS, expected_version=stale["version"], title="one")
+    r = client.post(f"/issues/{iid}/note", data=note_form(stale, state="onhold"),
+                    headers=AS_CHAOS)
+    assert r.status_code == 409 and "changed since" in r.text
+    assert core.show(board, iid)["state"] == "ready"
+
+
+def test_ms661_an_edit_post_carrying_a_state_does_not_change_it(board, client):
+    """An old cached Edit issue form still posts state and note; both are ignored."""
+    iid = ready(board)
+    issue = core.show(board, iid)
+    r = client.post(f"/issues/{iid}/edit",
+                    data=edit_form(issue, title="renamed", state="done", note="finished"),
+                    headers=AS_CHAOS)
+    assert r.status_code == 303
+    after = core.show(board, iid)
+    assert (after["title"], after["state"]) == ("renamed", "ready")
 
 
 def test_ms634_an_unopened_body_still_round_trips_through_edit(board, client):
@@ -826,7 +936,6 @@ def test_ms634_note_fields_are_textareas(board, client):
     assert not re.search(r'<input[^>]*name="note"', html)
     forms = issue_forms(html)
     assert re.search(r'<textarea name="note" required', forms[f"/issues/{iid}/note"])
-    assert '<textarea name="note"' in forms[f"/issues/{iid}/edit"]
 
 
 def test_a_note_renders_as_markdown(board, client):
@@ -2012,3 +2121,46 @@ def test_the_issue_page_and_projects_list_show_the_key_in_its_colour(board, clie
     border = colour(board, "MS")["border"]
     assert border in client.get(f"/issues/{issue_id}").text
     assert border in project_row(client.get("/projects").text, "MS")
+
+
+# --- MS-661 review fixes ---------------------------------------------------------
+
+
+@pytest.mark.parametrize("route", ["note", "edit"])
+def test_ms661_an_unauthenticated_upload_writes_no_file(board, attach_dir, monkeypatch, route):
+    monkeypatch.delenv(web.ACTOR_ENV, raising=False)
+    client = local_client(board)
+    iid = ready(board)
+    issue = core.show(board, iid)
+    data = note_form(issue, "x") if route == "note" else edit_form(issue)
+    r = client.post(f"/issues/{iid}/{route}", data=data,
+                    files=[("files", ("drop.txt", b"payload", "text/plain"))])
+    assert r.status_code == 401
+    assert not attach_dir.exists() or list(attach_dir.iterdir()) == []
+
+
+def test_ms661_a_note_on_a_card_moved_meanwhile_is_kept(board, client):
+    """The form showed ready and left the select alone; the card was claimed since."""
+    iid = ready(board)
+    issue = core.show(board, iid)
+    core.next(board, "run-2")
+    r = client.post(f"/issues/{iid}/note", data=note_form(issue, "just a note"),
+                    headers=AS_CHAOS)
+    assert r.status_code == 303
+    after = core.show(board, iid)
+    assert after["state"] == "processing"
+    assert (after["events"][-1]["kind"], after["events"][-1]["note"]) == ("annotate",
+                                                                           "just a note")
+
+
+def test_ms661_a_state_changes_files_hang_off_the_transition(board, attach_dir, client):
+    iid = ready(board)
+    issue = core.show(board, iid)
+    r = client.post(f"/issues/{iid}/note", data=note_form(issue, "parked", state="onhold"),
+                    files=[("files", ("why.txt", b"because", "text/plain"))],
+                    headers=AS_CHAOS)
+    assert r.status_code == 303
+    after = core.show(board, iid)
+    assert [e["kind"] for e in after["events"]][-1] == "transition"
+    assert not any(e["kind"] == "edit" for e in after["events"]), "no changed-attachments edit"
+    assert [a["filename"] for a in after["events"][-1]["attachments"]] == ["why.txt"]

@@ -853,7 +853,8 @@ def edit(engine, issue_id: str, *, actor: str, expected_version: int,
         if labels is not None and sorted(set(labels)) != [l.name for l in issue.labels]:
             issue.labels = [Label(name=n) for n in sorted(set(labels))]
             changed.append("labels")
-        if attachments:
+        # With a state change the files are that transition's reason (MS-661).
+        if attachments and state is None:
             _attach(s, issue, None, attachments, actor, now)
             changed.append("attachments")
         if changed:
@@ -863,8 +864,9 @@ def edit(engine, issue_id: str, *, actor: str, expected_version: int,
             _event(s, issue.id, now, actor, actor_kind, "edit", None, None,
                    "changed " + ", ".join(changed), key)
         if state is not None:
-            _apply_state(s, issue, state, note, actor, actor_kind, now, request_id,
-                         key_used=_has_key(s, request_id))
+            ev = _apply_state(s, issue, state, note, actor, actor_kind, now, request_id,
+                              key_used=_has_key(s, request_id))
+            _attach(s, issue, ev.id, attachments, actor, now)
         return _view(s, issue)
 
     return _write(engine, request_id, run, _replay_view,
@@ -953,10 +955,11 @@ def _apply_state(s, issue, state, note, actor, actor_kind, now, key, key_used):
             issue.lease_holder = issue.lease_token = issue.lease_expires_at = None
         issue.version += 1
         issue.updated_at = now
-    _event(s, issue.id, now, actor, actor_kind, "transition", old, state, note,
-           None if key_used else key)
+    ev = _event(s, issue.id, now, actor, actor_kind, "transition", old, state, note,
+                None if key_used else key)
     if state == "done" and old != "done":
         _resume_origin(s, issue, now)
+    return ev
 
 
 def _resume_origin(s, step, now):

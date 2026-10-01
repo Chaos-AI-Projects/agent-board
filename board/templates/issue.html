@@ -98,32 +98,38 @@
   <label>Body <textarea name="body">{{ issue.body }}</textarea></label>
   <label>Rank <input name="rank" value="{{ issue.rank }}" size="6"></label>
   <label>Labels <input name="labels" value="{{ issue.labels|join(', ') }}"></label>
-  <label>State <select name="state" data-current="{{ issue.state }}">{% for s in states %}<option title="{{ lane_hints[s] }}"{% if s == issue.state %} selected{% endif %}>{{ s }}</option>{% endfor %}</select></label>
   <label>Attach files <input type="file" name="files" multiple></label>
-  <label data-state-note>Note for the state change (done and need-input need one) <textarea name="note"></textarea></label>
   <button>Save</button>
 </form>
 </details>
+
+<h2>Note</h2>
+<form method="post" action="/issues/{{ issue.id }}/note" enctype="multipart/form-data">
+  <input type="hidden" name="version" value="{{ issue.version }}">
+  <input type="hidden" name="from_state" value="{{ issue.state }}">
+  <label>State <select name="state" data-current="{{ issue.state }}">{% for s in states %}<option title="{{ lane_hints[s] }}"{% if s == issue.state %} selected{% endif %}>{{ s }}</option>{% endfor %}</select></label>
+  <textarea name="note" required></textarea>
+  <label>Files <input type="file" name="files" multiple></label>
+  <button>Save</button>
+  <div>A note never needs the lease. A state change does, and the note becomes its reason; done and need-input need one.</div>
+</form>
 <script>
-  // Without JS the state-change note stays visible; with it, the note shows only
-  // once the state select moves off the issue's current state.
+  // Without JS the note is always required and the button reads Save. With it,
+  // an unchanged state is a plain note ("Add note"); a changed one may go without.
   (function () {
     var select = document.querySelector("select[data-current]");
-    var note = document.querySelector("[data-state-note]");
-    if (!select || !note) return;
-    function sync() { note.hidden = select.value === select.dataset.current; }
+    if (!select) return;
+    var form = select.form, note = form.querySelector("textarea[name=note]");
+    var button = form.querySelector("button");
+    function sync() {
+      var moving = select.value !== select.dataset.current;
+      note.required = !moving;
+      button.textContent = moving ? "Save" : "Add note";
+    }
     select.addEventListener("change", sync);
     sync();
   })();
 </script>
-
-<h2>Note</h2>
-<form method="post" action="/issues/{{ issue.id }}/note" enctype="multipart/form-data">
-  <textarea name="note" required></textarea>
-  <label>Files <input type="file" name="files" multiple></label>
-  <button>Add note</button>
-  <div>A note never needs the lease.</div>
-</form>
 
 {% macro files(list) %}{% if list %}
 <ul class="attachments">{% for a in list %}
@@ -146,6 +152,6 @@
 
 <h2>History</h2>
 <ul class="events">{% for e in issue.events %}
-<li>{{ e.at|localtime(tz) }} &middot; {{ e.actor }} ({{ e.actor_kind }}) &middot; {{ e.kind }}{% if e.from_state or e.to_state %} {{ e.from_state or "" }} &rarr; {{ e.to_state or "" }}{% endif %}{% if e.note and e.kind == "annotate" %}<div class="markdown">{{ e.note|markdown }}</div>{% elif e.note %}: {{ e.note }}{% endif %}{{ files(e.attachments) }}</li>
+<li>{{ e.at|localtime(tz) }} &middot; {{ e.actor }} ({{ e.actor_kind }}) &middot; {{ e.kind }}{% if e.from_state or e.to_state %} {{ e.from_state or "" }} &rarr; {{ e.to_state or "" }}{% endif %}{% if e.note and e.kind in ("annotate", "transition") %}<div class="markdown">{{ e.note|markdown }}</div>{% elif e.note %}: {{ e.note }}{% endif %}{{ files(e.attachments) }}</li>
 {% endfor %}</ul>
 {% endblock %}

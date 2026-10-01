@@ -773,6 +773,18 @@ def test_an_edit_that_only_attaches_is_a_change(board):
     assert [a["event_id"] for a in after["attachments"]] == [None]
 
 
+def test_an_edit_that_moves_state_attaches_to_the_transition(board):
+    iid = ready(board)
+    before = core.show(board, iid)
+    after = core.edit(board, iid, actor=CHAOS, expected_version=before["version"],
+                      state="onhold", note="parked", attachments=[blob()])
+    assert after["version"] == before["version"] + 1
+    last = after["events"][-1]
+    assert (last["kind"], last["to_state"]) == ("transition", "onhold")
+    assert [a["filename"] for a in last["attachments"]] == ["a.txt"]
+    assert [e["kind"] for e in after["events"]].count("edit") == 0
+
+
 def test_an_unknown_attachment_is_not_found(board):
     with pytest.raises(core.NotFound):
         core.attachment(board, 999)
