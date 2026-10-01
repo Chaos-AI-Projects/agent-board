@@ -2164,3 +2164,185 @@ def test_ms661_a_state_changes_files_hang_off_the_transition(board, attach_dir, 
     assert [e["kind"] for e in after["events"]][-1] == "transition"
     assert not any(e["kind"] == "edit" for e in after["events"]), "no changed-attachments edit"
     assert [a["filename"] for a in after["events"][-1]["attachments"]] == ["why.txt"]
+
+
+# --- MS-662: the issue opens in a right-half panel over the board ----------------
+
+SITE_HEADER = '<header><a href="/">agent-board</a>'
+
+
+def test_ms662_the_board_has_the_issue_panel_and_its_script(board, client):
+    iid = ready(board)
+    html = client.get("/").text
+    m = re.search(r'<aside id="issue-panel"[^>]*>.*?</aside>', html, re.S)
+    assert m, "the board carries one issue panel"
+    assert " hidden" in m.group(0).split(">")[0], "closed until a card is clicked"
+    assert '<iframe' in m.group(0) and "issue-panel-close" in m.group(0)
+    assert "?embed=1" in html and "#issue=" not in html.split("<script")[0]
+    assert "openPanel" in html and "Escape" in html
+    # No JS, or a ctrl/cmd/middle click: the card's own link still goes full page.
+    assert f'href="/issues/{iid}"' in card(html, iid)
+
+
+def test_ms662_the_panel_is_half_the_viewport_and_full_width_when_narrow(client):
+    html = client.get("/").text
+    assert re.search(r"#issue-panel \{[^}]*position: fixed;[^}]*width: 50vw", html)
+    assert re.search(r"@media \(max-width: 800px\) \{\s*#issue-panel \{ width: 100vw", html)
+
+
+def test_ms662_an_embedded_issue_page_has_no_site_header_but_keeps_its_forms(board, client):
+    iid = ready(board)
+    full = client.get(f"/issues/{iid}").text
+    embedded = client.get(f"/issues/{iid}?embed=1").text
+    assert SITE_HEADER in full
+    assert SITE_HEADER not in embedded
+    assert f"<h1>{iid} item</h1>" in embedded
+    actions = set(issue_forms(embedded))
+    for route in ("edit", "note", "link"):
+        assert f"/issues/{iid}/{route}?embed=1" in actions, route
+
+
+def test_ms662_a_post_from_an_embedded_page_redirects_back_embedded(board, client):
+    iid = ready(board)
+    issue = core.show(board, iid)
+    r = client.post(f"/issues/{iid}/note?embed=1", data=note_form(issue, "hi"),
+                    headers=AS_CHAOS)
+    assert r.status_code == 303
+    assert r.headers["location"] == f"/issues/{iid}?embed=1"
+    r = client.post(f"/issues/{iid}/edit?embed=1",
+                    data=edit_form(core.show(board, iid), title="renamed"), headers=AS_CHAOS)
+    assert r.headers["location"] == f"/issues/{iid}?embed=1"
+
+
+def test_ms662_a_post_from_a_full_page_still_redirects_to_the_full_page(board, client):
+    iid = ready(board)
+    r = client.post(f"/issues/{iid}/note", data=note_form(core.show(board, iid), "hi"),
+                    headers=AS_CHAOS)
+    assert r.headers["location"] == f"/issues/{iid}"
+
+
+def test_ms662_take_over_and_errors_stay_embedded(board, client):
+    iid = ready(board)
+    core.next(board, "run-2")
+    issue = core.show(board, iid)
+    refused = client.post(f"/issues/{iid}/edit?embed=1", data=edit_form(issue, body="x"),
+                          headers=AS_CHAOS)
+    assert refused.status_code == 409
+    assert SITE_HEADER not in refused.text
+    assert f'action="/issues/{iid}/edit?embed=1"' in refused.text
+    stale = client.post(f"/issues/{iid}/edit?embed=1",
+                        data=edit_form(issue, version="0", body="x", preempt="1"),
+                        headers=AS_CHAOS)
+    assert stale.status_code == 409 and SITE_HEADER not in stale.text
+
+
+def test_ms662_links_inside_an_embedded_page_stay_embedded(board, client):
+    """Issue links, including the diagram's, keep embed=1 by a click handler."""
+    iid = ready(board)
+    scripts = "".join(re.findall(r"<script>(.*?)</script>",
+                                 client.get(f"/issues/{iid}?embed=1").text, re.S))
+    assert "/issues/" in scripts and "embed=1" in scripts
+    assert "embed=1" not in client.get(f"/issues/{iid}").text
+
+
+# --- MS-662 review fixes ---------------------------------------------------------
+
+
+def test_ms662_plan_link_and_release_redirect_back_embedded(board, client):
+    other = ready(board)
+    core.next(board, "run-2")
+    iid = ready(board)
+    html = client.get(f"/issues/{iid}?embed=1").text
+    assert f"/issues/{iid}/plan?embed=1" in issue_forms(html)
+    r = client.post(f"/issues/{iid}/link?embed=1", data={"kind": "url", "ref": "https://x"},
+                    headers=AS_CHAOS)
+    assert r.headers["location"] == f"/issues/{iid}?embed=1"
+    r = client.post(f"/issues/{iid}/plan?embed=1", data={"steps": "a\nb"}, headers=AS_CHAOS)
+    assert r.headers["location"] == f"/issues/{iid}?embed=1"
+    take = core.show(board, other)
+    client.post(f"/issues/{other}/edit", data=edit_form(take, preempt="1"), headers=AS_CHAOS)
+    held = client.get(f"/issues/{other}?embed=1", headers=AS_CHAOS).text
+    assert f"/issues/{other}/release?embed=1" in issue_forms(held)
+    r = client.post(f"/issues/{other}/release?embed=1", headers=AS_CHAOS)
+    assert r.headers["location"] == f"/issues/{other}?embed=1"
+
+
+def test_ms662_an_embedded_errors_board_link_leaves_the_panel(board, client):
+    r = client.post("/issues/MS-999/note?embed=1", data={"note": "x"}, headers=AS_CHAOS)
+    assert r.status_code == 404
+    assert '<a href="/" target="_top">Back to the board</a>' in r.text
+    plain = client.post("/issues/MS-999/note", data={"note": "x"}, headers=AS_CHAOS)
+    assert '<a href="/">Back to the board</a>' in plain.text
+
+
+def test_ms662_pages_may_be_framed_only_by_the_board_itself(board, client):
+    iid = ready(board)
+    for path in ("/", f"/issues/{iid}", f"/issues/{iid}?embed=1"):
+        assert client.get(path).headers["content-security-policy"] == "frame-ancestors 'self'"
+
+
+# --- MS-662 round-2 review fixes: the panel's URL helpers, run in node ----------
+
+
+def js_function(html, *names):
+    """The source of each `function name(...) {...}` in a page's scripts."""
+    return "\n".join(_js_function(html, name) for name in names)
+
+
+def _js_function(html, name):
+    start = html.index(f"function {name}(")
+    depth, i = 0, html.index("{", start)
+    while True:
+        depth += {"{": 1, "}": -1}.get(html[i], 0)
+        i += 1
+        if depth == 0:
+            return html[start:i]
+
+
+def run_js(source, expr):
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    out = subprocess.run([node, "-e", f"{source}\nconsole.log(JSON.stringify({expr}));"],
+                         capture_output=True, text=True, check=True).stdout
+    return json.loads(out)
+
+
+def test_ms662_only_an_issue_page_in_the_frame_names_the_panels_issue(client):
+    """A take-over or error page at /issues/X/edit is not issue `X/edit`."""
+    src = js_function(client.get("/").text, "segment", "panelId")
+    cases = ["/issues/MS-1", "/issues/MS-1?embed=1", "/issues/MS-1/edit?embed=1",
+             "/issues/MS-1/note", "/", "/search?q=x", "/issues/"]
+    assert run_js(src, "[" + ",".join(f"panelId({json.dumps(c)})" for c in cases) + "]") == [
+        "MS-1", "MS-1", None, None, None, None, None]
+
+
+def test_ms662_the_hash_never_names_a_dot_segment(client):
+    src = js_function(client.get("/").text, "segment", "hashId")
+    cases = ["#issue=MS-1", "#issue=MS%2D1", "#issue=.", "#issue=..", "#issue=%2E%2E",
+             "#issue=MS-1%2Fedit", "#issue=%E0", "", "#other"]
+    assert run_js(src, "[" + ",".join(f"hashId({json.dumps(c)})" for c in cases) + "]") == [
+        "MS-1", "MS-1", None, None, None, None, None, None, None]
+
+
+def test_ms662_an_embedded_link_gets_embed_once_and_before_its_fragment(board, client):
+    iid = ready(board)
+    src = js_function(client.get(f"/issues/{iid}?embed=1").text, "embedHref")
+    cases = {"/issues/MS-1": "/issues/MS-1?embed=1",
+             "/issues/MS-1?embed=1": "/issues/MS-1?embed=1",
+             "/issues/MS-1?a=1": "/issues/MS-1?a=1&embed=1",
+             "/issues/MS-1?a=1&embed=1": "/issues/MS-1?a=1&embed=1",
+             "/issues/MS-1#n3": "/issues/MS-1?embed=1#n3",
+             "/issues/MS-1?a=1#n3": "/issues/MS-1?a=1&embed=1#n3",
+             "/issues/MS-1?embed=1#n3": "/issues/MS-1?embed=1#n3"}
+    got = run_js(src, "[" + ",".join(f"embedHref({json.dumps(c)})" for c in cases) + "]")
+    assert got == list(cases.values())
+
+
+def test_ms662_any_frame_load_after_the_first_marks_the_board_stale(client):
+    """A save posted before the frame's load listener ran still redraws on close."""
+    html = client.get("/").text
+    assert "addEventListener(\"submit\"" not in html
+    assert "loads > 1" in html or "++loads > 1" in html

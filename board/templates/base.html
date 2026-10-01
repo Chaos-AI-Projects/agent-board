@@ -71,11 +71,47 @@
   .board-controls > details[open]:not(.filter-banner) { flex: 1; }
   .view-panel { position: absolute; right: 0; top: 100%; z-index: 10; width: max-content; max-width: 90vw; background: #fff; border: 1px solid #dfe1e6; border-radius: 4px; padding: 8px 12px; box-shadow: 0 2px 6px rgba(9, 30, 66, 0.2); }
   table.projects { background: #fff; border-collapse: collapse; margin-bottom: 16px; }
+  /* MS-662: a card opens its issue here, over the right half, the board still usable beside it. */
+  #issue-panel { position: fixed; top: 0; right: 0; width: 50vw; height: 100vh; z-index: 20;
+                 display: flex; flex-direction: column; background: #f4f5f7;
+                 box-shadow: -4px 0 16px rgba(9, 30, 66, 0.35); }
+  #issue-panel .issue-panel-bar { display: flex; align-items: center; gap: 12px; justify-content: flex-end;
+                                  padding: 4px 8px; background: #172b4d; color: #fff; }
+  #issue-panel .issue-panel-bar a { color: #fff; }
+  #issue-panel .issue-panel-close { border: none; background: none; color: #fff; cursor: pointer; font-size: 20px; line-height: 1; }
+  #issue-panel iframe { flex: 1; width: 100%; border: 0; }
+  @media (max-width: 800px) {
+    #issue-panel { width: 100vw; }
+  }
   table.projects th, table.projects td { padding: 4px 12px; text-align: left; border-bottom: 1px solid #dfe1e6; }
 </style>
 </head>
 <body>
-<header><a href="/">agent-board</a><form method="get" action="/search" class="header-search"><input type="search" name="q" value="{{ header_q or "" }}" placeholder="Search issues" aria-label="Search issues"><button type="submit">Search</button></form><a href="/search">Advanced search</a><a href="/preferences">Preferences</a><a href="/projects">Projects</a><span>{{ me or "not signed in" }}</span>{% if sign_in and me %}<form method="post" action="/logout" style="margin:0"><button type="submit">Sign out</button></form>{% elif sign_in %}<a href="/login">Sign in</a>{% endif %}</header>
+{% if not embed_q %}<header><a href="/">agent-board</a><form method="get" action="/search" class="header-search"><input type="search" name="q" value="{{ header_q or "" }}" placeholder="Search issues" aria-label="Search issues"><button type="submit">Search</button></form><a href="/search">Advanced search</a><a href="/preferences">Preferences</a><a href="/projects">Projects</a><span>{{ me or "not signed in" }}</span>{% if sign_in and me %}<form method="post" action="/logout" style="margin:0"><button type="submit">Sign out</button></form>{% elif sign_in %}<a href="/login">Sign in</a>{% endif %}</header>{% endif %}
 <main>{% block main %}{% endblock %}</main>
+{% if embed_q %}<script>
+  // In the board's issue panel (MS-662) an issue link, the diagram's included,
+  // stays in the panel; any other link (a file, the body's links) opens a new
+  // tab rather than loading into the panel. A modified click is the browser's.
+  // embed=1 goes in once, in the query, ahead of any #fragment.
+  function embedHref(href) {
+    var cut = href.indexOf("#"), frag = cut < 0 ? "" : href.slice(cut);
+    var url = cut < 0 ? href : href.slice(0, cut), q = url.indexOf("?");
+    if (q >= 0 && url.slice(q + 1).split("&").indexOf("embed=1") >= 0) return href;
+    return url + (q < 0 ? "?" : "&") + "embed=1" + frag;
+  }
+  document.addEventListener("click", function (e) {
+    if (e.defaultPrevented || e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+    var a = e.target.closest ? e.target.closest("a") : null;
+    var href = a ? (a.getAttribute("href") || a.getAttribute("xlink:href") || "") : "";
+    if (!href || href.charAt(0) === "#" || a.getAttribute("target")) return;
+    e.preventDefault();
+    if (href.indexOf("/issues/") === 0) {
+      location.href = embedHref(href);
+    } else {
+      window.open(href, "_blank", "noopener");
+    }
+  });
+</script>{% endif %}
 </body>
 </html>

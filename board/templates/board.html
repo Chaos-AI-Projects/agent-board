@@ -59,6 +59,10 @@
 </section>
 {% endfor %}
 </div>
+<aside id="issue-panel" hidden aria-label="Issue">
+  <div class="issue-panel-bar"><a class="issue-panel-full" href="/">Open full page</a><button class="issue-panel-close" title="Close (Esc)" aria-label="Close the issue panel">&times;</button></div>
+  <iframe title="Issue"></iframe>
+</aside>
 <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.6/Sortable.min.js"></script>
 <script>
   // Dragging a card to another column is a state change through core.edit.
@@ -104,13 +108,104 @@
                         onStart: onStart, onEnd: onEnd});
   });
 
-  // The whole card opens its issue page, or its current step's, unless the click ended a drag.
+  // A plain click on a card opens its issue, or its current step's, in the
+  // right-half panel (MS-662), unless the click ended a drag. A ctrl/cmd,
+  // shift or middle click on the card's link, or no JS, opens the full page.
+  // The URL carries #issue=<id>, so a reload reopens the panel and Back
+  // closes it. The frame navigates with location.replace and closing never
+  // calls history.back(): a frame's own navigations (a save, a link) share
+  // the tab's history, so stepping back would only step the frame back.
+  var panel = document.getElementById("issue-panel");
+  var frame = panel.querySelector("iframe");
+  var changed = false, loads = 0;
+  var ISSUE = "/issues/";
+  // An id is one path segment: never empty, never "." or "..", never a "/".
+  function segment(raw) {
+    var id;
+    try { id = decodeURIComponent(raw); } catch (_) { return null; }
+    return id && id !== "." && id !== ".." && id.indexOf("/") < 0 ? id : null;
+  }
+  function hashId(hash) {
+    var m = hash.match(/^#issue=(.+)$/);
+    return m ? segment(m[1]) : null;
+  }
+  function issueHash() { return hashId(location.hash); }
+  // The issue a frame path shows, or null for any other page in the frame:
+  // a take-over or error page at /issues/X/edit is not issue "X/edit".
+  function panelId(path) {
+    var m = path.match(/^\/issues\/([^\/?#]+)(?:[?#]|$)/);
+    return m ? segment(m[1]) : null;
+  }
+  function framePath() {
+    try { return frame.contentWindow.location.pathname + frame.contentWindow.location.search; }
+    catch (_) { return null; }
+  }
+  function show(id) {
+    var src = ISSUE + encodeURIComponent(id) + "?embed=1";
+    if (framePath() !== src) { loads = 0; frame.contentWindow.location.replace(src); }
+    panel.querySelector(".issue-panel-full").setAttribute("href", ISSUE + encodeURIComponent(id));
+    panel.hidden = false;
+  }
+  function hidePanel() {
+    panel.hidden = true;
+    frame.contentWindow.location.replace("about:blank");
+    // A save inside the panel may have moved the card; redraw the columns.
+    if (changed) location.reload();
+  }
+  function sync() {
+    var id = issueHash();
+    if (id !== null) show(id); else if (!panel.hidden) hidePanel();
+  }
+  function setHash(id, push) {
+    var url = location.pathname + location.search + (id === null ? "" : "#issue=" + encodeURIComponent(id));
+    if (push) history.pushState(null, "", url); else history.replaceState(null, "", url);
+  }
+  function openPanel(id) {
+    // Opening is one history entry; another card while open replaces it.
+    setHash(id, issueHash() === null);
+    sync();
+  }
+  function closePanel() {
+    setHash(null, true);
+    sync();
+  }
+  function onKey(e) {
+    // Escape in a text box keeps what was typed; press it outside to close.
+    if (e.key !== "Escape" || panel.hidden) return;
+    if (e.target.closest && e.target.closest("textarea, input, select")) return;
+    closePanel();
+  }
+  window.addEventListener("popstate", sync);
+  window.addEventListener("hashchange", sync);
+  document.addEventListener("keydown", onKey);
+  panel.querySelector(".issue-panel-close").addEventListener("click", closePanel);
+  frame.addEventListener("load", function () {
+    var doc, path = framePath();
+    try { doc = frame.contentDocument; } catch (_) { return; }
+    if (!doc || panel.hidden) return;
+    // Every load after the opening one followed a save or a link, either of
+    // which may have moved a card, so closing redraws the columns. A submit
+    // listener would miss a save posted before this listener first ran.
+    if (++loads > 1) changed = true;
+    doc.addEventListener("keydown", onKey);
+    // A link followed inside the panel: the hash and the full-page link follow it.
+    var id = path && panelId(path);
+    if (id) {
+      if (id !== issueHash()) setHash(id, false);
+      panel.querySelector(".issue-panel-full").setAttribute("href", ISSUE + encodeURIComponent(id));
+    }
+  });
   document.querySelectorAll(".card[data-href]").forEach(function (card) {
     card.addEventListener("click", function (e) {
-      if (justDragged || e.target.closest("a, button, input, form")) return;
-      location.href = card.dataset.href;
+      if (justDragged) { e.preventDefault(); return; }
+      if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+      var inner = e.target.closest("a, button, input, form");
+      if (inner && !(inner.tagName === "A" && inner.parentElement === card)) return;
+      e.preventDefault();
+      openPanel(decodeURIComponent(card.dataset.href.slice("/issues/".length)));
     });
   });
+  sync();
 
 </script>
 {% endblock %}

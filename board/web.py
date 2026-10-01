@@ -500,6 +500,12 @@ async def save_uploads(form) -> list[dict]:
     return described
 
 
+def embedded(request: Request) -> bool:
+    """The page sits in the board's issue panel (MS-662): no site header, and
+    every form and redirect carries embed=1 so the panel never grows one."""
+    return request.query_params.get("embed") == "1"
+
+
 def _form_int(value):
     return int(value) if value not in (None, "") else None
 
@@ -592,14 +598,20 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
                 "tz": zone(saved_tz) or default_tz, "inline_types": INLINE_TYPES,
                 "sign_in": google is not None,
                 "moves": lambda issue: sorted(core.TRANSITIONS[issue["state"]]),
-                "lane_hints": core.LANE_HINTS}
-        return templates.TemplateResponse(request, name, ctx, status_code=status)
+                "lane_hints": core.LANE_HINTS, "embed_q": "?embed=1" if embedded(request) else ""}
+        r = templates.TemplateResponse(request, name, ctx, status_code=status)
+        # The board frames its own issue pages (MS-662); nobody else may.
+        r.headers["content-security-policy"] = "frame-ancestors 'self'"
+        return r
 
     def error(request, status, message, issue_id=None):
         return page(request, "error.html", status, message=message, issue_id=issue_id)
 
-    def back(issue_id=None):
-        return RedirectResponse(f"/issues/{issue_id}" if issue_id else "/", status_code=303)
+    def back(issue_id=None, request=None):
+        if not issue_id:
+            return RedirectResponse("/", status_code=303)
+        embed = "?embed=1" if request is not None and embedded(request) else ""
+        return RedirectResponse(f"/issues/{issue_id}{embed}", status_code=303)
 
     hosts = allowed_hosts()
 
@@ -914,7 +926,7 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         titles = [line.strip() for line in f.get("steps", "").splitlines() if line.strip()]
         core.plan(engine, issue_id, [{"title": t} for t in titles], actor=me.email,
                   actor_kind=me.kind)
-        return back(issue_id)
+        return back(issue_id, request)
 
     async def edit_or_take_over(request, me, issue_id, form, files, action, **changes):
         """`core.edit`, answering a live lease with the take-over page for `action`."""
@@ -931,7 +943,7 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         except core.Conflict:
             return error(request, 409, f"{issue_id} changed since you loaded it. "
                          "Reload the card to see what changed, then save again.", issue_id)
-        return back(issue_id)
+        return back(issue_id, request)
 
     @app.post("/issues/{issue_id}/edit")
     async def edit(request: Request, issue_id: str):
@@ -976,7 +988,7 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
                                            state=state, note=f.get("note") or None)
         core.annotate(engine, issue_id, f.get("note", ""), actor=me.email, actor_kind=me.kind,
                       attachments=files)
-        return back(issue_id)
+        return back(issue_id, request)
 
     @app.get("/attachments/{attachment_id}")
     def download(attachment_id: int):
@@ -999,14 +1011,14 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         f = await request.form()
         core.link(engine, issue_id, f.get("ref", ""), kind=f.get("kind", ""), actor=me.email,
                   actor_kind=me.kind, closes=f.get("closes") == "1")
-        return back(issue_id)
+        return back(issue_id, request)
 
     @app.post("/issues/{issue_id}/release")
     def release(request: Request, issue_id: str):
         """Hand a card back to the queue. Refused under someone else's lease."""
         me = actor(request)
         core.transition(engine, issue_id, "ready", actor=me.email, actor_kind=me.kind)
-        return back(issue_id)
+        return back(issue_id, request)
 
     return app
 

@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block main %}
 <div class="error"><p>{{ message }}</p>
-{% if issue_id %}<p><a href="/issues/{{ issue_id }}">Back to {{ issue_id }}</a></p>{% else %}<p><a href="/">Back to the board</a></p>{% endif %}
+{% if issue_id %}<p><a href="/issues/{{ issue_id }}{{ embed_q }}">Back to {{ issue_id }}</a></p>{% else %}<p><a href="/"{% if embed_q %} target="_top"{% endif %}>Back to the board</a></p>{% endif %}
 </div>
 {% endblock %}
