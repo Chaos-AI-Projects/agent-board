@@ -697,6 +697,13 @@ def test_the_lanes_are_the_seven_in_board_order():
                                       "onhold", "done", "cancelled"]
 
 
+def test_every_lane_has_a_one_line_hint_in_board_order():
+    """MS-660: a new state cannot ship without a hint for its lane."""
+    assert list(core.LANE_HINTS) == list(core.TRANSITIONS)
+    for state, hint in core.LANE_HINTS.items():
+        assert hint.strip() and "\n" not in hint, state
+
+
 def test_a_new_issue_lands_in_backlog(board):
     assert core.create(board, "MS", "x", actor=CHAOS, actor_kind=HUMAN)["state"] == "backlog"
 

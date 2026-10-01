@@ -42,6 +42,20 @@ TRANSITIONS: dict[str, set[str]] = {
     "cancelled": set(),
 }
 NOTE_REQUIRED = {"done", "need-input"}
+# One line per lane, shown under its column heading and beside an issue's
+# state, so the board explains itself. Keys match TRANSITIONS, in its order.
+LANE_HINTS: dict[str, str] = {
+    "backlog": "Filed, not authorized. Agents never pick it.",
+    "ready": "Authorized. board next takes the highest-ranked card here.",
+    "need-input": "An agent is waiting on you. Answer in a note, then drag the card "
+                  "to ready yourself.",
+    "processing": "An agent holds it under a 90-minute lease. Only board next puts "
+                  "a card here.",
+    "onhold": "Frozen; exits only to backlog. A card split into a workflow waits here "
+              "and returns to ready when the last step is done.",
+    "done": "Finished, with a required note such as a PR. Final.",
+    "cancelled": "Dropped. Final.",
+}
 CREATE_STATES = {"backlog", "ready"}
 ARTIFACT_KINDS = {"commit", "pr", "path", "url"}
 ACTOR_KINDS = {"agent", "human", "system"}

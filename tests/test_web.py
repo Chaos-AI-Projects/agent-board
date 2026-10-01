@@ -93,6 +93,24 @@ def test_the_columns_are_the_seven_lanes_in_order(board, client):
                      "cancelled"]
 
 
+def test_ms660_every_column_shows_its_lane_hint_without_hover(board, client):
+    html = client.get("/").text
+    for state, hint in core.LANE_HINTS.items():
+        col = unescape(column(html, state))
+        assert re.search(rf'<h2 title="{re.escape(hint)}"', col), state
+        assert f'<p class="lane-hint">{hint}</p>' in col, state
+
+
+def test_ms660_the_issue_page_explains_its_state_and_each_option(board, client):
+    iid = ready(board)
+    html = unescape(client.get(f"/issues/{iid}").text)
+    assert re.search(r'State <b>ready</b> <span class="lane-hint">'
+                     + re.escape(core.LANE_HINTS["ready"]) + "</span>", html)
+    select = re.search(r'<select name="state".*?</select>', html, re.S).group(0)
+    options = re.findall(r'<option title="([^"]*)"[^>]*>([^<]+)</option>', select)
+    assert options == [(hint, state) for state, hint in core.LANE_HINTS.items()]
+
+
 def test_row7_an_expired_lease_renders_differently_from_a_live_one(board, client):
     live = ready(board, "live")            # ranks first, so it is claimed first
     expired = ready(board, "expired")

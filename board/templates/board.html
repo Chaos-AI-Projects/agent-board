@@ -41,7 +41,8 @@
 <div class="kanban">
 {% for state, workflows, issues in columns %}
 <section class="column" data-state="{{ state }}">
-  <h2>{{ state }} ({{ workflows|length + issues|length }}){% if columns|length > 1 %}<form method="post" action="/preferences/lanes/hide"><input type="hidden" name="lane" value="{{ state }}"><button class="hide-lane" title="Hide this lane" aria-label="Hide the {{ state }} lane">&times;</button></form>{% endif %}</h2>
+  <h2 title="{{ lane_hints[state] }}">{{ state }} ({{ workflows|length + issues|length }}){% if columns|length > 1 %}<form method="post" action="/preferences/lanes/hide"><input type="hidden" name="lane" value="{{ state }}"><button class="hide-lane" title="Hide this lane" aria-label="Hide the {{ state }} lane">&times;</button></form>{% endif %}</h2>
+  <p class="lane-hint">{{ lane_hints[state] }}</p>
   {% if workflows %}<div class="workflows">
   {% for wf in workflows %}
   {% if wf.project %}{% set pc = project_colour(wf.project) %}{% endif %}

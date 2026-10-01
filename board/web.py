@@ -591,7 +591,8 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
                 "project_colour": lambda key: project_colour(key, buckets.get(key)),
                 "tz": zone(saved_tz) or default_tz, "inline_types": INLINE_TYPES,
                 "sign_in": google is not None,
-                "moves": lambda issue: sorted(core.TRANSITIONS[issue["state"]])}
+                "moves": lambda issue: sorted(core.TRANSITIONS[issue["state"]]),
+                "lane_hints": core.LANE_HINTS}
         return templates.TemplateResponse(request, name, ctx, status_code=status)
 
     def error(request, status, message, issue_id=None):
