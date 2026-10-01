@@ -10,8 +10,9 @@ that cookie.
 It is off unless `BOARD_GOOGLE_OAUTH_CLIENT_ID`, `BOARD_GOOGLE_OAUTH_CLIENT_SECRET`
 and `BOARD_SESSION_SECRET` are all set. Any one without the others refuses to
 start, because a half-configured sign-in must not fall back to local mode.
-`BOARD_ALLOWED_EMAILS` gates who may sign in, and is re-checked on every
-request, so dropping an email ends that session. `BOARD_SESSION_HOURS` sets how
+`BOARD_ALLOWED_EMAILS`, with the files `BOARD_ALLOWED_EMAILS_FILES` names,
+gates who may sign in, and is re-checked on every request, so dropping an
+email ends that session. `BOARD_SESSION_HOURS` sets how
 long a session lasts, 168 by default.
 
 The flow's state, nonce, PKCE verifier and return path ride in a short-lived
@@ -118,7 +119,7 @@ class SignIn:
         self.client_secret = client_secret
         self.secret = secret
         self.hours = hours
-        self.allowed = frozenset(allowed)
+        self.allowed = allowed if isinstance(allowed, auth.Allowlist) else auth.Allowlist(allowed)
         self.keys = keys
         self.exchange = exchange
         self._spent: dict[str, float] = {}
@@ -126,7 +127,8 @@ class SignIn:
 
     @classmethod
     def from_env(cls, env: Mapping[str, str], *, keys: auth.Keys = auth.fetch_key,
-                 exchange: Exchange = post_token) -> "SignIn | None":
+                 exchange: Exchange = post_token,
+                 allowed: auth.Allowlist | None = None) -> "SignIn | None":
         get = lambda name: (env.get(name) or "").strip()  # noqa: E731
         present = [name for name in REQUIRED_ENVS if get(name)]
         if not present:
@@ -145,7 +147,8 @@ class SignIn:
             raise ConfigError(f"{HOURS_ENV} must be positive.")
         return cls(client_id=get(CLIENT_ID_ENV), client_secret=get(CLIENT_SECRET_ENV),
                    secret=get(SECRET_ENV), hours=hours,
-                   allowed=auth._split(env.get(auth.ALLOWED_ENV)), keys=keys,
+                   allowed=allowed if allowed is not None else auth.Allowlist.from_env(env),
+                   keys=keys,
                    exchange=exchange)
 
     @property

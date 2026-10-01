@@ -8,8 +8,8 @@ with no valid token gets a 401 naming that metadata.
 
 A Bearer token is either one the board issued or, for Claude Code, an
 MS-631 Google access token. The board's own tokens are re-checked against
-BOARD_ALLOWED_EMAILS on every call, so removing an email cuts off the grants
-it made without revoking them. The actor of a tool call is the token's
+BOARD_ALLOWED_EMAILS and its files on every call, so removing an email cuts
+off the grants it made without revoking them. The actor of a tool call is the token's
 email, recorded as kind `agent`.
 
 The issuer is `https://` plus the first BOARD_WEB_HOSTS entry, since that is

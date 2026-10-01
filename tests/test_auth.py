@@ -7,6 +7,7 @@ service-account ID token (agent). Keys are
 generated here and tokeninfo is stubbed, so nothing touches the network.
 """
 
+import os
 import time
 
 import jwt
@@ -466,3 +467,102 @@ def test_verified_mode_refuses_the_bare_header_and_board_web_actor(board, monkey
                     headers={web.ACTOR_HEADER: CHAOS})
     assert r.status_code == 401
     assert [e["kind"] for e in core.show(board, iid)["events"]] == ["create"]
+
+
+# --- BOARD_ALLOWED_EMAILS_FILES: allowed users read from files (MS-663) -----------
+
+
+def write(path, text):
+    """Write text and move mtime on, so a same-size edit inside one tick still shows."""
+    path.write_text(text)
+    st = path.stat()
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+
+
+def files_env(*paths, emails=""):
+    return FULL | {auth.ALLOWED_ENV: emails,
+                   auth.ALLOWED_FILES_ENV: os.pathsep.join(str(p) for p in paths)}
+
+
+def test_the_allowlist_is_the_env_plus_every_file(tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    write(a, "one@example.com\n")
+    write(b, "two@example.com\n")
+    allowed = auth.Allowlist.from_env(files_env(a, b, emails="zero@example.com"))
+    assert set(allowed.current()) == {"zero@example.com", "one@example.com", "two@example.com"}
+
+
+def test_a_file_skips_blank_and_comment_lines_and_ignores_case(tmp_path):
+    a = tmp_path / "a"
+    write(a, "# the owner\n\n  Owner@Example.COM  \n   # indented comment\n")
+    allowed = auth.Allowlist.from_env(files_env(a))
+    assert allowed.current() == frozenset({CHAOS})
+
+
+def test_files_alone_admit_and_switch_on_verified_mode(tmp_path):
+    a = tmp_path / "a"
+    write(a, f"{CHAOS}\n")
+    found = authn({auth.IAP_AUDIENCE_ENV: IAP_AUD, auth.ALLOWED_FILES_ENV: str(a)})
+    assert found.verified
+    assert found.identify({auth.IAP_HEADER: iap()}) == auth.Identity(CHAOS, "human")
+    assert authn({auth.ALLOWED_FILES_ENV: str(a)}).verified
+
+
+@pytest.mark.parametrize("make", ["missing", "directory"])
+def test_an_unreadable_file_refuses_to_start(tmp_path, make):
+    a = tmp_path / "a"
+    if make == "directory":
+        a.mkdir()
+    with pytest.raises(ValueError, match=auth.ALLOWED_FILES_ENV):
+        authn(files_env(a))
+
+
+def test_an_edited_file_takes_effect_without_a_restart(tmp_path):
+    a = tmp_path / "a"
+    write(a, "someone@example.com\n")
+    found = authn(files_env(a))
+    assert found.identify({auth.IAP_HEADER: iap()}) is None
+    write(a, f"{CHAOS}\n")
+    assert found.identify({auth.IAP_HEADER: iap()}) == auth.Identity(CHAOS, "human")
+    write(a, "someone@example.com\n")
+    assert found.identify({auth.IAP_HEADER: iap()}) is None
+
+
+def test_a_file_that_goes_unreadable_keeps_the_last_list(tmp_path, caplog):
+    a = tmp_path / "a"
+    write(a, f"{CHAOS}\n")
+    found = authn(files_env(a))
+    a.unlink()
+    assert found.identify({auth.IAP_HEADER: iap()}) == auth.Identity(CHAOS, "human")
+    assert auth.ALLOWED_FILES_ENV in caplog.text
+    # An editor's atomic rename puts it back; the new contents count.
+    write(a, "someone@example.com\n")
+    assert found.identify({auth.IAP_HEADER: iap()}) is None
+
+
+def test_an_unreadable_file_does_not_freeze_the_others(tmp_path, caplog):
+    a, b = tmp_path / "a", tmp_path / "b"
+    write(a, "alice@example.com\n")
+    write(b, "bob@example.com\n")
+    allowed = auth.Allowlist.from_env(files_env(a, b))
+    a.unlink()
+    write(b, "carol@example.com\n")
+    assert allowed.current() == frozenset({"alice@example.com", "carol@example.com"})
+
+
+def test_a_failed_reread_is_retried_once_the_file_is_readable(tmp_path):
+    a = tmp_path / "a"
+    write(a, "bob@example.com\n")
+    allowed = auth.Allowlist.from_env(files_env(a))
+    a.chmod(0o200)
+    write(a, "carol@example.com\n")
+    assert "bob@example.com" in allowed
+    # Readable again with no content or mtime change: the edit still lands.
+    a.chmod(0o644)
+    assert allowed.current() == frozenset({"carol@example.com"})
+
+
+def test_a_byte_order_mark_does_not_hide_the_first_email(tmp_path):
+    a = tmp_path / "a"
+    a.write_bytes(b"\xef\xbb\xbf" + CHAOS.encode() + b"\n")
+    assert auth.Allowlist.from_env(files_env(a)).current() == frozenset({CHAOS})

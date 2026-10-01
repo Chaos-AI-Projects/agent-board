@@ -553,9 +553,14 @@ SIGNIN_PATHS = frozenset({"/login", signin.CALLBACK_PATH, "/logout"})
 def create_app(engine=None, authenticator: auth.Authenticator | None = None,
                sign_in=_FROM_ENV) -> FastAPI:
     engine = engine if engine is not None else store.make_engine()
-    authn = authenticator if authenticator is not None else auth.Authenticator.from_env(os.environ)
+    # One allowlist for every path, so an edited allowlist file reaches them all at once.
+    allowed = (auth.Allowlist.from_env(os.environ)
+               if authenticator is None or sign_in is _FROM_ENV else None)
+    authn = (authenticator if authenticator is not None
+             else auth.Authenticator.from_env(os.environ, allowed=allowed))
     # A half-configured sign-in raises here, so the board refuses to start.
-    google = signin.SignIn.from_env(os.environ) if sign_in is _FROM_ENV else sign_in
+    google = (signin.SignIn.from_env(os.environ, allowed=allowed) if sign_in is _FROM_ENV
+              else sign_in)
     # The remote-MCP authorization server and /mcp exist only beside sign-in (MS-649).
     provider = oauth.Provider(engine, secret=google.secret) if google is not None else None
     mcp_routes, lifespan = [], None

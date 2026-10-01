@@ -200,6 +200,14 @@ its email's domain. `BOARD_ALLOWED_EMAILS`, comma-separated, gates all three. A 
 an empty allowlist refuses everyone, and a half-configured one, such as a team domain with no AUD,
 refuses rather than falling back to local mode.
 
+The allowlist can also live in files. `BOARD_ALLOWED_EMAILS_FILES` names them, separated by `:`.
+Each file holds one email per line. Blank lines and lines starting with `#` are skipped, and case is
+ignored. The allowlist is every email in `BOARD_ALLOWED_EMAILS` plus every email in every file, and
+setting the variable switches on verified mode like the others. The board refuses to start when a
+listed file cannot be read. It re-reads the files whenever one changes, so adding or removing a user
+needs no restart. A file that becomes unreadable later keeps the last list it read, with a warning
+in the log.
+
 The board can also sign a browser in by itself, with no proxy in front. Set all three of
 `BOARD_GOOGLE_OAUTH_CLIENT_ID`, `BOARD_GOOGLE_OAUTH_CLIENT_SECRET` (a Google OAuth *web* client) and
 `BOARD_SESSION_SECRET` (at least 32 characters); any one without the others refuses to start.

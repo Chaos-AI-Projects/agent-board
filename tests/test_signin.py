@@ -8,6 +8,7 @@ the network.
 
 import base64
 import hashlib
+import os
 import time
 from http.cookies import SimpleCookie
 from urllib.parse import parse_qs, urlsplit
@@ -364,3 +365,16 @@ def test_a_bad_session_hours_refuses_to_start(google):
     for bad in ("0", "-1", "soon"):
         with pytest.raises(signin.ConfigError):
             make_signin(google, env=ENV | {signin.HOURS_ENV: bad})
+
+
+def test_a_session_for_an_email_dropped_from_a_file_is_refused(board, google, tmp_path):
+    listed = tmp_path / "allowed"
+    listed.write_text(f"{CHAOS}\n")
+    env = {k: v for k, v in ENV.items() if k != auth.ALLOWED_ENV}
+    s = make_signin(google, env=env | {auth.ALLOWED_FILES_ENV: str(listed)})
+    value = s.session_cookie(auth.Identity(CHAOS, "human"))
+    assert s.session(value) == auth.Identity(CHAOS, "human")
+    listed.write_text("someone-else@example.com\n")
+    st = listed.stat()
+    os.utime(listed, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+    assert s.session(value) is None

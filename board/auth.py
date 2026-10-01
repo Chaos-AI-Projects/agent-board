@@ -26,7 +26,8 @@ The actor kind follows the email, whichever path proved it: a
 `*.gserviceaccount.com` address is an agent and anything else is a human, so
 a service account behind IAP is still an agent. The one exception is an ID
 mapped by `BOARD_SA_MAP`, which is an agent whatever its email's domain. `BOARD_ALLOWED_EMAILS` gates
-all three. Setting any of these variables switches the board to verified
+all three, together with the files `BOARD_ALLOWED_EMAILS_FILES` names (MS-663,
+see `Allowlist`). Setting any of these variables switches the board to verified
 mode, where the bare `Cf-Access-Authenticated-User-Email` header and
 `BOARD_WEB_ACTOR` are ignored. A half-configured verifier refuses rather than
 switching itself off, and a verifier with no allowlist refuses everyone.
@@ -37,6 +38,9 @@ the header and `BOARD_WEB_ACTOR` as before.
 from __future__ import annotations
 
 import json
+import logging
+import os
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -46,6 +50,7 @@ from typing import Callable, Mapping
 import jwt
 
 ALLOWED_ENV = "BOARD_ALLOWED_EMAILS"
+ALLOWED_FILES_ENV = "BOARD_ALLOWED_EMAILS_FILES"
 IAP_AUDIENCE_ENV = "BOARD_IAP_AUDIENCE"
 CF_TEAM_ENV = "BOARD_CF_TEAM_DOMAIN"
 CF_AUD_ENV = "BOARD_CF_AUD"
@@ -65,11 +70,13 @@ TIMEOUT = 5
 # Tolerated clock skew between this container and the token issuer.
 LEEWAY = 60
 USER_AGENT = "agent-board"
-CONFIG_ENVS = (ALLOWED_ENV, IAP_AUDIENCE_ENV, CF_TEAM_ENV, CF_AUD_ENV, SA_AUDIENCE_ENV,
-               CLIENT_IDS_ENV, SA_MAP_ENV)
+CONFIG_ENVS = (ALLOWED_ENV, ALLOWED_FILES_ENV, IAP_AUDIENCE_ENV, CF_TEAM_ENV, CF_AUD_ENV,
+               SA_AUDIENCE_ENV, CLIENT_IDS_ENV, SA_MAP_ENV)
 
 HUMAN = "human"
 AGENT = "agent"
+
+log = logging.getLogger(__name__)
 
 # keys(jwks_url, token) -> the public key that signed token.
 Keys = Callable[[str, str], object]
@@ -133,11 +140,87 @@ def _sa_map(value: str | None) -> dict[str, str]:
     return found
 
 
+def _stamp(path: str) -> tuple | None:
+    """What changes when a file is edited, replaced or re-permissioned, or None if it is gone."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_ino, st.st_mtime_ns, st.st_ctime_ns, st.st_size)
+
+
+def _read(path: str) -> frozenset[str]:
+    """The emails in one allowlist file; ValueError if it cannot be read."""
+    try:
+        # utf-8-sig, so a byte-order mark does not hide the first email.
+        with open(path, encoding="utf-8-sig") as f:
+            lines = f.read().splitlines()
+    except (OSError, UnicodeDecodeError) as e:
+        raise ValueError(f"{ALLOWED_FILES_ENV}: cannot read {path}: {e}") from None
+    return frozenset(line.strip().lower() for line in lines
+                     if line.strip() and not line.strip().startswith("#"))
+
+
+class Allowlist:
+    """The emails allowed in: BOARD_ALLOWED_EMAILS plus the files BOARD_ALLOWED_EMAILS_FILES names.
+
+    The files variable is a list of paths separated by `os.pathsep`. Each file
+    holds one email per line; blank lines and lines starting with `#` are
+    skipped, and case is ignored. A file that cannot be read at startup
+    refuses to start. Every check stats the files and re-reads any that
+    changed, so editing a file needs no restart. A file that cannot be read
+    after startup keeps its own last good list, logs a warning and is retried
+    on the next check, because an editor's atomic rename must not lock
+    everyone out. The other files keep reloading meanwhile.
+    """
+
+    def __init__(self, emails=(), paths=()):
+        self.emails = frozenset(e.strip().lower() for e in emails if e.strip())
+        self.paths = tuple(paths)
+        self._lock = threading.Lock()
+        # Per file: the stamp last read successfully, its emails, and the stamp last warned about.
+        self._seen = [_stamp(path) for path in self.paths]
+        self._listed = [_read(path) for path in self.paths]
+        # A missing file's stamp is None, so start from a value no stamp can equal.
+        self._warned: list = [object()] * len(self.paths)
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str]) -> "Allowlist":
+        paths = [p.strip() for p in (env.get(ALLOWED_FILES_ENV) or "").split(os.pathsep)]
+        return cls(_split(env.get(ALLOWED_ENV)), [p for p in paths if p])
+
+    def current(self) -> frozenset[str]:
+        if not self.paths:
+            return self.emails
+        with self._lock:
+            for i, path in enumerate(self.paths):
+                # Stamped before reading, so an edit landing mid-read is read next time.
+                stamp = _stamp(path)
+                if stamp == self._seen[i]:
+                    continue
+                try:
+                    self._listed[i] = _read(path)
+                except ValueError as e:
+                    # Only this file keeps its last list, and it is retried on the next check.
+                    if stamp != self._warned[i]:
+                        log.warning("%s; keeping its last list", e)
+                        self._warned[i] = stamp
+                    continue
+                self._seen[i], self._warned[i] = stamp, object()
+            return self.emails.union(*self._listed)
+
+    def __contains__(self, email) -> bool:
+        return email in self.current()
+
+    def __bool__(self) -> bool:
+        return bool(self.current())
+
+
 class Authenticator:
     def __init__(self, *, allowed=frozenset(), iap_audience=None, cf_team=None, cf_aud=None,
                  sa_audience=None, client_ids=frozenset(), sa_map=None, configured=False,
                  keys: Keys = fetch_key, tokeninfo: TokenInfo = fetch_tokeninfo):
-        self.allowed = frozenset(allowed)
+        self.allowed = allowed if isinstance(allowed, Allowlist) else Allowlist(allowed)
         self.iap_audience = iap_audience
         self.cf_team = cf_team
         self.cf_aud = cf_aud
@@ -150,9 +233,10 @@ class Authenticator:
 
     @classmethod
     def from_env(cls, env: Mapping[str, str], *, keys: Keys = fetch_key,
-                 tokeninfo: TokenInfo = fetch_tokeninfo) -> "Authenticator":
+                 tokeninfo: TokenInfo = fetch_tokeninfo,
+                 allowed: Allowlist | None = None) -> "Authenticator":
         get = lambda name: (env.get(name) or "").strip() or None  # noqa: E731
-        allowed = _split(env.get(ALLOWED_ENV))
+        allowed = allowed if allowed is not None else Allowlist.from_env(env)
         team, aud = get(CF_TEAM_ENV), get(CF_AUD_ENV)
         sa_map = _sa_map(env.get(SA_MAP_ENV))
         # The ID-token path maps any ID; the access-token path only IDs also pinned as clients.

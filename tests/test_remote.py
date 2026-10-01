@@ -10,6 +10,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import os
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -286,3 +287,37 @@ def test_revocation_content_type_is_case_insensitive(board):
                    headers={"content-type": "Application/X-WWW-Form-URLEncoded"})
     assert r.status_code == 200, r.text
     assert initialize(board, pair["access_token"]).status_code == 401
+
+
+def test_token_of_an_email_since_removed_from_a_file_is_refused(migrated, monkeypatch, tmp_path):
+    monkeypatch.delenv(web.PORT_ENV, raising=False)
+    monkeypatch.setenv(web.HOSTS_ENV, HOST)
+    listed = tmp_path / "allowed"
+    listed.write_text(f"{CHAOS}\n")
+    env = {k: v for k, v in ENV.items() if k != auth.ALLOWED_ENV}
+    for name, value in (env | {auth.ALLOWED_FILES_ENV: str(listed)}).items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv(auth.ALLOWED_ENV, raising=False)
+    core.create_project(migrated, "MS", "memory-solution")
+    # Built from the environment, so the board shares one allowlist (MS-663).
+    with TestClient(web.create_app(migrated), base_url=ORIGIN, follow_redirects=False) as c:
+        client_id = register(c)
+        access = token(c, client_id, authorize(c, client_id)).json()["access_token"]
+        assert initialize(c, access).status_code == 200
+        listed.write_text("someone-else@example.com\n")
+        st = listed.stat()
+        os.utime(listed, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+        assert initialize(c, access).status_code == 401
+
+
+def test_the_board_shares_one_allowlist_across_its_checks(migrated, monkeypatch, tmp_path):
+    listed = tmp_path / "allowed"
+    listed.write_text(f"{CHAOS}\n")
+    for name, value in (ENV | {auth.ALLOWED_FILES_ENV: str(listed)}).items():
+        monkeypatch.setenv(name, value)
+    seen = []
+    real = auth.Allowlist.from_env
+    monkeypatch.setattr(auth.Allowlist, "from_env",
+                        classmethod(lambda cls, env: seen.append(real(env)) or seen[-1]))
+    web.create_app(migrated)
+    assert len(seen) == 1
