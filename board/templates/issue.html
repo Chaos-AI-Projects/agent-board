@@ -11,7 +11,7 @@
   {% include "_lease.html" %}
   {% if not ls %}<div class="lease">Not held</div>{% endif %}
   {% if ls == "held" and issue.lease_holder == me %}
-  <form class="inline" method="post" action="/issues/{{ issue.id }}/release{{ embed_q }}">
+  <form autocomplete="off" class="inline" method="post" action="/issues/{{ issue.id }}/release{{ embed_q }}">
     <button>Release</button> back to the queue as ready
   </form>
   {% endif %}
@@ -82,7 +82,7 @@
 {% if not wf and issue.state not in ("done", "cancelled") %}
 <details>
 <summary>Plan as workflow</summary>
-<form method="post" action="/issues/{{ issue.id }}/plan{{ embed_q }}">
+<form autocomplete="off" method="post" action="/issues/{{ issue.id }}/plan{{ embed_q }}">
   <label>Steps, one per line, in order <textarea name="steps" required></textarea></label>
   <button>Plan</button>
   <div>Each line becomes a ready step. This issue goes on hold and comes back ready when the last step is done.</div>
@@ -92,7 +92,7 @@
 
 <details>
 <summary>Edit issue</summary>
-<form method="post" action="/issues/{{ issue.id }}/edit{{ embed_q }}" enctype="multipart/form-data">
+<form autocomplete="off" method="post" action="/issues/{{ issue.id }}/edit{{ embed_q }}" enctype="multipart/form-data">
   <input type="hidden" name="version" value="{{ issue.version }}">
   <label>Title <input name="title" value="{{ issue.title }}" size="60"></label>
   <label>Body <textarea name="body">{{ issue.body }}</textarea></label>
@@ -104,7 +104,7 @@
 </details>
 
 <h2>Note</h2>
-<form method="post" action="/issues/{{ issue.id }}/note{{ embed_q }}" enctype="multipart/form-data">
+<form autocomplete="off" method="post" action="/issues/{{ issue.id }}/note{{ embed_q }}" enctype="multipart/form-data">
   <input type="hidden" name="version" value="{{ issue.version }}">
   <input type="hidden" name="from_state" value="{{ issue.state }}">
   <label>State <select name="state" data-current="{{ issue.state }}">{% for s in states %}<option title="{{ lane_hints[s] }}"{% if s == issue.state %} selected{% endif %}>{{ s }}</option>{% endfor %}</select></label>
@@ -144,7 +144,7 @@
 
 <h2>Artifacts</h2>
 <ul>{% for a in issue.artifacts %}<li>{{ a.kind }} {{ a.ref }}{% if a.closes %} (closes){% endif %} &middot; {{ a.added_by }}</li>{% endfor %}</ul>
-<form method="post" action="/issues/{{ issue.id }}/link{{ embed_q }}">
+<form autocomplete="off" method="post" action="/issues/{{ issue.id }}/link{{ embed_q }}">
   <select name="kind"><option>pr</option><option>commit</option><option>path</option><option>url</option></select>
   <input name="ref" required> <label class="inline"><input type="checkbox" name="closes" value="1"> closes the issue</label>
   <button>Link</button>

@@ -35,6 +35,12 @@ only their metadata goes to the database; each file is capped at
 inline and everything else, HTML and SVG included, as a download: the board
 writes as the reader, so an uploaded page opening on its origin could act as them.
 
+The board and every issue page keep themselves current (AB-4). Each carries
+a stamp, a digest of what it shows, and polls `/stamp` or
+`/issues/<id>/stamp` every `STAMP_POLL_SECONDS`; a moved stamp reloads the
+page unless a field has focus or unsaved input, a card is mid-drag, or the
+issue panel is busy, in which case the next poll tries again.
+
 Times are stored in UTC and shown in a zone: the one saved in `board_prefs`,
 else `BOARD_TIMEZONE`, else UTC. An unknown name in either is skipped, and
 one in the environment is logged rather than stopping the board.
@@ -168,6 +174,48 @@ templates.env.filters["localtime"] = localtime
 
 class Unauthenticated(Exception):
     pass
+
+
+# How often a board or issue page asks whether what it shows has changed (AB-4).
+STAMP_POLL_SECONDS = 10
+
+
+def stamp(data) -> str:
+    """A digest of what a page shows, which the page polls to see it changed (AB-4)."""
+    raw = json.dumps(data, sort_keys=True, default=str).encode()
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
+_CARD_FIELDS = ("id", "title", "labels", "version", "project", "state",
+                "lease_holder", "lease_expires_at")
+
+
+def board_stamp(ctx: dict, buckets: dict) -> str:
+    """The board's stamp: only what this board renders, so a card in an
+    untracked project or a hidden lane, or a note, does not reload it. The
+    clock moves on every read, so it stays out; what it decides, each card's
+    lease status, goes in instead."""
+    now = ctx["now"]
+
+    def card(i):
+        return {k: i[k] for k in _CARD_FIELDS} | {"lease": lease_status(i, now)}
+
+    def flow(w):
+        current = w["current"]
+        return {"id": w["id"], "title": w["title"], "target": w["target"],
+                "project": w["project"], "steps": len(w["steps"]),
+                "current": current and current["title"]}
+
+    view = ctx["view"]
+    return stamp({"columns": [(state, [flow(w) for w in wfs], [card(i) for i in issues])
+                              for state, wfs, issues in ctx["columns"]],
+                  "projects": view["projects"], "templates": view["templates"],
+                  "tracked": ctx["tracked"], "hidden": ctx["hidden"], "buckets": buckets})
+
+
+def issue_stamp(issue: dict, now: str, buckets: dict) -> str:
+    """An issue page's stamp, by the same rule as the board's."""
+    return stamp({"issue": issue, "lease": lease_status(issue, now), "buckets": buckets})
 
 
 def lease_status(issue: dict, now: str) -> str | None:
@@ -619,7 +667,7 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
                 "tz": zone(saved_tz) or default_tz, "inline_types": INLINE_TYPES,
                 "sign_in": google is not None,
                 "moves": lambda issue: sorted(core.TRANSITIONS[issue["state"]]),
-                "lane_hints": core.LANE_HINTS, "embed_q": "?embed=1" if embedded(request) else ""}
+                "lane_hints": core.LANE_HINTS, "stamp_poll_ms": STAMP_POLL_SECONDS * 1000, "embed_q": "?embed=1" if embedded(request) else ""}
         r = templates.TemplateResponse(request, name, ctx, status_code=status)
         # The board frames its own issue pages (MS-662); nobody else may.
         r.headers["content-security-policy"] = "frame-ancestors 'self'"
@@ -769,8 +817,7 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
                 "lanes": _chosen(saved["lanes"], list(core.TRANSITIONS)),
                 "timezone": saved["timezone"]}
 
-    @app.get("/", response_class=HTMLResponse)
-    def board_page(request: Request):
+    def board_view(request):
         view = core.overview(engine)
         prefs = view_prefs(request, view["projects"])
         tracked = set(prefs["projects"])
@@ -794,8 +841,18 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
                     [i for i in loose if i["state"] == state])
                    for state in prefs["lanes"]]
         hidden = [s for s in core.TRANSITIONS if s not in prefs["lanes"]]
-        return page(request, "board.html", view=view, columns=columns, now=view["now"],
-                    tracked=prefs["projects"], hidden=hidden)
+        return {"view": view, "columns": columns, "now": view["now"],
+                "tracked": prefs["projects"], "hidden": hidden}
+
+    @app.get("/", response_class=HTMLResponse)
+    def board_page(request: Request):
+        ctx = board_view(request)
+        return page(request, "board.html", **ctx, stamp_url="/stamp",
+                    stamp=board_stamp(ctx, core.colour_buckets(engine)))
+
+    @app.get("/stamp")
+    def board_page_stamp(request: Request):
+        return {"stamp": board_stamp(board_view(request), core.colour_buckets(engine))}
 
     @app.get("/search", response_class=HTMLResponse)
     def search_page(request: Request, q: str = "", project: str = "", label: str = "",
@@ -915,10 +972,17 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         # The note form offers where the issue is now plus the moves allowed from there.
         here = issue["state"]
         states = [s for s in core.TRANSITIONS if s == here or s in core.TRANSITIONS[here]]
-        return page(request, "issue.html", issue=issue, now=core.overview(engine)["now"],
-                    states=states, wf=wf,
+        now = core.now(engine)
+        return page(request, "issue.html", issue=issue, now=now,
+                    states=states, wf=wf, stamp_url=f"/issues/{quote(issue['id'], safe='')}/stamp",
+                    stamp=issue_stamp(issue, now, core.colour_buckets(engine)),
                     diagram=workflow_diagram(wf, issue["id"]) if wf else None,
                     steps=workflow_list(wf, issue["id"]) if wf else None)
+
+    @app.get("/issues/{issue_id}/stamp")
+    def issue_page_stamp(issue_id: str):
+        return {"stamp": issue_stamp(core.show(engine, issue_id), core.now(engine),
+                                     core.colour_buckets(engine))}
 
     @app.post("/issues")
     async def create_issue(request: Request):

@@ -3,7 +3,7 @@
 <div class="board-controls">
 <details>
   <summary>New issue</summary>
-  <form method="post" action="/issues" enctype="multipart/form-data">
+  <form autocomplete="off" method="post" action="/issues" enctype="multipart/form-data">
     <label>Project <select name="project">{% for p in view.projects %}<option value="{{ p.key }}">{{ p.key }} ({{ p.name }})</option>{% endfor %}</select></label>
     <label>Title <input name="title" required size="60"></label>
     <label>Body <textarea name="body"></textarea></label>
@@ -16,7 +16,7 @@
 {% if view.templates %}
 <details>
   <summary>New workflow from a template</summary>
-  <form method="post" action="/workflows">
+  <form autocomplete="off" method="post" action="/workflows">
     <label>Template <select name="template">{% for t in view.templates %}<option value="{{ t.name }}">{{ t.name }} ({{ t.title }})</option>{% endfor %}</select></label>
     <label>Project <select name="project">{% for p in view.projects %}<option value="{{ p.key }}">{{ p.key }}</option>{% endfor %}</select></label>
     <label>Title <input name="title" placeholder="defaults to the template's"></label>
@@ -28,12 +28,12 @@
 <details class="filter-banner">
   <summary>View{% if not all_tracked %}: {{ tracked|join(", ") }}{% endif %}</summary>
   <div class="view-panel">
-  <form method="post" action="/preferences/projects">
+  <form autocomplete="off" method="post" action="/preferences/projects">
     {% for p in view.projects %}<label><input type="checkbox" name="project" value="{{ p.key }}"{% if p.key in tracked %} checked{% endif %}> {{ p.key }} ({{ p.name }})</label>{% endfor %}
     <button>Apply</button>
   </form>
   {% if hidden %}<div class="hidden-lanes">Hidden lanes:
-    {% for state in hidden %}<form method="post" action="/preferences/lanes/show"><input type="hidden" name="lane" value="{{ state }}"><button>Show {{ state }}</button></form>{% endfor %}
+    {% for state in hidden %}<form autocomplete="off" method="post" action="/preferences/lanes/show"><input type="hidden" name="lane" value="{{ state }}"><button>Show {{ state }}</button></form>{% endfor %}
   </div>{% endif %}
   </div>
 </details>
@@ -41,7 +41,7 @@
 <div class="kanban">
 {% for state, workflows, issues in columns %}
 <section class="column" data-state="{{ state }}">
-  <h2 title="{{ lane_hints[state] }}">{{ state }} ({{ workflows|length + issues|length }}){% if columns|length > 1 %}<form method="post" action="/preferences/lanes/hide"><input type="hidden" name="lane" value="{{ state }}"><button class="hide-lane" title="Hide this lane" aria-label="Hide the {{ state }} lane">&times;</button></form>{% endif %}</h2>
+  <h2 title="{{ lane_hints[state] }}">{{ state }} ({{ workflows|length + issues|length }}){% if columns|length > 1 %}<form autocomplete="off" method="post" action="/preferences/lanes/hide"><input type="hidden" name="lane" value="{{ state }}"><button class="hide-lane" title="Hide this lane" aria-label="Hide the {{ state }} lane">&times;</button></form>{% endif %}</h2>
   <p class="lane-hint">{{ lane_hints[state] }}</p>
   {% if workflows %}<div class="workflows">
   {% for wf in workflows %}
@@ -72,9 +72,10 @@
   // version) is shown, then the page reloads so the board never shows a move
   // that did not happen. A workflow card does not drag: its column is
   // computed from its steps, and a step's state changes on its issue page.
-  var justDragged = false;
+  var justDragged = false, dragging = false;
   function allowed(card) { return (card.dataset.moves || "").split(" "); }
   function onStart(evt) {
+    dragging = true;
     var ok = allowed(evt.item);
     document.querySelectorAll(".kanban .column").forEach(function (col) {
       col.classList.add(ok.indexOf(col.dataset.state) >= 0 ? "drop-ok" : "drop-no");
@@ -86,7 +87,9 @@
     document.querySelectorAll(".kanban .column").forEach(function (col) {
       col.classList.remove("drop-ok", "drop-no");
     });
-    if (evt.from === evt.to) return;
+    // A real move ends in a reload, so it stays "dragging" until then: an
+    // auto-reload must not beat a refusal's alert.
+    if (evt.from === evt.to) { dragging = false; return; }
     var card = evt.item, state = evt.to.dataset.state;
     var body = new URLSearchParams({version: card.dataset.version, state: state});
     if (state === "done" || state === "need-input") {
@@ -94,7 +97,10 @@
       if (!note) { location.reload(); return; }
       body.set("note", note);
     }
-    var r = await fetch("/issues/" + card.dataset.id + "/move", {method: "POST", body: body});
+    var r;
+    try {
+      r = await fetch("/issues/" + card.dataset.id + "/move", {method: "POST", body: body});
+    } catch (_) { alert("Move failed: the board did not answer"); location.reload(); return; }
     if (!r.ok) {
       var why = r.status;
       try { why = (await r.json()).error || why; } catch (_) { /* an HTML error page */ }
@@ -188,7 +194,7 @@
     // Every load after the opening one followed a save or a link, either of
     // which may have moved a card, so closing redraws the columns. A submit
     // listener would miss a save posted before this listener first ran.
-    if (++loads > 1) changed = true;
+    if (++loads > 1) changed = true; else restorePanel(doc, path);
     doc.addEventListener("keydown", onKey);
     // A link followed inside the panel: the hash and the full-page link follow it.
     var id = path && panelId(path);
@@ -209,5 +215,42 @@
   });
   sync();
 
+  // AB-4: a reload waits out a drag, and anything the issue panel would lose:
+  // its page holds its own busy check, and reloading the board reloads it too.
+  // Any other page in the panel, such as a take-over holding a typed note or
+  // an error, would come back as the plain issue page, so it holds the reload.
+  function boardBusy() {
+    if (dragging || justDragged) return true;
+    if (panel.hidden) return false;
+    var path = framePath();
+    if (!path || !panelId(path)) return true;
+    try {
+      var w = frame.contentWindow;
+      return !(w && w.pageBusy) || !!w.pageBusy();
+    } catch (_) { return true; }
+  }
+  window.extraBusy = boardBusy;
+  // A board reload reloads the panel too. Its page comes back where it was:
+  // same scroll, same sections open, matched by path so a different issue
+  // starts fresh.
+  var PANEL_KEPT = "ab4-panel";
+  function keepPanel() {
+    if (panel.hidden) return;
+    try {
+      var doc = frame.contentDocument, open = [];
+      doc.querySelectorAll("details").forEach(function (d, i) { if (d.open) open.push(i); });
+      sessionStorage.setItem(PANEL_KEPT, JSON.stringify(
+        {path: framePath(), x: frame.contentWindow.scrollX, y: frame.contentWindow.scrollY, open: open}));
+    } catch (_) { /* nothing kept */ }
+  }
+  function restorePanel(doc, path) {
+    var kept = null;
+    try { kept = JSON.parse(sessionStorage.getItem(PANEL_KEPT)); sessionStorage.removeItem(PANEL_KEPT); } catch (_) { return; }
+    if (!kept || kept.path !== path) return;
+    var details = doc.querySelectorAll("details");
+    kept.open.forEach(function (i) { if (details[i]) details[i].open = true; });
+    frame.contentWindow.scrollTo(kept.x, kept.y);
+  }
+  window.onAutoReload = keepPanel;
 </script>
 {% endblock %}

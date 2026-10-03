@@ -90,8 +90,74 @@
 </style>
 </head>
 <body>
-{% if not embed_q %}<header><a href="/">agent-board</a><form method="get" action="/search" class="header-search"><input type="search" name="q" value="{{ header_q or "" }}" placeholder="Search issues" aria-label="Search issues"><button type="submit">Search</button></form><a href="/search">Advanced search</a><a href="/preferences">Preferences</a><a href="/projects">Projects</a><span>{{ me or "not signed in" }}</span>{% if sign_in and me %}<form method="post" action="/logout" style="margin:0"><button type="submit">Sign out</button></form>{% elif sign_in %}<a href="/login">Sign in</a>{% endif %}</header>{% endif %}
+{% if not embed_q %}<header><a href="/">agent-board</a><form autocomplete="off" method="get" action="/search" class="header-search"><input type="search" name="q" value="{{ header_q or "" }}" placeholder="Search issues" aria-label="Search issues"><button type="submit">Search</button></form><a href="/search">Advanced search</a><a href="/preferences">Preferences</a><a href="/projects">Projects</a><span>{{ me or "not signed in" }}</span>{% if sign_in and me %}<form method="post" action="/logout" style="margin:0"><button type="submit">Sign out</button></form>{% elif sign_in %}<a href="/login">Sign in</a>{% endif %}</header>{% endif %}
 <main>{% block main %}{% endblock %}</main>
+{% if stamp %}<script>
+  // AB-4: the page keeps itself current. Every few seconds it asks for the
+  // stamp of what it shows and reloads when the stamp moved. It never reloads
+  // over somebody's work: not while a field has focus or holds unsaved input,
+  // and not while the page's own window.extraBusy() says so. A held reload is
+  // tried again on the next poll, and a hidden tab does not poll at all.
+  var STAMP = {{ stamp|tojson }}, STAMP_URL = {{ stamp_url|tojson }};
+  var KEEP_SCROLL = "ab4-scroll:" + location.pathname + location.search;
+  function fieldDirty(el) {
+    var tag = String(el.tagName || "").toLowerCase(), type = String(el.type || "").toLowerCase();
+    if (tag === "textarea") return el.value !== el.defaultValue;
+    if (tag === "select") {
+      var opts = Array.prototype.slice.call(el.options || []);
+      if (type === "select-multiple") return opts.some(function (o) { return !!o.selected !== !!o.defaultSelected; });
+      // A select with no `selected` option starts on its first one.
+      var start = 0;
+      opts.forEach(function (o, i) { if (o.defaultSelected) start = i; });
+      return opts.length > 0 && el.selectedIndex !== start;
+    }
+    if (tag !== "input") return false;
+    if (type === "checkbox" || type === "radio") return !!el.checked !== !!el.defaultChecked;
+    if (type === "file") return !!(el.files && el.files.length);
+    if (["hidden", "submit", "button", "reset", "image"].indexOf(type) >= 0) return false;
+    return el.value !== el.defaultValue;
+  }
+  function pageBusy() {
+    var active = document.activeElement;
+    if (active && active.matches && active.matches("input, textarea, select")) return true;
+    var fields = document.querySelectorAll("input, textarea, select");
+    for (var i = 0; i < fields.length; i++) if (fieldDirty(fields[i])) return true;
+    return !!(window.extraBusy && window.extraBusy());
+  }
+  async function pollStamp() {
+    if (document.hidden) return;
+    var got;
+    try {
+      var r = await fetch(STAMP_URL, {cache: "no-store", credentials: "same-origin"});
+      if (!r.ok) return;
+      got = (await r.json()).stamp;
+    } catch (_) { return; }
+    if (!got || got === STAMP || pageBusy()) return;
+    // A reload keeps the window's scroll; the board's .kanban scroller is kept here.
+    var kept = [].map.call(document.querySelectorAll(".kanban"), function (el) {
+      return [el.scrollLeft, el.scrollTop];
+    });
+    try { sessionStorage.setItem(KEEP_SCROLL, JSON.stringify(kept)); } catch (_) { /* private mode */ }
+    if (window.onAutoReload) window.onAutoReload();
+    location.reload();
+  }
+  // The load an auto-reload caused. A reload happens only with every field
+  // as it was served, but Firefox refills fields on reload from the old page,
+  // and those values are the stale defaults; reset puts the new ones back.
+  function afterAutoReload() {
+    var kept = null;
+    try { kept = JSON.parse(sessionStorage.getItem(KEEP_SCROLL)); sessionStorage.removeItem(KEEP_SCROLL); } catch (_) { /* none */ }
+    if (!kept) return false;
+    for (var f = 0; f < document.forms.length; f++) document.forms[f].reset();
+    document.querySelectorAll(".kanban").forEach(function (el, i) {
+      if (kept[i]) { el.scrollLeft = kept[i][0]; el.scrollTop = kept[i][1]; }
+    });
+    return true;
+  }
+  afterAutoReload();
+  setInterval(pollStamp, {{ stamp_poll_ms }});
+  document.addEventListener("visibilitychange", pollStamp);
+</script>{% endif %}
 {% if embed_q %}<script>
   // In the board's issue panel (MS-662) an issue link, the diagram's included,
   // stays in the panel; any other link (a file, the body's links) opens a new

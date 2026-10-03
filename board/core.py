@@ -257,6 +257,12 @@ def show(engine, issue_id: str) -> dict:
         return _view(s, _get(s, issue_id))
 
 
+def now(engine) -> str:
+    """The database clock, which is what a lease expires by."""
+    with store.session(engine) as s:
+        return _iso(store.db_now(s))
+
+
 def overview(engine, *, q: str | None = None, project: str | None = None,
              label: str | None = None, assignee: str | None = None) -> dict:
     """Everything the web board renders, read in one session.

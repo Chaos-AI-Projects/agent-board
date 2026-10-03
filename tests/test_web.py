@@ -9,6 +9,7 @@ Release hands it back to the queue.
 
 import json
 import re
+import time
 from datetime import datetime, timedelta
 from html import unescape
 from urllib.parse import quote
@@ -1352,7 +1353,7 @@ ALL_LANES = list(core.TRANSITIONS)
 
 def hide_buttons(html):
     """The lanes whose heading carries a hide control."""
-    return re.findall(r'<form method="post" action="/preferences/lanes/hide">'
+    return re.findall(r'<form autocomplete="off" method="post" action="/preferences/lanes/hide">'
                       r'<input type="hidden" name="lane" value="([^"]+)">', html)
 
 
@@ -1383,7 +1384,7 @@ def test_hidden_lanes_show_only_inside_the_opened_view_banner(client, board):
     # The collapsed summary says nothing about hidden lanes (MS-653).
     assert banner_summary(html) == "View"
     assert html.count("Hidden lanes") == banner(html).count("Hidden lanes") == 1
-    shows = re.findall(r'<form method="post" action="/preferences/lanes/show">'
+    shows = re.findall(r'<form autocomplete="off" method="post" action="/preferences/lanes/show">'
                        r'<input type="hidden" name="lane" value="([^"]+)">', banner(html))
     assert shows == ["done", "cancelled"]
 
@@ -2369,7 +2370,8 @@ def test_ab3_an_html_comment_in_markdown_is_not_shown(board, client, text):
     core.annotate(board, iid, text, actor=CHAOS, actor_kind=HUMAN)
     page = client.get(f"/issues/{iid}").text
     assert "&lt;!-- zqxsecret" in page, "the edit box keeps the source"
-    html = re.sub(r"<textarea[^>]*>.*?</textarea>", "", page, flags=re.S)
+    # The edit box keeps the source and the page script has its own words.
+    html = re.sub(r"<(textarea|script)[^>]*>.*?</\1>", "", page, flags=re.S)
     assert "zqxsecret" not in html and "remark" not in html
     assert "&lt;!--" not in html
     assert html.count("before") == 2 and html.count("after") == 2
@@ -2396,3 +2398,222 @@ def test_ab5_an_open_panel_narrows_the_board_instead_of_covering_it(client):
     assert re.search(r"@media \(max-width: 800px\) \{(?:[^{}]*\{[^}]*\})*?[^{}]*"
                      r"body\.issue-panel-open main \{ margin-right: 0", html)
     assert 'classList.toggle("issue-panel-open"' in html
+
+
+# AB-4: the board and an issue page keep themselves current. Each page carries
+# a stamp, a digest of what it shows, and polls its stamp URL for a new one.
+
+def stamp_of(html):
+    m = re.search(r'var STAMP = "([0-9a-f]+)", STAMP_URL = "([^"]+)"', html)
+    assert m, "no stamp on the page"
+    return m.group(1), m.group(2)
+
+
+def board_stamp(client):
+    r = client.get("/stamp")
+    assert r.status_code == 200
+    return r.json()["stamp"]
+
+
+def issue_stamp(client, iid):
+    r = client.get(f"/issues/{quote(iid, safe='')}/stamp")
+    assert r.status_code == 200
+    return r.json()["stamp"]
+
+
+def test_ab4_the_board_page_carries_the_stamp_it_polls_for(board, client):
+    ready(board)
+    stamp, url = stamp_of(client.get("/").text)
+    assert url == "/stamp"
+    assert stamp == board_stamp(client)
+
+
+def test_ab4_the_board_stamp_holds_while_nothing_changes(board, client):
+    ready(board)
+    first = board_stamp(client)
+    time.sleep(1.1)
+    assert board_stamp(client) == first, "the clock alone must not change it"
+
+
+@pytest.mark.parametrize("change", ["create", "transition", "edit", "claim", "project"])
+def test_ab4_the_board_stamp_moves_when_a_card_or_lane_changes(board, client, change):
+    iid = ready(board)
+    before = board_stamp(client)
+    if change == "create":
+        ready(board, "another")
+    elif change == "transition":
+        core.transition(board, iid, "onhold", actor=CHAOS, actor_kind=HUMAN)
+    elif change == "edit":
+        core.edit(board, iid, actor=CHAOS, expected_version=core.show(board, iid)["version"],
+                  title="renamed")
+    elif change == "claim":
+        core.next(board, "w1")
+    else:
+        core.create_project(board, "PE", "packrat-extended")
+    assert board_stamp(client) != before
+
+
+def test_ab4_the_board_stamp_moves_when_a_lease_runs_out(board, client):
+    ready(board)
+    core.next(board, "w1", ttl=timedelta(seconds=1))
+    live = board_stamp(client)
+    # The SQLite clock reads whole seconds, so a 1s lease needs 2s to be past.
+    time.sleep(2.1)
+    assert board_stamp(client) != live, "a live card turning expired is a change"
+
+
+@pytest.mark.parametrize("embed", ["", "?embed=1"])
+def test_ab4_an_issue_page_carries_its_own_stamp(board, client, embed):
+    iid = ready(board)
+    stamp, url = stamp_of(client.get(f"/issues/{iid}{embed}").text)
+    assert url == f"/issues/{iid}/stamp"
+    assert stamp == issue_stamp(client, iid)
+
+
+def test_ab4_an_issue_stamp_moves_on_a_note_and_not_on_another_issue(board, client):
+    iid, other = ready(board), ready(board, "other")
+    before = issue_stamp(client, iid)
+    core.annotate(board, other, "elsewhere", actor=CHAOS, actor_kind=HUMAN)
+    time.sleep(1.1)
+    assert issue_stamp(client, iid) == before
+    core.annotate(board, iid, "here", actor=CHAOS, actor_kind=HUMAN)
+    assert issue_stamp(client, iid) != before
+
+
+def test_ab4_an_unknown_issue_has_no_stamp(client):
+    assert client.get("/issues/MS-999/stamp").status_code == 404
+
+
+def test_ab4_pages_without_live_content_do_not_poll(client):
+    assert "STAMP_URL" not in client.get("/preferences").text
+
+
+def test_ab4_a_field_is_dirty_only_when_it_differs_from_its_default(client):
+    src = js_function(client.get("/").text, "fieldDirty")
+    cases = {
+        "typed": {"tagName": "TEXTAREA", "value": "x", "defaultValue": ""},
+        "untouched": {"tagName": "TEXTAREA", "value": "a", "defaultValue": "a"},
+        "text": {"tagName": "INPUT", "type": "text", "value": "q", "defaultValue": ""},
+        "hidden": {"tagName": "INPUT", "type": "hidden", "value": "q", "defaultValue": ""},
+        "ticked": {"tagName": "INPUT", "type": "checkbox", "checked": True, "defaultChecked": False},
+        "as-was": {"tagName": "INPUT", "type": "checkbox", "checked": True, "defaultChecked": True},
+        "file": {"tagName": "INPUT", "type": "file", "files": [{}]},
+        "no-file": {"tagName": "INPUT", "type": "file", "files": []},
+        # A select with no `selected` option starts on its first one.
+        "first": {"tagName": "SELECT", "type": "select-one", "selectedIndex": 0,
+                  "options": [{"defaultSelected": False}, {"defaultSelected": False}]},
+        "moved": {"tagName": "SELECT", "type": "select-one", "selectedIndex": 1,
+                  "options": [{"defaultSelected": False}, {"defaultSelected": False}]},
+        "default": {"tagName": "SELECT", "type": "select-one", "selectedIndex": 1,
+                    "options": [{"defaultSelected": False}, {"defaultSelected": True}]},
+    }
+    got = run_js(src, "{" + ",".join(f"{json.dumps(k)}: fieldDirty({json.dumps(v)})"
+                                     for k, v in cases.items()) + "}")
+    assert got == {"typed": True, "untouched": False, "text": True, "hidden": False,
+                   "ticked": True, "as-was": False, "file": True, "no-file": False,
+                   "first": False, "moved": True, "default": False}
+
+
+def test_ab4_the_board_holds_a_reload_during_a_drag_or_a_busy_panel(client):
+    html = client.get("/").text
+    assert "window.extraBusy" in html
+    busy = js_function(html, "boardBusy")
+    assert "dragging" in busy and "pageBusy" in busy
+
+
+def test_ab4_a_panel_page_without_its_own_busy_check_holds_the_board_reload(client):
+    """A take-over or error page in the panel holds what Chaos typed; a reload
+    of the board would put the panel back on the plain issue page and lose it."""
+    src = """
+var dragging = false, justDragged = false, panel = {hidden: false}, path = null, win = {};
+var frame = {get contentWindow() { return win; }};
+function framePath() { return path; }
+function segment(s) { return decodeURIComponent(s); }
+""" + js_function(client.get("/").text, "panelId", "boardBusy")
+    got = run_js(src, """(function () {
+      var out = [];
+      path = "/issues/MS-1?embed=1"; win = {pageBusy: function () { return false; }}; out.push(boardBusy());
+      win = {pageBusy: function () { return true; }}; out.push(boardBusy());
+      path = "/issues/MS-1/note?embed=1"; win = {}; out.push(boardBusy());
+      path = "/issues/MS-1?embed=1"; win = {}; out.push(boardBusy());
+      path = null; out.push(boardBusy());
+      panel.hidden = true; out.push(boardBusy());
+      return out; })()""")
+    assert got == [False, True, True, True, True, False]
+
+
+def test_ab4_the_board_stamp_ignores_what_this_board_does_not_show(board, client):
+    """A card in an untracked project or a hidden lane is not on this board."""
+    ms, br = two_projects(board)
+    hid = core.create(board, "MS", "in backlog", actor=CHAOS, actor_kind=HUMAN,
+                      state="backlog")["id"]
+    client.cookies.set(web.PREFS_COOKIE, json.dumps({"projects": ["MS"], "lanes": ["ready"]}))
+    before = board_stamp(client)
+    core.annotate(board, ms, "a note is not on a card", actor=CHAOS, actor_kind=HUMAN)
+    core.edit(board, br, actor=CHAOS, expected_version=core.show(board, br)["version"],
+              title="untracked")
+    core.edit(board, hid, actor=CHAOS, expected_version=core.show(board, hid)["version"],
+              title="renamed in a hidden lane")
+    assert board_stamp(client) == before
+    core.create(board, "MS", "shown", actor=CHAOS, actor_kind=HUMAN, state="ready")
+    assert board_stamp(client) != before
+
+
+BUSY_STUBS = """
+var fields = [], active = null;
+var document = {get activeElement() { return active; },
+                querySelectorAll: function () { return fields; }};
+var window = {};
+"""
+
+
+def test_ab4_page_busy_on_focus_a_dirty_field_or_the_pages_own_check(client):
+    src = BUSY_STUBS + js_function(client.get("/").text, "fieldDirty", "pageBusy")
+    got = run_js(src, """(function () {
+      var out = [pageBusy()];
+      active = {matches: function () { return true; }}; out.push(pageBusy()); active = null;
+      fields = [{tagName: "TEXTAREA", value: "x", defaultValue: ""}]; out.push(pageBusy()); fields = [];
+      window.extraBusy = function () { return true; }; out.push(pageBusy());
+      return out; })()""")
+    assert got == [False, True, True, True]
+
+
+def test_ab4_a_load_after_an_auto_reload_resets_forms_a_browser_refilled(client):
+    """Firefox refills form fields on reload; those values are the stale defaults."""
+    html = client.get("/").text
+    src = """
+var store = {}, resets = 0;
+var sessionStorage = {getItem: function (k) { return k in store ? store[k] : null; },
+                      setItem: function (k, v) { store[k] = String(v); },
+                      removeItem: function (k) { delete store[k]; }};
+var location = {pathname: "/", search: ""};
+var document = {forms: [{reset: function () { resets++; }}, {reset: function () { resets++; }}],
+                querySelectorAll: function () { return []; }};
+var KEEP_SCROLL = "k";
+""" + js_function(html, "afterAutoReload")
+    got = run_js(src, """(function () {
+      var plain = afterAutoReload(), n = resets;
+      sessionStorage.setItem("k", "[]");
+      var auto = afterAutoReload();
+      return [plain, n, auto, resets, sessionStorage.getItem("k")]; })()""")
+    assert got == [False, 0, True, 2, None]
+
+
+def test_ab4_a_board_reload_keeps_the_open_panels_place(client):
+    """The panel's page comes back where it was: scrolled, sections open."""
+    html = client.get("/").text
+    assert "window.onAutoReload" in html
+    keep = js_function(html, "keepPanel", "restorePanel")
+    assert "scrollY" in keep and "details" in keep and "sessionStorage" in keep
+
+
+def test_ab4_no_form_on_an_auto_reloading_page_is_refilled_by_the_browser(board, client):
+    # Firefox refills fields on reload, hidden ones too, and form.reset() cannot
+    # undo a refilled hidden input: a stale `version` would 409 the next save.
+    iid = ready(board)
+    for page in (client.get("/").text, client.get(f"/issues/{iid}").text,
+                 client.get(f"/issues/{iid}?embed=1").text):
+        forms = re.findall(r"<form\b[^>]*>", page)
+        assert forms
+        for tag in forms:
+            assert 'autocomplete="off"' in tag, tag
