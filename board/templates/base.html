@@ -71,10 +71,12 @@
   .board-controls > details[open]:not(.filter-banner) { flex: 1; }
   .view-panel { position: absolute; right: 0; top: 100%; z-index: 10; width: max-content; max-width: 90vw; background: #fff; border: 1px solid #dfe1e6; border-radius: 4px; padding: 8px 12px; box-shadow: 0 2px 6px rgba(9, 30, 66, 0.2); }
   table.projects { background: #fff; border-collapse: collapse; margin-bottom: 16px; }
-  /* MS-662: a card opens its issue here, over the right half, the board still usable beside it. */
+  /* MS-662: a card opens its issue here, in the right half. AB-5: the board
+     narrows into the left half beside it rather than sitting underneath. */
   #issue-panel { position: fixed; top: 0; right: 0; width: 50vw; height: 100vh; z-index: 20;
                  display: flex; flex-direction: column; background: #f4f5f7;
-                 box-shadow: -4px 0 16px rgba(9, 30, 66, 0.35); }
+                 border-left: 1px solid #dfe1e6; }
+  body.issue-panel-open header, body.issue-panel-open main { margin-right: 50vw; }
   #issue-panel .issue-panel-bar { display: flex; align-items: center; gap: 12px; justify-content: flex-end;
                                   padding: 4px 8px; background: #172b4d; color: #fff; }
   #issue-panel .issue-panel-bar a { color: #fff; }
@@ -82,6 +84,7 @@
   #issue-panel iframe { flex: 1; width: 100%; border: 0; }
   @media (max-width: 800px) {
     #issue-panel { width: 100vw; }
+    body.issue-panel-open header, body.issue-panel-open main { margin-right: 0; }
   }
   table.projects th, table.projects td { padding: 4px 12px; text-align: left; border-bottom: 1px solid #dfe1e6; }
 </style>

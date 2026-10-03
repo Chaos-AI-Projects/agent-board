@@ -52,6 +52,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import tempfile
 import unicodedata
 from datetime import datetime, timezone
@@ -64,6 +65,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.concurrency import run_in_threadpool
 from fastapi.templating import Jinja2Templates
 from markdown_it import MarkdownIt
+from markdown_it.common.utils import escapeHtml
 from markupsafe import Markup
 from mcp.server.auth.provider import construct_redirect_uri
 
@@ -93,7 +95,18 @@ templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
 # markdown-it's link validator already refuses javascript:, vbscript: and file:.
 # Images are off too: an agent-written ![](url) would make the reader's browser
 # fetch a third-party URL just by opening the issue.
-_md = MarkdownIt("commonmark", {"html": False}).disable("image")
+# The parser does see HTML, so it can tell a comment from text and code (AB-3):
+# a comment renders as nothing, any other tag as escaped text, as before.
+_md = MarkdownIt("commonmark", {"html": True}).disable("image")
+_COMMENT = re.compile(r"<!--.*?-->", re.S)
+
+
+def _raw_html(self, tokens, idx, options, env):
+    return escapeHtml(_COMMENT.sub("", tokens[idx].content))
+
+
+_md.add_render_rule("html_block", _raw_html)
+_md.add_render_rule("html_inline", _raw_html)
 
 
 def markdown(text: str | None) -> Markup:

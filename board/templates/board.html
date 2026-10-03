@@ -145,9 +145,11 @@
     if (framePath() !== src) { loads = 0; frame.contentWindow.location.replace(src); }
     panel.querySelector(".issue-panel-full").setAttribute("href", ISSUE + encodeURIComponent(id));
     panel.hidden = false;
+    document.body.classList.toggle("issue-panel-open", true);
   }
   function hidePanel() {
     panel.hidden = true;
+    document.body.classList.toggle("issue-panel-open", false);
     frame.contentWindow.location.replace("about:blank");
     // A save inside the panel may have moved the card; redraw the columns.
     if (changed) location.reload();

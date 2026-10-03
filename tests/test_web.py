@@ -2346,3 +2346,53 @@ def test_ms662_any_frame_load_after_the_first_marks_the_board_stale(client):
     html = client.get("/").text
     assert "addEventListener(\"submit\"" not in html
     assert "loads > 1" in html or "++loads > 1" in html
+
+
+def history(html):
+    return html.split("<h2>History</h2>", 1)[1]
+
+
+def test_ab2_history_lists_the_newest_event_first(board, client):
+    iid = ready(board)
+    core.annotate(board, iid, "first note", actor=CHAOS, actor_kind=HUMAN)
+    core.annotate(board, iid, "second note", actor=CHAOS, actor_kind=HUMAN)
+    events = history(client.get(f"/issues/{iid}").text)
+    assert events.index("second note") < events.index("first note") < events.index("create")
+
+
+@pytest.mark.parametrize("text", [
+    "before <!-- zqxsecret remark --> after",
+    "before\n\n<!-- zqxsecret\nremark -->\n\nafter",
+])
+def test_ab3_an_html_comment_in_markdown_is_not_shown(board, client, text):
+    iid = ready(board, body=text)
+    core.annotate(board, iid, text, actor=CHAOS, actor_kind=HUMAN)
+    page = client.get(f"/issues/{iid}").text
+    assert "&lt;!-- zqxsecret" in page, "the edit box keeps the source"
+    html = re.sub(r"<textarea[^>]*>.*?</textarea>", "", page, flags=re.S)
+    assert "zqxsecret" not in html and "remark" not in html
+    assert "&lt;!--" not in html
+    assert html.count("before") == 2 and html.count("after") == 2
+
+
+def test_ab3_a_comment_inside_code_stays_visible(board, client):
+    iid = ready(board, body="`<!-- kept -->`\n\n    <!-- also kept -->")
+    html = client.get(f"/issues/{iid}").text
+    assert "<code>&lt;!-- kept --&gt;</code>" in html
+    assert "&lt;!-- also kept --&gt;" in html
+
+
+def test_ab3_other_raw_html_is_still_escaped_not_rendered(board, client):
+    iid = ready(board, body="<div onclick=\"x()\">hi</div>\n\ntext <b>bold</b>")
+    html = client.get(f"/issues/{iid}").text
+    assert '<div onclick' not in html and "<b>bold</b>" not in html
+    assert "&lt;b&gt;bold&lt;/b&gt;" in html
+
+
+def test_ab5_an_open_panel_narrows_the_board_instead_of_covering_it(client):
+    html = client.get("/").text
+    assert re.search(r"body\.issue-panel-open main \{[^}]*margin-right: 50vw", html)
+    # Narrow, the panel is full width anyway, so the board keeps its width beneath.
+    assert re.search(r"@media \(max-width: 800px\) \{(?:[^{}]*\{[^}]*\})*?[^{}]*"
+                     r"body\.issue-panel-open main \{ margin-right: 0", html)
+    assert 'classList.toggle("issue-panel-open"' in html
