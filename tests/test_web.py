@@ -2617,3 +2617,81 @@ def test_ab4_no_form_on_an_auto_reloading_page_is_refilled_by_the_browser(board,
         assert forms
         for tag in forms:
             assert 'autocomplete="off"' in tag, tag
+
+
+# --- AB-7: select all / unselect all on the project filter ---------------------
+
+
+def check_all_buttons(fragment):
+    """The select-all and unselect-all buttons in a fragment, by data-check value."""
+    return dict(re.findall(r'<button type="button" data-check="(all|none)">([^<]*)</button>',
+                           fragment))
+
+
+def test_ab7_the_banner_offers_select_all_and_unselect_all(client, board):
+    two_projects(board)
+    b = banner(client.get("/").text)
+    form = re.search(r'<form[^>]*action="/preferences/projects".*?</form>', b, re.S).group(0)
+    # Inside the form, so a click picks this form's boxes, and type=button so
+    # it never submits: Apply still saves.
+    assert check_all_buttons(form) == {"all": "Select all", "none": "Unselect all"}
+    # Shown only once the page script runs; without it they would do nothing.
+    assert re.search(r'<span class="check-all" hidden>\s*<button type="button" data-check="all">', form)
+
+
+def test_ab7_the_preferences_page_offers_them_for_projects_only(client, board):
+    two_projects(board)
+    html = client.get("/preferences").text
+    groups = dict((legend, body) for body, legend in (
+        (m.group(0), m.group(1)) for m in
+        re.finditer(r"<fieldset><legend>([^<]*)</legend>.*?</fieldset>", html, re.S)))
+    assert check_all_buttons(groups["Projects to track"]) == {"all": "Select all",
+                                                              "none": "Unselect all"}
+    assert check_all_buttons(groups["Lanes to show"]) == {}
+
+
+def test_ab7_a_button_sets_every_box_in_its_own_group_only(client, board):
+    src = js_function(client.get("/").text, "checkAll")
+    got = run_js("""
+var asked = [];
+function box(c) { return {type: "checkbox", checked: c}; }
+var mine = [box(true), box(false), box(true)];
+var group = {querySelectorAll: function (sel) { asked.push(sel); return mine; }};
+function button(kind) {
+  return {dataset: {check: kind},
+          closest: function (sel) { asked.push(sel); return group; }};
+}
+""" + src, """(function () {
+      checkAll(button("none")); var none = mine.map(function (b) { return b.checked; });
+      checkAll(button("all")); var all = mine.map(function (b) { return b.checked; });
+      return [none, all, asked]; })()""")
+    assert got[:2] == [[False, False, False], [True, True, True]]
+    # The nearest fieldset or form is the group, and only its checkboxes move.
+    assert got[2][0] == "fieldset, form"
+    assert got[2][1] == 'input[type="checkbox"]'
+
+
+def ab7_script(html):
+    """The page script that holds checkAll, whole."""
+    return next(s for s in re.findall(r"<script>(.*?)</script>", html, re.S)
+                if "function checkAll(" in s)
+
+
+def test_ab7_the_page_script_shows_the_buttons_and_wires_each_click(client, board):
+    got = run_js("""
+var clicks = {};
+function button(kind) {
+  return {dataset: {check: kind}, closest: function () { return group; },
+          addEventListener: function (ev, fn) { clicks[kind + ":" + ev] = fn; }};
+}
+var boxes = [{checked: false}, {checked: true}];
+var group = {querySelectorAll: function () { return boxes; }};
+var span = {hidden: true, querySelectorAll: function (sel) {
+  return sel === "button" ? [button("all"), button("none")] : []; }};
+var document = {querySelectorAll: function (sel) { return sel === ".check-all" ? [span] : []; }};
+""" + ab7_script(client.get("/").text), """(function () {
+      var shown = !span.hidden;
+      clicks["all:click"](); var all = boxes.map(function (b) { return b.checked; });
+      clicks["none:click"](); var none = boxes.map(function (b) { return b.checked; });
+      return [shown, Object.keys(clicks).sort(), all, none]; })()""")
+    assert got == [True, ["all:click", "none:click"], [True, True], [False, False]]

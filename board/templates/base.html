@@ -92,6 +92,23 @@
 <body>
 {% if not embed_q %}<header><a href="/">agent-board</a><form autocomplete="off" method="get" action="/search" class="header-search"><input type="search" name="q" value="{{ header_q or "" }}" placeholder="Search issues" aria-label="Search issues"><button type="submit">Search</button></form><a href="/search">Advanced search</a><a href="/preferences">Preferences</a><a href="/projects">Projects</a><span>{{ me or "not signed in" }}</span>{% if sign_in and me %}<form method="post" action="/logout" style="margin:0"><button type="submit">Sign out</button></form>{% elif sign_in %}<a href="/login">Sign in</a>{% endif %}</header>{% endif %}
 <main>{% block main %}{% endblock %}</main>
+<script>
+  // AB-7: a project filter's "Select all" / "Unselect all" ticks or clears
+  // every box in its own group, the nearest fieldset or form, so the lanes on
+  // /preferences stay as they were. Nothing is saved until Apply or Save. The
+  // buttons start hidden because without this script they would do nothing.
+  function checkAll(button) {
+    var on = button.dataset.check === "all";
+    button.closest("fieldset, form").querySelectorAll('input[type="checkbox"]')
+      .forEach(function (box) { box.checked = on; });
+  }
+  document.querySelectorAll(".check-all").forEach(function (span) {
+    span.hidden = false;
+    span.querySelectorAll("button").forEach(function (b) {
+      b.addEventListener("click", function () { checkAll(b); });
+    });
+  });
+</script>
 {% if stamp %}<script>
   // AB-4: the page keeps itself current. Every few seconds it asks for the
   // stamp of what it shows and reloads when the stamp moved. It never reloads
