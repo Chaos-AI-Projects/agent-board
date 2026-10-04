@@ -1,8 +1,10 @@
 """The `board-mcp` server: board.core as MCP tools, for an agent in a conversation.
 
 It is the CLI over another transport (design section 1), so the tools are
-the CLI's operations under the same names, minus `migrate`. `edit` stays
-out too, because only a human or the system edits.
+the CLI's operations under the same names, minus `migrate` and
+`create-project`. `edit` stays out too, because only a human or the system
+edits. `projects` is the one tool the CLI lacks (AB-6): an agent creating a
+card needs the project keys, and over MCP it has no other way to learn them.
 
 Over stdio one server is one agent, and the actor comes from BOARD_ACTOR
 when the server starts. Over HTTP (MS-649) the actor is a callable, asked
@@ -95,6 +97,24 @@ def build_server(engine, actor: str | Callable[[], str]) -> FastMCP:
     def show(id: str) -> CallToolResult:
         """One issue with its events and artifacts."""
         return run(core.show, engine, id)
+
+    @mcp.tool()
+    def search(q: str | None = None, project: str | None = None, label: str | None = None,
+               assignee: str | None = None) -> CallToolResult:
+        """Issues matching every filter given, in board order, without bodies.
+
+        `q` is a case-insensitive substring of the id, title, body or any
+        label. `project`, `label` and `assignee` match exactly, and
+        `assignee` also matches the lease holder. No filter lists every
+        issue. No match is {"issues": []}, not an error.
+        """
+        return run(lambda: {"issues": core.search(engine, q=q, project=project, label=label,
+                                                  assignee=assignee)})
+
+    @mcp.tool()
+    def projects() -> CallToolResult:
+        """Every project's key and name, with how many issues it holds."""
+        return run(lambda: {"projects": core.projects(engine)})
 
     @mcp.tool()
     def transition(id: str, state: str, token: str | None = None, note: str | None = None,

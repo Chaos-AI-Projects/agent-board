@@ -71,7 +71,7 @@ def test_the_tools_are_the_cli_operations(migrated):
     names = {t.name for t in list_tools(migrated)}
     assert names == {"next", "show", "transition", "annotate", "link", "create",
                      "instantiate", "heartbeat", "plan", "depend", "undepend",
-                     "create_batch"}
+                     "create_batch", "search", "projects"}
 
 
 def test_next_claims_as_the_server_actor_and_returns_the_token(migrated):
@@ -239,3 +239,26 @@ def test_a_callable_actor_is_resolved_on_every_call(migrated):
     holders = {i: core.show(migrated, i)["lease_holder"] for i in (first, second)}
     assert holders == {first: "alice@example.com", second: "bob@example.com"}
     assert core.show(migrated, first)["events"][-1]["actor_kind"] == "agent"
+
+
+def test_search_finds_issues_by_query_and_project(migrated):
+    board(migrated)
+    core.create_project(migrated, "AB", "agent-board")
+    hit = ready(migrated, "fix the lease bug")
+    ready(migrated, "unrelated")
+    other = core.create(migrated, "AB", "lease docs", actor=CHAOS, actor_kind="human")["id"]
+    assert [i["id"] for i in ok(migrated, "search", q="LEASE")["issues"]] == [hit, other]
+    assert [i["id"] for i in ok(migrated, "search", q="lease", project="MS")["issues"]] == [hit]
+
+
+def test_search_with_no_match_is_an_empty_result_not_an_error(migrated):
+    ready(board(migrated))
+    assert ok(migrated, "search", q="nothing like this") == {"issues": []}
+
+
+def test_projects_lists_every_project_with_its_issue_count(migrated):
+    ready(board(migrated))
+    core.create_project(migrated, "AB", "agent-board")
+    assert ok(migrated, "projects") == {"projects": [
+        {"key": "AB", "name": "agent-board", "issues": 0},
+        {"key": "MS", "name": "memory-solution", "issues": 1}]}

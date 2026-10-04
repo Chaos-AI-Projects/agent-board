@@ -235,7 +235,9 @@ back to `ready`. A note never needs the lease.
 
 `board-mcp` serves the CLI's operations as MCP tools over stdio, for an agent working in a
 conversation. `board-web` serves the same tools remotely, as described under Remote MCP below. The tools are `next`, `show`, `transition`, `annotate`, `link`, `create`, `instantiate`,
-`create_batch`, `plan`, `depend`, `undepend` and `heartbeat`, with the CLI's names and arguments. `migrate` and `edit` are left out.
+`create_batch`, `plan`, `depend`, `undepend`, `heartbeat` and `search`, with the CLI's names and arguments. `migrate`,
+`create-project` and `edit` are left out. `projects` lists every project's key, name and issue count; it has no CLI
+counterpart, and it is how an agent learns the keys `create` needs.
 
 One stdio server is one agent. `BOARD_ACTOR` names it when the server starts, and every write is recorded
 as `agent`. The lease token `next` returns is the `token` argument of each later write, and TTLs are
