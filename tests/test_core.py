@@ -160,6 +160,31 @@ def test_an_undeclared_transition_is_refused(board):
         core.transition(board, iid, "done", note="n", actor=CHAOS, actor_kind=HUMAN)
 
 
+def test_a_human_closes_a_need_input_card_as_done(board):
+    """AB-8: an answer can finish the card, so need-input reaches done directly."""
+    iid = ready(board)
+    tok = core.next(board, "w1")["lease_token"]
+    core.transition(board, iid, "need-input", note="merged, please review", actor="w1",
+                    actor_kind=AGENT, token=tok)
+    with pytest.raises(core.NoteRequired):
+        core.transition(board, iid, "done", actor=CHAOS, actor_kind=HUMAN)
+    issue = core.transition(board, iid, "done", note="reviewed", actor=CHAOS,
+                            actor_kind=HUMAN)
+    last = issue["events"][-1]
+    assert (issue["state"], last["from_state"], last["to_state"]) == (
+        "done", "need-input", "done")
+
+
+def test_an_agent_cannot_close_a_need_input_card(board):
+    iid = ready(board)
+    tok = core.next(board, "w1")["lease_token"]
+    core.transition(board, iid, "need-input", note="q", actor="w1", actor_kind=AGENT,
+                    token=tok)
+    with pytest.raises(core.LeaseLost):
+        core.transition(board, iid, "done", note="d", actor="w1", actor_kind=AGENT,
+                        token=tok)
+
+
 def test_a_lifted_hold_returns_to_backlog_not_ready(board):
     iid = ready(board)
     core.transition(board, iid, "onhold", actor=CHAOS, actor_kind=HUMAN)

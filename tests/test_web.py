@@ -832,6 +832,22 @@ def test_ms661_the_note_form_carries_the_state_select(board, client):
     assert script and "Add note" in script.group(1) and "data-current" in script.group(1)
 
 
+def test_ab8_a_review_note_closes_a_need_input_card_as_done(board, client):
+    iid = ready(board)
+    tok = core.next(board, "w1")["lease_token"]
+    core.transition(board, iid, "need-input", note="merged, please review", actor="w1",
+                    actor_kind="agent", token=tok)
+    issue = core.show(board, iid)
+    form = issue_forms(client.get(f"/issues/{iid}").text)[f"/issues/{iid}/note"]
+    assert re.search(r"<option[^>]*>done</option>", form)
+    r = client.post(f"/issues/{iid}/note", data=note_form(issue, "looks good", state="done"),
+                    headers=AS_CHAOS)
+    assert r.status_code == 303
+    last = core.show(board, iid)["events"][-1]
+    assert (last["from_state"], last["to_state"], last["note"]) == (
+        "need-input", "done", "looks good")
+
+
 def test_ms661_a_note_with_the_state_unchanged_annotates(board, client):
     iid = ready(board)
     issue = core.show(board, iid)

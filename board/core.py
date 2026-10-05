@@ -31,11 +31,12 @@ DEFAULT_TTL = timedelta(minutes=90)
 
 # Design section 3, under the lane names of MS-632, in board column order.
 # `processing` is entered only by `next`, and a lifted hold returns to
-# `backlog`, so a human must authorize the item again.
+# `backlog`, so a human must authorize the item again. An answer can finish
+# the work outright, so `need-input` reaches `done` too (AB-8).
 TRANSITIONS: dict[str, set[str]] = {
     "backlog": {"ready", "onhold", "cancelled"},
     "ready": {"onhold", "cancelled"},
-    "need-input": {"ready", "onhold", "cancelled"},
+    "need-input": {"ready", "onhold", "done", "cancelled"},
     "processing": {"done", "need-input", "ready"},
     "onhold": {"backlog"},
     "done": set(),
@@ -48,7 +49,7 @@ LANE_HINTS: dict[str, str] = {
     "backlog": "Filed, not authorized. Agents never pick it.",
     "ready": "Authorized. board next takes the highest-ranked card here.",
     "need-input": "An agent is waiting on you. Answer in a note, then drag the card "
-                  "to ready yourself.",
+                  "to ready, or to done if nothing is left.",
     "processing": "An agent holds it under a 90-minute lease. Only board next puts "
                   "a card here.",
     "onhold": "Frozen; exits only to backlog. A card split into a workflow waits here "
