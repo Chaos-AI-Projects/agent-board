@@ -97,8 +97,9 @@ def test_show_returns_the_issue_and_its_events(migrated):
 
 def test_transition_under_the_lease_token(migrated):
     issue_id, token = claimed(board(migrated))
-    out = ok(migrated, "transition", id=issue_id, state="done", note="PR #600", token=token)
-    assert out["state"] == "done"
+    out = ok(migrated, "transition", id=issue_id, state="need-input", note="PR #600",
+             token=token)
+    assert out["state"] == "need-input"
     assert core.show(migrated, issue_id)["events"][-1]["actor"] == WORKER
 
 

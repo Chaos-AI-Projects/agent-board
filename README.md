@@ -22,7 +22,9 @@ MCP in `board.oauth` and `board.remote`.
 `instantiate`, `create_batch`, `plan`, `depend`, `undepend`, `heartbeat` and `edit`. Each is one transaction, returns a plain dict, and appends at least one event,
 except `heartbeat`, which only moves a lease expiry, and an `edit` whose form changed nothing.
 `plan` breaks an issue into a workflow of `ready` steps the caller lists. The issue goes `onhold`
-and returns to `ready` when the last step is done, so `next` hands it back to be checked and closed.
+and returns to `ready` when the last step is done, so `next` hands it back to be checked.
+An agent closes a workflow step itself, but only a human closes any other card, a plan's origin
+included. An agent finishes one by moving it to `need-input` with a review note (AB-9).
 `create_batch` creates several issues in one transaction, all or nothing. Each item may list `after`:
 other items by 0-based index or `ref`, or existing issue ids, which become dependencies. With
 `workflow_title` the items become a new workflow in list order. The CLI is `board create-batch FILE`,
@@ -66,7 +68,7 @@ board migrate
 claim=$(board next) || exit        # exit 3 ends the run on an empty queue
 id=$(jq -r .issue.id <<<"$claim"); token=$(jq -r .lease_token <<<"$claim")
 board annotate "$id" --note "checkpoint" --token "$token"
-board transition "$id" done --note "PR #600" --token "$token"
+board transition "$id" need-input --note "PR #600, please review" --token "$token"
 ```
 
 Without `--request-id`, a write under a lease gets the derived key from design section 8, so an

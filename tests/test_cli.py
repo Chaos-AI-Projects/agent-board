@@ -136,9 +136,13 @@ def test_an_item_worked_to_done_through_the_cli(url):
     ok(board(url, "annotate", issue_id, "--note", "halfway", "--token", token))
     ok(board(url, "link", issue_id, "--artifact", "abc123", "--kind", "commit",
              "--closes", "--token", token))
-    done = ok(board(url, "transition", issue_id, "done", "--note", "shipped",
+    refused = board(url, "transition", issue_id, "done", "--note", "shipped",
+                    "--token", token)
+    assert refused.returncode == 1
+    assert json.loads(refused.stderr)["error"] == "InvalidTransition"
+    done = ok(board(url, "transition", issue_id, "need-input", "--note", "shipped",
                     "--token", token))
-    assert done["state"] == "done"
+    assert done["state"] == "need-input"
     assert done["closed_by_artifact"] is True
     kinds = [e["kind"] for e in done["events"]]
     assert kinds[-3:] == ["annotate", "link", "transition"]

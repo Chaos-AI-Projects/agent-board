@@ -96,7 +96,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--label")
     sp.add_argument("--assignee")
 
-    sp = op("transition", help="move an issue to another state")
+    sp = op("transition", help="move an issue to another state; an agent closes only a "
+                               "workflow step as done, and hands any other card to "
+                               "need-input for a human to close")
     sp.add_argument("id")
     sp.add_argument("state")
     sp.add_argument("--note")

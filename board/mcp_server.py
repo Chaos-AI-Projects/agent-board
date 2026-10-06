@@ -119,7 +119,12 @@ def build_server(engine, actor: str | Callable[[], str]) -> FastMCP:
     @mcp.tool()
     def transition(id: str, state: str, token: str | None = None, note: str | None = None,
                    request_id: str | None = None, preempt: bool = False) -> CallToolResult:
-        """Move an issue to another state. `done` and `need-input` need a note."""
+        """Move an issue to another state. `done` and `need-input` need a note.
+
+        An agent closes only a workflow step as `done`. It finishes any other
+        card, a plan's origin included, by moving it to `need-input` with a
+        review note, and a human closes it from there.
+        """
         return run(core.transition, engine, id, state, note=note, token=token,
                    request_id=request_id, preempt=preempt, **who())
 
@@ -160,7 +165,8 @@ def build_server(engine, actor: str | Callable[[], str]) -> FastMCP:
 
         Each step is {"title", "body"?, "project"?}; project defaults to the
         issue's. The issue goes onhold, releasing the lease, and comes back
-        ready when the last step is done, for you to check and close.
+        ready when the last step is done, for you to check and move to
+        need-input; a human closes it from there.
         """
         return run(core.plan, engine, id, steps, token=token, request_id=request_id, **who())
 

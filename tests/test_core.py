@@ -118,7 +118,7 @@ def test_the_old_token_is_refused_after_a_reclaim(board):
     first = core.next(board, "run-1", ttl=timedelta(seconds=-5))
     core.next(board, "run-2")
     with pytest.raises(core.LeaseLost):
-        core.transition(board, iid, "done", note="finished", actor="run-1",
+        core.transition(board, iid, "need-input", note="finished", actor="run-1",
                         actor_kind=AGENT, token=first["lease_token"])
 
 
@@ -141,15 +141,15 @@ def test_heartbeat_with_a_stale_token_is_lease_lost(board):
 # --- transitions --------------------------------------------------------------
 
 
-def test_done_requires_a_note_and_clears_the_lease(board):
+def test_need_input_requires_a_note_and_clears_the_lease(board):
     iid = ready(board)
     claim = core.next(board, "w1")
     with pytest.raises(core.NoteRequired):
-        core.transition(board, iid, "done", actor="w1", actor_kind=AGENT,
+        core.transition(board, iid, "need-input", actor="w1", actor_kind=AGENT,
                         token=claim["lease_token"])
-    issue = core.transition(board, iid, "done", note="shipped", actor="w1",
+    issue = core.transition(board, iid, "need-input", note="shipped", actor="w1",
                             actor_kind=AGENT, token=claim["lease_token"])
-    assert issue["state"] == "done"
+    assert issue["state"] == "need-input"
     assert issue["lease_holder"] is None
     assert issue["events"][-1]["note"] == "shipped"
 
@@ -183,6 +183,52 @@ def test_an_agent_cannot_close_a_need_input_card(board):
     with pytest.raises(core.LeaseLost):
         core.transition(board, iid, "done", note="d", actor="w1", actor_kind=AGENT,
                         token=tok)
+
+
+def test_an_agent_cannot_close_a_standalone_card(board):
+    """AB-9, option B: a standalone card waits at need-input for a human to close it."""
+    iid = ready(board)
+    tok = core.next(board, "w1")["lease_token"]
+    with pytest.raises(core.InvalidTransition, match="need-input"):
+        core.transition(board, iid, "done", note="shipped", actor="w1", actor_kind=AGENT,
+                        token=tok)
+    issue = core.show(board, iid)
+    assert (issue["state"], issue["lease_holder"]) == ("processing", "w1")
+    core.transition(board, iid, "need-input", note="PR #1 merged, please review",
+                    actor="w1", actor_kind=AGENT, token=tok)
+    issue = core.transition(board, iid, "done", note="reviewed", actor=CHAOS,
+                            actor_kind=HUMAN)
+    assert issue["state"] == "done"
+
+
+def test_an_agent_closes_a_workflow_step_itself(board):
+    """AB-9, option B: a step of a workflow is not a card a human must close."""
+    core.create_template(board, "solo", "Solo", ["only"])
+    step = core.instantiate(board, "solo", "MS", actor=CHAOS, actor_kind=HUMAN)["steps"][0]
+    claim = core.next(board, "w1")
+    issue = core.transition(board, step["id"], "done", note="did it", actor="w1",
+                            actor_kind=AGENT, token=claim["lease_token"])
+    assert issue["state"] == "done"
+
+
+def test_an_agent_cannot_close_a_plan_origin(board):
+    """AB-9, option B: the card a workflow was planned from waits for a human too."""
+    iid = ready(board, "big job")
+    tok = core.next(board, "w1")["lease_token"]
+    core.plan(board, iid, [{"title": "a"}], actor="w1", actor_kind=AGENT, token=tok)
+    step = core.next(board, "w2")
+    core.transition(board, step["issue"]["id"], "done", note="did a", actor="w2",
+                    actor_kind=AGENT, token=step["lease_token"])
+    claim = core.next(board, "w3")
+    assert claim["issue"]["id"] == iid
+    resumed = [e for e in claim["issue"]["events"] if e["to_state"] == "ready"][-1]
+    assert "need-input" in resumed["note"] and "close this" not in resumed["note"]
+    with pytest.raises(core.InvalidTransition, match="need-input"):
+        core.transition(board, iid, "done", note="all steps done", actor="w3",
+                        actor_kind=AGENT, token=claim["lease_token"])
+    core.transition(board, iid, "need-input", note="all steps done, please review",
+                    actor="w3", actor_kind=AGENT, token=claim["lease_token"])
+    assert core.show(board, iid)["state"] == "need-input"
 
 
 def test_a_lifted_hold_returns_to_backlog_not_ready(board):
@@ -347,7 +393,8 @@ def test_every_operation_writes_an_event(board):
     tok = claim["lease_token"]
     core.annotate(board, iid, "n", actor="w1", actor_kind=AGENT, token=tok)
     core.link(board, iid, "pr/1", kind="pr", actor="w1", actor_kind=AGENT, token=tok)
-    core.transition(board, iid, "done", note="d", actor="w1", actor_kind=AGENT, token=tok)
+    core.transition(board, iid, "need-input", note="d", actor="w1", actor_kind=AGENT,
+                    token=tok)
     assert [e["kind"] for e in events(board, iid)] == [
         "create", "claim", "annotate", "link", "transition"]
 
@@ -384,7 +431,7 @@ def test_a_stale_token_write_waits_for_a_concurrent_reclaim(board):
 
     def stale_write():
         try:
-            core.transition(board, iid, "done", note="old", actor="run-1",
+            core.transition(board, iid, "need-input", note="old", actor="run-1",
                             actor_kind=AGENT, token=first["lease_token"])
             outcome["result"] = "written"
         except core.LeaseLost:
@@ -493,8 +540,8 @@ def test_a_concurrent_retry_replays_after_the_first_commits(board):
     def retry():
         try:
             outcome["state"] = core.transition(
-                board, iid, "done", note="d", actor="w1", actor_kind=AGENT, token=tok,
-                request_id="fin")["state"]
+                board, iid, "need-input", note="d", actor="w1", actor_kind=AGENT,
+                token=tok, request_id="fin")["state"]
         except core.BoardError as e:
             outcome["state"] = type(e).__name__
 
@@ -505,10 +552,10 @@ def test_a_concurrent_retry_replays_after_the_first_commits(board):
         t.start()
         t.join(0.5)
         tx.rollback()
-    core.transition(board, iid, "done", note="d", actor="w1", actor_kind=AGENT,
+    core.transition(board, iid, "need-input", note="d", actor="w1", actor_kind=AGENT,
                     token=tok, request_id="fin")
     t.join(10)
-    assert outcome == {"state": "done"}
+    assert outcome == {"state": "need-input"}
 
 
 # --- overview: the read the web board renders from ------------------------------
@@ -993,9 +1040,12 @@ def depend(engine, iid, on, **kw):
 
 
 def finish(engine, claim, note="did it"):
-    core.transition(engine, claim["issue"]["id"], "done", note=note,
+    """An agent hands a standalone card to review and a human closes it (AB-9)."""
+    core.transition(engine, claim["issue"]["id"], "need-input", note=note,
                     actor=claim["issue"]["lease_holder"], actor_kind=AGENT,
                     token=claim["lease_token"])
+    core.transition(engine, claim["issue"]["id"], "done", note="reviewed", actor=CHAOS,
+                    actor_kind=HUMAN)
 
 
 def test_next_skips_an_issue_until_what_it_depends_on_is_done(board):
