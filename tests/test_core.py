@@ -1571,3 +1571,68 @@ def test_ab12_an_event_inside_the_window_counts_however_old_the_issue(board):
     age_events(board, old, 30)
     core.transition(board, old, "ready", actor=CHAOS, actor_kind=HUMAN)
     assert core.recent_projects(board, CHAOS) == ["HC"]
+
+
+# --- AB-13: when each done card finished ------------------------------------------
+
+
+def age_done(engine, issue_id, days):
+    """Move an issue's every event and its timestamps `days` into the past."""
+    with store.session(engine) as s, s.begin():
+        then = store.db_now(s) - timedelta(days=days)
+        s.execute(store.Event.__table__.update().where(store.Event.issue_id == issue_id)
+                  .values(at=then))
+        s.execute(store.Issue.__table__.update().where(store.Issue.id == issue_id)
+                  .values(created_at=then, updated_at=then))
+
+
+def finished(engine, issue_id):
+    with store.session(engine) as s:
+        return s.scalar(select(store.Event.at).where(store.Event.issue_id == issue_id,
+                                                     store.Event.to_state == "done"))
+
+
+def close(engine, title="x"):
+    """A loose card worked by an agent and closed by a human, as AB-9 runs it."""
+    i = core.create(engine, "MS", title, actor=CHAOS, actor_kind=HUMAN, state="ready")["id"]
+    claim = core.next(engine, "w1")
+    core.transition(engine, i, "need-input", note="review", actor="w1", actor_kind="agent",
+                    token=claim["lease_token"])
+    core.transition(engine, i, "done", note="ok", actor=CHAOS, actor_kind=HUMAN)
+    return i
+
+
+def test_ab13_done_times_cover_only_done_issues(board):
+    open_ = core.create(board, "MS", "open", actor=CHAOS, actor_kind=HUMAN)["id"]
+    done = close(board)
+    times = core.done_times(board)
+    assert list(times) == [done] and open_ not in times
+    assert times[done] == core._iso(finished(board, done))
+
+
+def test_ab13_a_repeated_move_to_done_does_not_restart_the_clock(board):
+    i = close(board)
+    age_done(board, i, 30)
+    old = core.done_times(board)[i]
+    core.transition(board, i, "done", note="again", actor=CHAOS, actor_kind=HUMAN)
+    assert core.done_times(board)[i] == old
+
+
+def test_ab13_a_card_created_into_done_finished_when_it_was_created(board):
+    # The backfill wrote a create event straight into done, not a transition.
+    i = close(board)
+    age_done(board, i, 30)
+    with store.session(board) as s, s.begin():
+        s.execute(store.Event.__table__.update()
+                  .where(store.Event.issue_id == i, store.Event.to_state == "done")
+                  .values(kind="create", from_state=None))
+    assert core.done_times(board)[i] == core._iso(finished(board, i))
+
+
+def test_ab13_without_a_done_event_the_finish_time_falls_back_to_updated_at(board):
+    i = close(board)
+    age_done(board, i, 20)
+    with store.session(board) as s, s.begin():
+        s.execute(store.Event.__table__.delete().where(store.Event.issue_id == i))
+        updated = s.get(store.Issue, i).updated_at
+    assert core.done_times(board)[i] == core._iso(updated)

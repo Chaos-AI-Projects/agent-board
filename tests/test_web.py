@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from fastapi.testclient import TestClient
 
-from board import core, web
+from board import core, store, web
 
 AGENT = "agent"
 HUMAN = "human"
@@ -1178,7 +1178,8 @@ def test_saving_preferences_sets_a_lax_year_long_cookie(client, board):
     assert "samesite=lax" in cookie.lower()
     assert "max-age=31536000" in cookie.lower()
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
-        "projects": ["BR"], "lanes": ["ready", "done"], "timezone": ""}
+        "projects": ["BR"], "lanes": ["ready", "done"], "timezone": "",
+        "hide_old_done": False}
 
 
 def test_the_board_shows_only_the_saved_projects_and_lanes(client, board):
@@ -1252,7 +1253,8 @@ def test_saving_keeps_only_known_projects_and_lanes(client, board):
     client.post("/preferences", data={"project": ["BR", "ZZ"] * 300,
                                       "lane": ["done", "bogus", "ready"]})
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
-        "projects": ["BR"], "lanes": ["ready", "done"], "timezone": ""}
+        "projects": ["BR"], "lanes": ["ready", "done"], "timezone": "",
+        "hide_old_done": False}
 
 
 def test_preferences_are_a_same_origin_post_only(client, board):
@@ -1330,7 +1332,8 @@ def test_a_banner_save_keeps_the_saved_lanes_and_timezone(client, board):
                                       "timezone": "Asia/Tokyo"})
     client.post("/preferences/projects", data={"project": ["BR"]})
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
-        "projects": ["BR"], "lanes": ["ready", "done"], "timezone": "Asia/Tokyo"}
+        "projects": ["BR"], "lanes": ["ready", "done"], "timezone": "Asia/Tokyo",
+        "hide_old_done": False}
     assert lanes(client.get("/").text) == ["ready", "done"]
 
 
@@ -1368,7 +1371,7 @@ def test_the_preferences_page_still_saves_every_key(client, board):
     client.post("/preferences/projects", data={"project": ["BR"]})
     client.post("/preferences", data={"project": ["MS"], "lane": ["ready"]})
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
-        "projects": ["MS"], "lanes": ["ready"], "timezone": ""}
+        "projects": ["MS"], "lanes": ["ready"], "timezone": "", "hide_old_done": False}
 
 
 # --- the banner is "View", right of the toggles (MS-653) -------------------------
@@ -1494,10 +1497,11 @@ def test_a_lane_save_keeps_projects_and_timezone(client, board):
     client.post("/preferences/lanes/hide", data={"lane": "done"})
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
         "projects": ["BR"], "lanes": [s for s in ALL_LANES if s != "done"],
-        "timezone": "Asia/Tokyo"}
+        "timezone": "Asia/Tokyo", "hide_old_done": False}
     client.post("/preferences/lanes/show", data={"lane": "done"})
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
-        "projects": ["BR"], "lanes": [], "timezone": "Asia/Tokyo"}
+        "projects": ["BR"], "lanes": [], "timezone": "Asia/Tokyo",
+        "hide_old_done": False}
 
 
 @pytest.mark.parametrize("action", ["hide", "show"])
@@ -2819,3 +2823,130 @@ function button(recent) {
       checkAll(button("")); var none = mine.map(function (b) { return b.checked; });
       return [some, none]; })()""")
     assert got == [[True, False, True, False], [False, False, False, False]]
+
+
+# --- AB-13: hide done cards finished more than two weeks ago ----------------------
+
+
+def closed(engine, title="x", days=0):
+    """A loose card closed by a human, its every event `days` in the past."""
+    i = ready(engine, title)
+    claim = core.next(engine, "w1")
+    core.transition(engine, i, "need-input", note="review", actor="w1", actor_kind=AGENT,
+                    token=claim["lease_token"])
+    core.transition(engine, i, "done", note="ok", actor=CHAOS, actor_kind=HUMAN)
+    age(engine, i, days)
+    return i
+
+
+def age(engine, issue_id, days):
+    with store.session(engine) as s, s.begin():
+        then = store.db_now(s) - timedelta(days=days)
+        s.execute(store.Event.__table__.update().where(store.Event.issue_id == issue_id)
+                  .values(at=then))
+        s.execute(store.Issue.__table__.update().where(store.Issue.id == issue_id)
+                  .values(created_at=then, updated_at=then))
+
+
+def done_toggle(html):
+    """The done lane's toggle: the action it posts to and its button text."""
+    m = re.search(r'<form[^>]*class="old-done"[^>]*action="/preferences/done/(\w+)"[^>]*>'
+                  r'\s*<button[^>]*>([^<]*)</button>', column(html, "done"))
+    assert m, "no old-done toggle in the done lane"
+    return m.group(1), m.group(2)
+
+
+def done_heading(html):
+    m = re.search(r"<h2[^>]*>(.*?)<form", column(html, "done"), re.S)
+    return " ".join(re.sub(r"<[^>]+>", " ", m.group(1)).split())
+
+
+def test_ab13_by_default_the_done_lane_shows_every_card_and_offers_to_hide(board, client):
+    old, new = closed(board, "old", 15), closed(board, "new", 1)
+    html = client.get("/").text
+    assert f'data-id="{old}"' in column(html, "done") and f'data-id="{new}"' in column(html, "done")
+    assert done_toggle(html) == ("hide", "Hide finished over 2 weeks ago")
+    assert done_heading(html) == "done (2)"
+
+
+def test_ab13_hiding_drops_cards_finished_over_14_days_ago_and_counts_them(board, client):
+    old, edge, new = closed(board, "old", 15), closed(board, "edge", 13), closed(board, "new")
+    r = client.post("/preferences/done/hide")
+    assert r.status_code == 303 and r.headers["location"] == "/"
+    html = client.get("/").text
+    done = column(html, "done")
+    assert f'data-id="{old}"' not in done
+    assert f'data-id="{edge}"' in done and f'data-id="{new}"' in done
+    assert done_heading(html) == "done (2) + 1 older hidden"
+    assert done_toggle(html) == ("show", "Show older")
+
+
+def test_ab13_the_choice_survives_a_reload_and_show_brings_them_back(board, client):
+    old = closed(board, "old", 30)
+    client.post("/preferences/done/hide")
+    assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE))["hide_old_done"] is True
+    assert f'data-id="{old}"' not in column(client.get("/").text, "done")
+    assert f'data-id="{old}"' not in column(client.get("/").text, "done")
+    client.post("/preferences/done/show")
+    html = client.get("/").text
+    assert f'data-id="{old}"' in column(html, "done") and done_heading(html) == "done (1)"
+
+
+def test_ab13_hiding_with_nothing_old_shows_no_count(board, client):
+    closed(board, "new", 2)
+    client.post("/preferences/done/hide")
+    html = client.get("/").text
+    assert done_heading(html) == "done (1)"
+    assert done_toggle(html) == ("show", "Show older")
+
+
+def test_ab13_only_the_done_lane_is_touched(board, client):
+    stale = ready(board, "stale ready")
+    age(board, stale, 60)
+    client.post("/preferences/done/hide")
+    html = client.get("/").text
+    assert f'data-id="{stale}"' in column(html, "ready")
+    assert 'class="old-done"' not in column(html, "ready")
+
+
+def test_ab13_a_finished_workflow_is_hidden_by_its_last_steps_finish(board, client):
+    old_wf = release(board, steps=("a", "b"))
+    for st in old_wf["steps"]:
+        finish(board, st["id"])
+        age(board, st["id"], 20)
+    new_wf = core.instantiate(board, "release", "MS", actor=CHAOS, actor_kind=HUMAN)
+    first, last = new_wf["steps"]
+    finish(board, first["id"])
+    age(board, first["id"], 20)
+    finish(board, last["id"])
+    client.post("/preferences/done/hide")
+    html = client.get("/").text
+    done = column(html, "done")
+    assert f'data-workflow="{old_wf["id"]}"' not in done
+    assert f'data-workflow="{new_wf["id"]}"' in done
+    assert done_heading(html) == "done (1) + 1 older hidden"
+
+
+def test_ab13_other_saves_keep_the_choice(board, client):
+    core.create_project(board, "BR", "brain")
+    client.post("/preferences/done/hide")
+    client.post("/preferences/projects", data={"project": ["MS"]})
+    client.post("/preferences/lanes/hide", data={"lane": "onhold"})
+    client.post("/preferences", data={"project": ["MS", "BR"], "lane": ["ready", "done"]})
+    assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE))["hide_old_done"] is True
+
+
+def test_ab13_an_unknown_done_action_is_404(client):
+    assert client.post("/preferences/done/sideways").status_code == 404
+
+
+@pytest.mark.parametrize("raw", [None, "", '{"hide_old_done":"yes"}', '{"hide_old_done":1}'])
+def test_ab13_anything_but_true_in_the_cookie_shows_every_done_card(raw):
+    assert web.read_prefs(raw and quote(raw, safe=""))["hide_old_done"] is False
+
+
+def test_ab13_the_board_stamp_moves_when_the_toggle_does(board, client):
+    closed(board, "old", 15)
+    before = board_stamp(client)
+    client.post("/preferences/done/hide")
+    assert board_stamp(client) != before

@@ -170,6 +170,27 @@ def recent_projects(engine, actor: str, days: int = RECENT_DAYS) -> list[str]:
             .where(Event.actor == actor, Event.at >= since).order_by(Issue.project_key)))
 
 
+DONE_HIDE_DAYS = 14
+
+
+def done_times(engine) -> dict[str, str]:
+    """When each done issue finished, by id: its latest move into done (AB-13).
+
+    A create event counts, since the backfill wrote cards straight into done.
+    A repeated move to done changes nothing, so it does not restart the clock.
+    An issue with no such event falls back to its `updated_at`.
+    """
+    with store.session(engine) as s:
+        arrived = (select(Event.issue_id, func.max(Event.at).label("at"))
+                   .where(Event.to_state == "done",
+                          or_(Event.from_state.is_(None), Event.from_state != "done"))
+                   .group_by(Event.issue_id).subquery())
+        rows = s.execute(select(Issue.id, func.coalesce(arrived.c.at, Issue.updated_at))
+                         .outerjoin(arrived, arrived.c.issue_id == Issue.id)
+                         .where(Issue.state == "done").order_by(Issue.id))
+        return {i: _iso(at) for i, at in rows}
+
+
 def rename_project(engine, key: str, name: str) -> dict:
     """A new name for a project. The key cannot change: every issue id carries it."""
     name = _project_name(name)

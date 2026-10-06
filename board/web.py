@@ -61,7 +61,7 @@ import os
 import re
 import tempfile
 import unicodedata
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit
 from zoneinfo import ZoneInfo
@@ -210,7 +210,8 @@ def board_stamp(ctx: dict, buckets: dict) -> str:
     return stamp({"columns": [(state, [flow(w) for w in wfs], [card(i) for i in issues])
                               for state, wfs, issues in ctx["columns"]],
                   "projects": view["projects"], "templates": view["templates"],
-                  "tracked": ctx["tracked"], "hidden": ctx["hidden"], "buckets": buckets})
+                  "tracked": ctx["tracked"], "hidden": ctx["hidden"], "buckets": buckets,
+                  "hide_old_done": ctx["hide_old_done"], "old_done": ctx["old_done"]})
 
 
 def issue_stamp(issue: dict, now: str, buckets: dict) -> str:
@@ -578,12 +579,14 @@ def _form_labels(value):
 
 
 def read_prefs(raw: str | None) -> dict:
-    """The saved view from a `board_prefs` cookie: projects, lanes and timezone.
+    """The saved view from a `board_prefs` cookie: projects, lanes, timezone,
+    and whether the done lane hides cards finished over two weeks ago (AB-13).
 
     The value is JSON, percent-encoded so a browser sends it back unmangled.
     Anything unreadable, and any other key, is ignored. A list key that is
     absent or not a list of strings comes back as [], which means all; a
     timezone that is not a string comes back as "", which means the default.
+    `hide_old_done` is True only when the cookie says exactly true.
     """
     try:
         data = json.loads(unquote(raw or ""))
@@ -597,6 +600,7 @@ def read_prefs(raw: str | None) -> dict:
         prefs[key] = value if ok else []
     tz = data.get("timezone")
     prefs["timezone"] = tz if isinstance(tz, str) else ""
+    prefs["hide_old_done"] = data.get("hide_old_done") is True
     return prefs
 
 
@@ -816,7 +820,7 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         saved = read_prefs(request.cookies.get(PREFS_COOKIE))
         return {"projects": _chosen(saved["projects"], [p["key"] for p in projects]),
                 "lanes": _chosen(saved["lanes"], list(core.TRANSITIONS)),
-                "timezone": saved["timezone"]}
+                "timezone": saved["timezone"], "hide_old_done": saved["hide_old_done"]}
 
     def board_view(request):
         view = core.overview(engine)
@@ -838,12 +842,30 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
                  if i["workflow_id"] is None and i["project"] in tracked]
         # The workflow is the card: its computed state picks the column, and
         # its steps show on their issue pages rather than as loose cards here.
+        old_done = 0
+        if prefs["hide_old_done"] and "done" in prefs["lanes"]:
+            # AB-13: a card finished over two weeks ago drops out of the done
+            # lane, and its heading counts it. A workflow finished with its last step.
+            cutoff = (datetime.fromisoformat(view["now"])
+                      - timedelta(days=core.DONE_HIDE_DAYS))
+            finished = {i: datetime.fromisoformat(at)
+                        for i, at in core.done_times(engine).items()}
+
+            def old(ids):
+                return max((finished.get(i, cutoff) for i in ids), default=cutoff) < cutoff
+
+            kept_wf = [w for w in workflows
+                       if w["state"] != "done" or not old(st["id"] for st in w["steps"])]
+            kept = [i for i in loose if i["state"] != "done" or not old([i["id"]])]
+            old_done = len(workflows) - len(kept_wf) + len(loose) - len(kept)
+            workflows, loose = kept_wf, kept
         columns = [(state, [w for w in workflows if w["state"] == state],
                     [i for i in loose if i["state"] == state])
                    for state in prefs["lanes"]]
         hidden = [s for s in core.TRANSITIONS if s not in prefs["lanes"]]
         return {"view": view, "columns": columns, "now": view["now"],
-                "tracked": prefs["projects"], "hidden": hidden}
+                "tracked": prefs["projects"], "hidden": hidden,
+                "hide_old_done": prefs["hide_old_done"], "old_done": old_done}
 
     @app.get("/", response_class=HTMLResponse)
     def board_page(request: Request):
@@ -888,6 +910,7 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         # An unknown zone is saved blank, which means the default.
         tz = (f.get("timezone") or "").strip()
         prefs["timezone"] = tz if zone(tz) else ""
+        prefs["hide_old_done"] = read_prefs(request.cookies.get(PREFS_COOKIE))["hide_old_done"]
         return saved(prefs)
 
     @app.post("/preferences/projects")
@@ -924,6 +947,15 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
             shown.add(lane)
         picked = [k for k in known if k in shown]
         prefs["lanes"] = [] if len(picked) == len(known) else picked
+        return saved(prefs)
+
+    @app.post("/preferences/done/{action}")
+    def save_old_done_toggle(request: Request, action: str):
+        """The done lane's toggle: hide or show cards finished over two weeks ago."""
+        if action not in ("hide", "show"):
+            return error(request, 404, "No such done-lane action.")
+        prefs = read_prefs(request.cookies.get(PREFS_COOKIE))
+        prefs["hide_old_done"] = action == "hide"
         return saved(prefs)
 
     def saved(prefs):
