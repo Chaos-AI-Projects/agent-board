@@ -30,7 +30,7 @@
   <div class="view-panel">
   <form autocomplete="off" method="post" action="/preferences/projects">
     {% for p in view.projects %}<label><input type="checkbox" name="project" value="{{ p.key }}"{% if p.key in tracked %} checked{% endif %}> {{ p.key }} ({{ p.name }})</label>{% endfor %}
-    <span class="check-all" hidden><button type="button" data-check="all">Select all</button> <button type="button" data-check="none">Unselect all</button></span>
+    <span class="check-all" hidden><button type="button" data-check="all">Select all</button> <button type="button" data-check="none">Unselect all</button>{% if recent is not none %} <button type="button" data-check="recent" data-recent="{{ recent|join(" ") }}"{% if not recent %} disabled{% endif %}>Recent</button>{% endif %}</span>
     <button>Apply</button>
   </form>
   {% if hidden %}<div class="hidden-lanes">Hidden lanes:

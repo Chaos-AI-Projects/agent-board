@@ -97,10 +97,15 @@
   // every box in its own group, the nearest fieldset or form, so the lanes on
   // /preferences stay as they were. Nothing is saved until Apply or Save. The
   // buttons start hidden because without this script they would do nothing.
+  // AB-12: "Recent" ticks exactly the projects the server listed in
+  // data-recent, the ones this viewer touched in the last 14 days.
   function checkAll(button) {
-    var on = button.dataset.check === "all";
+    var kind = button.dataset.check;
+    var recent = kind === "recent" ? button.dataset.recent.split(" ") : [];
     button.closest("fieldset, form").querySelectorAll('input[type="checkbox"]')
-      .forEach(function (box) { box.checked = on; });
+      .forEach(function (box) {
+        box.checked = kind === "all" || recent.indexOf(box.value) >= 0;
+      });
   }
   document.querySelectorAll(".check-all").forEach(function (span) {
     span.hidden = false;

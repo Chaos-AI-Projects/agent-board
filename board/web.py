@@ -663,6 +663,7 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         saved_tz = read_prefs(request.cookies.get(PREFS_COOKIE))["timezone"]
         buckets = core.colour_buckets(engine)
         ctx |= {"me": me.email if me else None, "lease_status": lease_status,
+                "recent": core.recent_projects(engine, me.email) if me else None,
                 "project_colour": lambda key: project_colour(key, buckets.get(key)),
                 "tz": zone(saved_tz) or default_tz, "inline_types": INLINE_TYPES,
                 "sign_in": google is not None,

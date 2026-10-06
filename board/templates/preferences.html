@@ -5,7 +5,7 @@
   <p>Saved in this browser. Leaving a group with nothing ticked shows all of it.</p>
   <fieldset><legend>Projects to track</legend>
   {% for p in view.projects %}<label><input type="checkbox" name="project" value="{{ p.key }}"{% if p.key in prefs.projects %} checked{% endif %}> {{ p.key }} ({{ p.name }})</label>{% endfor %}
-  <span class="check-all" hidden><button type="button" data-check="all">Select all</button> <button type="button" data-check="none">Unselect all</button></span>
+  <span class="check-all" hidden><button type="button" data-check="all">Select all</button> <button type="button" data-check="none">Unselect all</button>{% if recent is not none %} <button type="button" data-check="recent" data-recent="{{ recent|join(" ") }}"{% if not recent %} disabled{% endif %}>Recent</button>{% endif %}</span>
   </fieldset>
   <fieldset><legend>Lanes to show</legend>
   {% for lane in lanes %}<label><input type="checkbox" name="lane" value="{{ lane }}"{% if lane in prefs.lanes %} checked{% endif %}> {{ lane }}</label>{% endfor %}

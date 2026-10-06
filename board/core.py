@@ -154,6 +154,22 @@ def projects(engine) -> list[dict]:
         return [{"key": k, "name": n, "issues": c} for k, n, c in rows]
 
 
+RECENT_DAYS = 14
+
+
+def recent_projects(engine, actor: str, days: int = RECENT_DAYS) -> list[str]:
+    """The keys of projects where `actor` wrote any event in the last `days` days.
+
+    Creating an issue writes its create event, so this covers created issues
+    as well as notes, moves, edits and links (AB-12).
+    """
+    with store.session(engine) as s:
+        since = store.db_now(s) - timedelta(days=days)
+        return list(s.scalars(
+            select(Issue.project_key).distinct().join(Event, Event.issue_id == Issue.id)
+            .where(Event.actor == actor, Event.at >= since).order_by(Issue.project_key)))
+
+
 def rename_project(engine, key: str, name: str) -> dict:
     """A new name for a project. The key cannot change: every issue id carries it."""
     name = _project_name(name)

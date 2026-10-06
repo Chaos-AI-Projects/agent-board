@@ -1538,3 +1538,36 @@ def test_a_rename_keeps_the_bucket(migrated):
     core.create_project(migrated, "BB", "b")
     core.rename_project(migrated, "BB", "renamed")
     assert core.colour_buckets(migrated) == {"AA": 0, "BB": 1}
+
+
+# --- AB-12: the projects an actor touched recently ------------------------------
+
+
+def age_events(engine, issue_id, days):
+    """Move every event on an issue `days` into the past."""
+    with store.session(engine) as s, s.begin():
+        s.execute(store.Event.__table__.update().where(store.Event.issue_id == issue_id)
+                  .values(at=store.db_now(s) - timedelta(days=days)))
+
+
+def test_ab12_recent_projects_are_where_the_actor_created_or_acted_in_14_days(board):
+    for key in ("BR", "PE", "DR", "HC"):
+        core.create_project(board, key, key.lower())
+    core.create(board, "BR", "mine", actor=CHAOS, actor_kind=HUMAN)
+    other = core.create(board, "PE", "theirs", actor="someone@else", actor_kind=HUMAN)["id"]
+    core.annotate(board, other, "a note", actor=CHAOS, actor_kind=HUMAN)
+    core.create(board, "DR", "not mine", actor="someone@else", actor_kind=HUMAN)
+    old = core.create(board, "HC", "long ago", actor=CHAOS, actor_kind=HUMAN)["id"]
+    age_events(board, old, 15)
+    assert core.recent_projects(board, CHAOS) == ["BR", "PE"]
+    assert core.recent_projects(board, "nobody@example.com") == []
+
+
+def test_ab12_an_event_inside_the_window_counts_however_old_the_issue(board):
+    core.create_project(board, "HC", "hc")
+    old = core.create(board, "HC", "long ago", actor=CHAOS, actor_kind=HUMAN)["id"]
+    age_events(board, old, 13)
+    assert core.recent_projects(board, CHAOS) == ["HC"]
+    age_events(board, old, 30)
+    core.transition(board, old, "ready", actor=CHAOS, actor_kind=HUMAN)
+    assert core.recent_projects(board, CHAOS) == ["HC"]

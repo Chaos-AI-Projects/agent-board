@@ -2759,3 +2759,63 @@ var document = {querySelectorAll: function (sel) { return sel === ".check-all" ?
       clicks["none:click"](); var none = boxes.map(function (b) { return b.checked; });
       return [shown, Object.keys(clicks).sort(), all, none]; })()""")
     assert got == [True, ["all:click", "none:click"], [True, True], [False, False]]
+
+
+# --- AB-12: a Recent button on the project filter ------------------------------
+
+
+def recent_button(fragment):
+    """The Recent button's tag in a fragment, or None."""
+    m = re.search(r'<button type="button" data-check="recent"[^>]*>[^<]*</button>', fragment)
+    return m and m.group(0)
+
+
+def test_ab12_the_banner_offers_recent_with_the_viewers_recent_projects(board):
+    two_projects(board)  # Chaos created both cards just now
+    core.create_project(board, "PE", "packrat")
+    core.create(board, "PE", "not his", actor="someone@else", actor_kind=HUMAN)
+    form = re.search(r'<form[^>]*action="/preferences/projects".*?</form>',
+                     banner(local_client(board).get("/", headers=AS_CHAOS).text), re.S).group(0)
+    tag = recent_button(form)
+    assert tag == '<button type="button" data-check="recent" data-recent="BR MS">Recent</button>'
+    # In the same hidden span as Select all, so it shows once the script runs.
+    assert re.search(r'<span class="check-all" hidden>[^/]*</button> <button type="button" '
+                     r'data-check="none">Unselect all</button> ' + re.escape(tag), form)
+
+
+def test_ab12_recent_is_disabled_when_the_viewer_touched_nothing(board):
+    two_projects(board)
+    html = local_client(board).get("/", headers={web.ACTOR_HEADER: "new@example.com"}).text
+    assert recent_button(banner(html)) == ('<button type="button" data-check="recent" '
+                                           'data-recent="" disabled>Recent</button>')
+
+
+def test_ab12_no_recent_button_without_a_signed_in_viewer(client, board):
+    two_projects(board)
+    assert recent_button(banner(client.get("/").text)) is None
+
+
+def test_ab12_the_preferences_page_offers_recent_for_projects_only(board):
+    two_projects(board)
+    html = local_client(board).get("/preferences", headers=AS_CHAOS).text
+    groups = dict((legend, body) for body, legend in (
+        (m.group(0), m.group(1)) for m in
+        re.finditer(r"<fieldset><legend>([^<]*)</legend>.*?</fieldset>", html, re.S)))
+    assert 'data-recent="BR MS"' in recent_button(groups["Projects to track"])
+    assert recent_button(groups["Lanes to show"]) is None
+
+
+def test_ab12_recent_ticks_exactly_the_listed_projects(client, board):
+    src = js_function(client.get("/").text, "checkAll")
+    got = run_js("""
+function box(v, c) { return {type: "checkbox", value: v, checked: c}; }
+var mine = [box("BR", false), box("MS", true), box("PE", true), box("HC", false)];
+var group = {querySelectorAll: function () { return mine; }};
+function button(recent) {
+  return {dataset: {check: "recent", recent: recent}, closest: function () { return group; }};
+}
+""" + src, """(function () {
+      checkAll(button("BR PE")); var some = mine.map(function (b) { return b.checked; });
+      checkAll(button("")); var none = mine.map(function (b) { return b.checked; });
+      return [some, none]; })()""")
+    assert got == [[True, False, True, False], [False, False, False, False]]
