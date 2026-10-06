@@ -569,6 +569,27 @@ def test_create_goes_through_core(board, client):
     assert (issue["title"], issue["state"]) == ("new card", "ready")
 
 
+def new_issue_project_select(html):
+    form = html.split('action="/issues"', 1)[1].split("</form>", 1)[0]
+    return form.split('<select name="project"', 1)[1].split("</select>", 1)[0]
+
+
+def test_ab11_the_new_issue_form_starts_with_no_project_chosen(board, client):
+    """The project select opens on an empty placeholder the browser will not submit."""
+    select = new_issue_project_select(client.get("/").text)
+    head, first = select.split("<option", 1)[0], select.split("<option", 2)[1]
+    assert "required" in head
+    assert first.startswith(' value="" disabled selected')
+    assert select.count(" selected") == 1
+
+
+def test_ab11_a_create_with_no_project_says_to_choose_one(board, client):
+    r = client.post("/issues", data={"project": "", "title": "orphan"}, headers=AS_CHAOS)
+    assert r.status_code == 422
+    assert "Choose a project" in r.text
+    assert core.search(board, q="orphan") == []
+
+
 def test_an_edit_saves_and_redirects(board, client):
     iid = ready(board)
     issue = core.show(board, iid)

@@ -988,6 +988,9 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
     async def create_issue(request: Request):
         me = await run_in_threadpool(actor, request)
         f = await request.form()
+        # The form's select is required; this answers a post that skipped it (AB-11).
+        if not f.get("project"):
+            return error(request, 422, "Choose a project for the new issue. Nothing was saved.")
         files = await save_uploads(f)
         issue = core.create(engine, f.get("project", ""), f.get("title", ""), actor=me.email,
                             actor_kind=me.kind, body=f.get("body", ""),
