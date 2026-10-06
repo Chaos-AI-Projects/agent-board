@@ -51,8 +51,8 @@ LANE_HINTS: dict[str, str] = {
     "backlog": "Filed, not authorized. Agents never pick it.",
     "ready": "Authorized. board next takes the highest-ranked card here.",
     "need-input": "An agent is waiting on you: a question, or finished work to review. "
-                  "Answer in a note, then drag the card to ready, or to done if "
-                  "nothing is left.",
+                  "Your note or edit sends it back to ready; pick done with the "
+                  "note if nothing is left.",
     "processing": "An agent holds it under a 90-minute lease. Only board next puts "
                   "a card here.",
     "onhold": "Frozen; exits only to backlog. A card split into a workflow waits here "
@@ -393,7 +393,8 @@ def annotate(engine, issue_id: str, note: str, *, actor: str, actor_kind: str,
     """Append a note. A human note needs no lease; it cannot overwrite anything.
 
     `attachments` are files already stored on disk, as `_attach` describes;
-    they hang off this note's event.
+    they hang off this note's event. A human note on a need-input card is
+    the answer, so it sends the card back to ready (AB-10).
     """
     key = (_scoped("annotate", issue_id, request_id)
            or _derive(actor, "annotate", issue_id, token, note, *_digests(attachments)))
@@ -405,6 +406,7 @@ def annotate(engine, issue_id: str, note: str, *, actor: str, actor_kind: str,
             _check_token(s, issue, actor, token)
         ev = _event(s, issue.id, now, actor, actor_kind, "annotate", None, None, note, key)
         _attach(s, issue, ev.id, attachments, actor, now)
+        _release_answered(s, issue, actor, actor_kind, now)
         return _view(s, issue)
 
     return _write(engine, key, body, _replay_view,
@@ -840,7 +842,8 @@ def edit(engine, issue_id: str, *, actor: str, expected_version: int,
     `expected_version` is the version the form was rendered from. Saving a
     form that changes nothing writes nothing and returns the issue. Only a
     human or the system edits; an agent works under its lease through
-    `transition`, `annotate` and `link`.
+    `transition`, `annotate` and `link`. A human save that changes a
+    need-input card with no `state` sends it back to ready (AB-10).
     """
     if actor_kind == "agent":
         raise BoardError(f"{issue_id}: an agent cannot edit; it changes an issue under "
@@ -874,6 +877,8 @@ def edit(engine, issue_id: str, *, actor: str, expected_version: int,
             key = None if _has_key(s, request_id) else request_id
             _event(s, issue.id, now, actor, actor_kind, "edit", None, None,
                    "changed " + ", ".join(changed), key)
+            if state is None:
+                _release_answered(s, issue, actor, actor_kind, now)
         if state is not None:
             ev = _apply_state(s, issue, state, note, actor, actor_kind, now, request_id,
                               key_used=_has_key(s, request_id))
@@ -974,6 +979,16 @@ def _apply_state(s, issue, state, note, actor, actor_kind, now, key, key_used):
     if state == "done" and old != "done":
         _resume_origin(s, issue, now)
     return ev
+
+
+def _release_answered(s, issue, actor, actor_kind, now):
+    """A human's note or save on a need-input card answers it: back to ready (AB-10).
+
+    Only a human: an agent noting its own question must not release it. The
+    caller's event already holds the idempotency key, so this one goes without.
+    """
+    if actor_kind == "human" and issue.state == "need-input":
+        _apply_state(s, issue, "ready", None, actor, actor_kind, now, None, key_used=True)
 
 
 def _resume_origin(s, step, now):

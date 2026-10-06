@@ -185,6 +185,72 @@ def test_an_agent_cannot_close_a_need_input_card(board):
                         token=tok)
 
 
+def asking(engine):
+    """A card an agent has parked at need-input with a question."""
+    iid = ready(engine)
+    tok = core.next(engine, "w1")["lease_token"]
+    core.transition(engine, iid, "need-input", note="which option?", actor="w1",
+                    actor_kind=AGENT, token=tok)
+    return iid, tok
+
+
+def test_ab10_a_human_note_on_need_input_moves_it_to_ready(board):
+    iid, _ = asking(board)
+    issue = core.annotate(board, iid, "option B", actor=CHAOS, actor_kind=HUMAN)
+    assert issue["state"] == "ready"
+    note, move = issue["events"][-2:]
+    assert (note["kind"], note["note"]) == ("annotate", "option B")
+    assert (move["kind"], move["actor"], move["actor_kind"], move["from_state"],
+            move["to_state"]) == ("transition", CHAOS, HUMAN, "need-input", "ready")
+    assert core.next(board, "w2")["issue"]["id"] == iid
+
+
+def test_ab10_a_human_edit_save_on_need_input_moves_it_to_ready(board):
+    iid, _ = asking(board)
+    issue = core.edit(board, iid, actor=CHAOS, actor_kind=HUMAN,
+                      expected_version=core.show(board, iid)["version"],
+                      body="use option B")
+    assert issue["state"] == "ready"
+    last = issue["events"][-1]
+    assert (last["kind"], last["actor"], last["from_state"], last["to_state"]) == (
+        "transition", CHAOS, "need-input", "ready")
+
+
+def test_ab10_an_explicit_state_with_the_note_wins(board):
+    iid, _ = asking(board)
+    issue = core.edit(board, iid, actor=CHAOS, actor_kind=HUMAN,
+                      expected_version=core.show(board, iid)["version"],
+                      state="done", note="reviewed")
+    assert issue["state"] == "done"
+    assert [e["to_state"] for e in issue["events"] if e["kind"] == "transition"][-1] == "done"
+
+
+def test_ab10_an_agent_note_does_not_release_its_own_need_input_card(board):
+    iid, _ = asking(board)
+    # need-input cleared the lease, so the agent notes without a token.
+    issue = core.annotate(board, iid, "emailed Chaos", actor="w1", actor_kind=AGENT)
+    assert issue["state"] == "need-input"
+
+
+def test_ab10_a_human_note_on_another_state_moves_nothing(board):
+    iid = core.create(board, "MS", "idea", actor=CHAOS, actor_kind=HUMAN)["id"]
+    assert core.annotate(board, iid, "thought", actor=CHAOS,
+                         actor_kind=HUMAN)["state"] == "backlog"
+    edited = core.edit(board, iid, actor=CHAOS, actor_kind=HUMAN,
+                       expected_version=core.show(board, iid)["version"], title="idea 2")
+    assert edited["state"] == "backlog"
+
+
+def test_ab10_a_human_note_replayed_moves_once(board):
+    iid, _ = asking(board)
+    core.annotate(board, iid, "option B", actor=CHAOS, actor_kind=HUMAN, request_id="r1")
+    issue = core.annotate(board, iid, "option B", actor=CHAOS, actor_kind=HUMAN,
+                          request_id="r1")
+    assert issue["state"] == "ready"
+    assert sum(e["to_state"] == "ready" for e in issue["events"]) == 2, \
+        "the create and one release, not two releases"
+
+
 def test_an_agent_cannot_close_a_standalone_card(board):
     """AB-9, option B: a standalone card waits at need-input for a human to close it."""
     iid = ready(board)

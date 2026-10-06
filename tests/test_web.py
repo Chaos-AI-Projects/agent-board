@@ -848,6 +848,33 @@ def test_ab8_a_review_note_closes_a_need_input_card_as_done(board, client):
         "need-input", "done", "looks good")
 
 
+def test_ab10_a_note_on_a_need_input_card_sends_it_back_to_ready(board, client):
+    iid = ready(board)
+    tok = core.next(board, "w1")["lease_token"]
+    core.transition(board, iid, "need-input", note="which option?", actor="w1",
+                    actor_kind="agent", token=tok)
+    issue = core.show(board, iid)
+    r = client.post(f"/issues/{iid}/note", data=note_form(issue, "option B"),
+                    headers=AS_CHAOS)
+    assert r.status_code == 303
+    after = core.show(board, iid)
+    assert after["state"] == "ready"
+    assert [(e["kind"], e["to_state"]) for e in after["events"][-2:]] == [
+        ("annotate", None), ("transition", "ready")]
+
+
+def test_ab10_an_edit_save_on_a_need_input_card_sends_it_back_to_ready(board, client):
+    iid = ready(board)
+    tok = core.next(board, "w1")["lease_token"]
+    core.transition(board, iid, "need-input", note="which option?", actor="w1",
+                    actor_kind="agent", token=tok)
+    issue = core.show(board, iid)
+    r = client.post(f"/issues/{iid}/edit", data=edit_form(issue, body="use option B"),
+                    headers=AS_CHAOS)
+    assert r.status_code == 303
+    assert core.show(board, iid)["state"] == "ready"
+
+
 def test_ms661_a_note_with_the_state_unchanged_annotates(board, client):
     iid = ready(board)
     issue = core.show(board, iid)
