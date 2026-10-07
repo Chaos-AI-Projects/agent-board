@@ -173,13 +173,16 @@ def test_workflow_steps_are_not_loose_cards_on_the_board(board, client):
         assert f'data-id="{step["id"]}"' not in html
 
 
-def test_loose_issues_show_as_their_own_group(board, client):
-    release(board)
+def test_a_workflow_card_shares_the_list_but_does_not_drag(board, client):
+    # AB-17 put workflow and loose cards in one sorted list per date group;
+    # Sortable's filter keeps the workflow card from being picked up.
+    wf = release(board)
     loose = ready(board, "a loose one")
-    col = column(client.get("/").text, "ready")
-    group = re.search(r'<div class="cards"[^>]*>.*?</div>\s*</section>', col, re.S).group(0)
-    assert f'data-id="{loose}"' in group
-    assert "data-workflow=" not in group
+    html = client.get("/").text
+    group = re.search(r'<div class="cards"[^>]*>.*?</div>\s*</section>',
+                      column(html, "ready"), re.S).group(0)
+    assert f'data-id="{loose}"' in group and f'data-workflow="{wf["id"]}"' in group
+    assert 'filter: ".workflow-card"' in html
 
 
 def finish(engine, step_id, worker="w1"):
@@ -2950,3 +2953,153 @@ def test_ab13_the_board_stamp_moves_when_the_toggle_does(board, client):
     before = board_stamp(client)
     client.post("/preferences/done/hide")
     assert board_stamp(client) != before
+
+
+# --- AB-17: each lane groups its cards by date, then sorts them by project ---------
+
+SYDNEY = ZoneInfo("Australia/Sydney")
+
+
+def at(text):
+    return datetime.fromisoformat(text)
+
+
+@pytest.mark.parametrize("touched, group", [
+    # Calendar days in the zone, not 24-hour windows: one minute either side of midnight.
+    ("2026-10-07T00:01:00+11:00", "Today"),
+    ("2026-10-06T23:59:00+11:00", "Yesterday"),
+    ("2026-10-05T12:00:00+11:00", "3 days"),
+    ("2026-10-04T09:00:00+11:00", "3 days"),  # DST began at 02:00 that morning
+    ("2026-10-03T23:59:00+11:00", "1 week"),
+    ("2026-09-24T00:00:00+10:00", "1 week"),
+    ("2026-09-23T23:59:00+10:00", "2 weeks and above"),
+    ("2025-01-01T00:00:00+00:00", "2 weeks and above"),
+])
+def test_ab17_a_card_falls_in_the_group_of_its_calendar_age(touched, group):
+    now = at("2026-10-07T09:00:00+11:00")
+    assert web.date_group(at(touched), now, SYDNEY) == group
+
+
+def test_ab17_the_day_boundary_is_the_zones_midnight_not_utcs():
+    # 2026-10-06 13:30 UTC is 00:30 on the 7th in Sydney, but still the 6th in UTC.
+    now, touched = at("2026-10-06T23:00:00+00:00"), at("2026-10-06T13:30:00+00:00")
+    assert web.date_group(touched, now, SYDNEY) == "Today"
+    assert web.date_group(at("2026-10-06T12:30:00+00:00"), now, SYDNEY) == "Yesterday"
+    assert web.date_group(touched, now, ZoneInfo("UTC")) == "Today"
+
+
+def test_ab17_a_clock_ahead_of_now_counts_as_today():
+    now = at("2026-10-07T09:00:00+11:00")
+    assert web.date_group(at("2026-10-08T09:00:00+11:00"), now, SYDNEY) == "Today"
+
+
+def touched(engine, issue_id, days):
+    """Set a card's last activity `days` ago, leaving its events alone."""
+    with store.session(engine) as s, s.begin():
+        then = store.db_now(s) - timedelta(days=days)
+        s.execute(store.Issue.__table__.update().where(store.Issue.id == issue_id)
+                  .values(updated_at=then))
+
+
+def date_groups(html, state):
+    """A lane's date groups in order, each as (heading text, the card ids under it)."""
+    col = column(html, state)
+    parts = re.split(r'<h3 class="date-group"[^>]*>(.*?)</h3>', col, flags=re.S)
+    return [(" ".join(re.sub(r"<[^>]+>", " ", head).split()),
+             re.findall(r'data-(?:id|workflow)="([^"]+)"', body))
+            for head, body in zip(parts[1::2], parts[2::2])]
+
+
+def test_ab17_a_lane_shows_its_cards_under_date_headings_newest_first(board, client):
+    old, week, today = ready(board, "old"), ready(board, "week"), ready(board, "today")
+    touched(board, old, 20)
+    touched(board, week, 5)
+    assert date_groups(client.get("/").text, "ready") == [
+        ("Today (1)", [today]), ("1 week (1)", [week]), ("2 weeks and above (1)", [old])]
+
+
+def test_ab17_inside_a_group_cards_sort_by_project_not_rank(board, client):
+    core.create_project(board, "BR", "brain")
+    core.create_project(board, "AB", "agent-board")
+    ms = ready(board, "ms", rank=1)
+    br = core.create(board, "BR", "br", actor=CHAOS, actor_kind=HUMAN, state="ready",
+                     rank=2)["id"]
+    ab = core.create(board, "AB", "ab", actor=CHAOS, actor_kind=HUMAN, state="ready",
+                     rank=3)["id"]
+    ms2 = ready(board, "ms again", rank=0)
+    # Drag order is ignored: inside a project the ids run in number order.
+    assert date_groups(client.get("/").text, "ready") == [("Today (4)", [ab, br, ms, ms2])]
+
+
+def test_ab17_ids_sort_by_number_not_text(board, client):
+    ids = [ready(board, f"n{n}") for n in range(10)]
+    assert date_groups(client.get("/").text, "ready") == [("Today (10)", ids)]
+
+
+def test_ab17_an_empty_lane_has_no_headings_but_still_takes_a_drop(board, client):
+    ready(board)
+    html = client.get("/").text
+    assert date_groups(html, "onhold") == []
+    assert '<div class="cards" data-state="onhold">' in column(html, "onhold")
+
+
+def test_ab17_a_workflow_card_is_dated_by_its_latest_step(board, client):
+    wf = release(board)
+    for step in wf["steps"]:
+        touched(board, step["id"], 30)
+    touched(board, wf["steps"][1]["id"], 2)
+    groups = date_groups(client.get("/").text, "ready")
+    assert groups == [("3 days (1)", [str(wf["id"])])]
+
+
+def test_ab17_the_groups_follow_the_saved_timezone(board, client):
+    # A card one minute either side of UTC midnight, and a saved zone that puts
+    # it on the other side of its own midnight, whatever the hour the test runs.
+    i = ready(board)
+    with store.session(board) as s:
+        now = store.db_now(s)
+    midnight = now.astimezone(ZoneInfo("UTC")).replace(hour=0, minute=0, second=0,
+                                                        microsecond=0)
+    if now.astimezone(ZoneInfo("UTC")).hour >= 10:
+        then, saved, default, mine = (midnight + timedelta(minutes=1), "Etc/GMT+10",
+                                      "Today", "Yesterday")
+    else:
+        then, saved, default, mine = (midnight - timedelta(minutes=1), "Etc/GMT-14",
+                                      "Yesterday", "Today")
+    with store.session(board) as s, s.begin():
+        s.execute(store.Issue.__table__.update().where(store.Issue.id == i)
+                  .values(updated_at=then))
+    assert date_groups(client.get("/").text, "ready") == [(f"{default} (1)", [i])]
+    client.cookies.set(web.PREFS_COOKIE, quote(json.dumps({"timezone": saved}), safe=""))
+    assert date_groups(client.get("/").text, "ready") == [(f"{mine} (1)", [i])]
+
+
+def test_ab17_workflow_and_loose_cards_sort_together_by_project(board, client):
+    core.create_project(board, "AA", "first")
+    core.create_project(board, "ZZ", "last")
+    wf = release(board)  # its steps are MS
+    aa = core.create(board, "AA", "aa", actor=CHAOS, actor_kind=HUMAN, state="ready")["id"]
+    zz = core.create(board, "ZZ", "zz", actor=CHAOS, actor_kind=HUMAN, state="ready")["id"]
+    ms = ready(board, "ms")
+    assert date_groups(client.get("/").text, "ready") == [
+        ("Today (4)", [aa, str(wf["id"]), ms, zz])]
+
+
+def test_ab17_a_workflow_sorts_by_its_tracked_project(board, client):
+    core.create_project(board, "AA", "first")
+    core.create_project(board, "BR", "brain")
+    core.create_template(board, "mixed", "Mixed", ["a", "b"])
+    wf = core.instantiate(board, "mixed", "MS", actor=CHAOS, actor_kind=HUMAN)
+    with store.session(board) as s, s.begin():
+        s.execute(store.Issue.__table__.update().where(store.Issue.id == wf["steps"][1]["id"])
+                  .values(project_key="AA"))
+    br = core.create(board, "BR", "br", actor=CHAOS, actor_kind=HUMAN, state="ready")["id"]
+    client.post("/preferences/projects", data={"project": ["MS", "BR"]})
+    # Its AA step is filtered out, so it sorts as MS, after BR.
+    assert date_groups(client.get("/").text, "ready") == [("Today (2)", [br, str(wf["id"])])]
+
+
+def test_ab17_hidden_old_done_cards_stay_out_of_the_groups(board, client):
+    old, new = closed(board, "old", 15), closed(board, "new", 1)
+    client.post("/preferences/done/hide")
+    assert date_groups(client.get("/").text, "done") == [("Yesterday (1)", [new])]

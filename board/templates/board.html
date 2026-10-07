@@ -40,24 +40,27 @@
 </details>
 </div>
 <div class="kanban">
-{% for state, workflows, issues in columns %}
+{% for state, workflows, issues, groups in columns %}
 <section class="column" data-state="{{ state }}">
   <h2 title="{{ lane_hints[state] }}">{{ state }} ({{ workflows|length + issues|length }}){% if state == "done" and old_done %}<span class="old-done-count"> + {{ old_done }} older hidden</span>{% endif %}{% if columns|length > 1 %}<form autocomplete="off" method="post" action="/preferences/lanes/hide"><input type="hidden" name="lane" value="{{ state }}"><button class="hide-lane" title="Hide this lane" aria-label="Hide the {{ state }} lane">&times;</button></form>{% endif %}</h2>
   <p class="lane-hint">{{ lane_hints[state] }}</p>
   {% if state == "done" %}<form class="old-done" autocomplete="off" method="post" action="/preferences/done/{{ "show" if hide_old_done else "hide" }}"><button title="Cards finished more than 14 days ago">{{ "Show older" if hide_old_done else "Hide finished over 2 weeks ago" }}</button></form>{% endif %}
-  {% if workflows %}<div class="workflows">
-  {% for wf in workflows %}
+  {% for name, cards in groups %}
+  <h3 class="date-group">{{ name }} ({{ cards|length }})</h3>
+  <div class="cards" data-state="{{ state }}">
+  {% for kind, item in cards %}
+  {% if kind == "workflow" %}{% set wf = item %}
   {% if wf.project %}{% set pc = project_colour(wf.project) %}{% endif %}
   <article class="card workflow-card" data-workflow="{{ wf.id }}" data-href="/issues/{{ wf.target }}"{% if wf.project %} style="--proj-bg: {{ pc.bg }}; --proj-border: {{ pc.border }}"{% endif %}>
     <a href="/issues/{{ wf.target }}">{{ wf.title }}</a>
     <div class="steps-summary">{{ wf.steps|length }} step{{ "" if wf.steps|length == 1 else "s" }}{% if wf.current %} &middot; current: {{ wf.current.title }}{% endif %}</div>
   </article>
+  {% else %}{% set issue = item %}{% include "_card.html" %}{% endif %}
   {% endfor %}
-  </div>{% endif %}
-  {% if workflows and issues %}<h3 class="group">Loose issues</h3>{% endif %}
-  <div class="cards" data-state="{{ state }}">
-  {% for issue in issues %}{% include "_card.html" %}{% endfor %}
   </div>
+  {% else %}
+  <div class="cards" data-state="{{ state }}"></div>
+  {% endfor %}
 </section>
 {% endfor %}
 </div>
@@ -91,7 +94,8 @@
     });
     // A real move ends in a reload, so it stays "dragging" until then: an
     // auto-reload must not beat a refusal's alert.
-    if (evt.from === evt.to) { dragging = false; return; }
+    // A drop into another date group of the same lane is no move (AB-17).
+    if (evt.from.dataset.state === evt.to.dataset.state) { dragging = false; return; }
     var card = evt.item, state = evt.to.dataset.state;
     var body = new URLSearchParams({version: card.dataset.version, state: state});
     if (state === "done" || state === "need-input") {
@@ -112,7 +116,9 @@
   }
   function accepts(to, _from, card) { return allowed(card).indexOf(to.el.dataset.state) >= 0; }
   document.querySelectorAll(".kanban .cards").forEach(function (list) {
+    // A workflow card shares its date group's list (AB-17) but never drags.
     new Sortable(list, {group: {name: "kanban", put: accepts}, animation: 150,
+                        filter: ".workflow-card", preventOnFilter: false,
                         onStart: onStart, onEnd: onEnd});
   });
 

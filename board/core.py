@@ -397,6 +397,7 @@ def _row(i):
         "rank": i.rank, "labels": [l.name for l in i.labels], "assignee": i.assignee,
         "lease_holder": i.lease_holder, "lease_expires_at": _iso(i.lease_expires_at),
         "version": i.version, "workflow_id": i.workflow_id, "position": i.position,
+        "updated_at": _iso(i.updated_at),
     }
 
 

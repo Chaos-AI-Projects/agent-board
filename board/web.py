@@ -141,6 +141,49 @@ def localtime(at, tz: ZoneInfo) -> str:
     return dt.astimezone(tz).strftime("%Y-%m-%d %H:%M %Z")
 
 
+# AB-17: a lane groups its cards by how many calendar days ago they last
+# changed, newest first. Each group starts at its day count and runs to the next.
+DATE_GROUPS = (("Today", 0), ("Yesterday", 1), ("3 days", 2), ("1 week", 4),
+               ("2 weeks and above", 14))
+
+
+def _aware(at) -> datetime:
+    dt = datetime.fromisoformat(at) if isinstance(at, str) else at
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+def date_group(at, now, tz: ZoneInfo) -> str:
+    """The AB-17 group of a card last changed at `at`, seen at `now`.
+
+    Days are calendar days in tz, so a card from 23:59 is Yesterday a minute
+    after midnight. A time ahead of `now` counts as Today.
+    """
+    days = (_aware(now).astimezone(tz).date() - _aware(at).astimezone(tz).date()).days
+    return [name for name, start in DATE_GROUPS if days >= start or start == 0][-1]
+
+
+def _id_order(issue_id: str):
+    """An issue id as (key, number), so MS-10 sorts after MS-9."""
+    key, _, n = issue_id.rpartition("-")
+    return (key, int(n)) if n.isdigit() else (issue_id, 0)
+
+
+def lane_groups(workflows: list[dict], issues: list[dict], now, tz: ZoneInfo) -> list:
+    """A lane's cards as (group, [(kind, card)]), in DATE_GROUPS order, empty
+    groups left out. Workflow and loose cards share one list per group, sorted
+    by project key, then id; rank plays no part (Chaos, AB-17)."""
+    cards = sorted([("workflow", w, w["sort_project"], ("", w["id"])) for w in workflows]
+                   + [("issue", i, i["project"], _id_order(i["id"])) for i in issues],
+                   key=lambda c: (c[2], c[0] == "issue", c[3]))
+    groups = []
+    for name, _ in DATE_GROUPS:
+        here = [(kind, card) for kind, card, _, _ in cards
+                if date_group(card["updated_at"], now, tz) == name]
+        if here:
+            groups.append((name, here))
+    return groups
+
+
 def filesize(n: int) -> str:
     """A byte count as B, KB or MB, one decimal above bytes."""
     if n < 1024:
@@ -207,8 +250,10 @@ def board_stamp(ctx: dict, buckets: dict) -> str:
                 "current": current and current["title"]}
 
     view = ctx["view"]
-    return stamp({"columns": [(state, [flow(w) for w in wfs], [card(i) for i in issues])
-                              for state, wfs, issues in ctx["columns"]],
+    return stamp({"columns": [(state, [(name, [flow(c) if kind == "workflow" else card(c)
+                                               for kind, c in cards])
+                                       for name, cards in groups])
+                              for state, _, _, groups in ctx["columns"]],
                   "projects": view["projects"], "templates": view["templates"],
                   "tracked": ctx["tracked"], "hidden": ctx["hidden"], "buckets": buckets,
                   "hide_old_done": ctx["hide_old_done"], "old_done": ctx["old_done"]})
@@ -827,17 +872,22 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         prefs = view_prefs(request, view["projects"])
         tracked = set(prefs["projects"])
         # A workflow has no project of its own; it belongs to its steps' projects.
-        wf_projects = {}
+        wf_projects, wf_updated = {}, {}
         for i in view["issues"]:
             if i["workflow_id"] is not None:
                 wf_projects.setdefault(i["workflow_id"], set()).add(i["project"])
+                # AB-17: a workflow card is dated by its latest step.
+                wf_updated[i["workflow_id"]] = max(wf_updated.get(i["workflow_id"], ""),
+                                                   i["updated_at"])
         workflows = []
         for wf in view["workflows"]:
             if wf_projects.get(wf["id"], set()) & tracked:
                 current = next((st for st in wf["steps"] if st["state"] != "done"), None)
                 projects = wf_projects[wf["id"]]
                 workflows.append(wf | {"current": current, "target": workflow_target(wf),
-                                       "project": next(iter(projects)) if len(projects) == 1 else None})
+                                       "project": next(iter(projects)) if len(projects) == 1 else None,
+                                       "sort_project": min(projects & tracked),
+                                       "updated_at": wf_updated[wf["id"]]})
         loose = [i for i in view["issues"]
                  if i["workflow_id"] is None and i["project"] in tracked]
         # The workflow is the card: its computed state picks the column, and
@@ -859,9 +909,12 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
             kept = [i for i in loose if i["state"] != "done" or not old([i["id"]])]
             old_done = len(workflows) - len(kept_wf) + len(loose) - len(kept)
             workflows, loose = kept_wf, kept
-        columns = [(state, [w for w in workflows if w["state"] == state],
-                    [i for i in loose if i["state"] == state])
-                   for state in prefs["lanes"]]
+        tz = zone(prefs["timezone"]) or default_tz
+        columns = []
+        for state in prefs["lanes"]:
+            wfs = [w for w in workflows if w["state"] == state]
+            issues = [i for i in loose if i["state"] == state]
+            columns.append((state, wfs, issues, lane_groups(wfs, issues, view["now"], tz)))
         hidden = [s for s in core.TRANSITIONS if s not in prefs["lanes"]]
         return {"view": view, "columns": columns, "now": view["now"],
                 "tracked": prefs["projects"], "hidden": hidden,
