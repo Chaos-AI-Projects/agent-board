@@ -3218,7 +3218,8 @@ def test_ab19_a_hostile_bare_url_cannot_break_out_of_the_attribute():
 def test_ab19_a_backslash_cannot_smuggle_an_off_list_host():
     # Two backslashes in markdown are one literal backslash. A browser would read
     # it as `/`, so the link must carry it percent-encoded, which no browser accepts.
-    html = web.markdown(r"https://evil.example\\.github.com/x")
+    # The code span keeps the text markdown (AB-20); the plain path is tested there.
+    html = web.markdown(r"https://evil.example\\.github.com/x `c`")
     assert 'href="https://evil.example%5C.github.com/x"' in html
     assert "href=\"https://evil.example\\" not in html
 
@@ -3228,3 +3229,103 @@ def test_ab19_a_run_of_closing_parens_renders_in_linear_time():
     start = time.monotonic()
     web.markdown("https://github.com/" + ")" * 100_000)
     assert time.monotonic() - start < 1.0
+
+
+# --- AB-20: text that is not markdown renders verbatim ---------------------
+
+
+def plain(html):
+    """The verbatim block's inner HTML, or None if the text rendered as markdown."""
+    m = re.search(r'<div class="plain">(.*?)</div>', html, re.S)
+    return m and m.group(1)
+
+
+def test_ab20_plain_text_keeps_its_line_breaks_and_spacing():
+    assert plain(web.markdown("step one  done\nstep two\n\n\nlast")) == \
+        "step one  done\nstep two\n\n\nlast"
+
+
+@pytest.mark.parametrize("text", [
+    "a *stray star in a log",
+    "*x* and _y_ alone are not markdown",
+    "x = a_b_c * 2\nhr below\n\n---",
+    'Traceback:\n  File "/usr/lib/foo/__init__.py", line 3, in <module>\n    run(__main__)',
+])
+def test_ab20_emphasis_alone_does_not_count_as_markdown(text):
+    html = web.markdown(text)
+    assert plain(html) is not None
+    assert "<em>" not in html and "<strong>" not in html and "<hr" not in html
+
+
+@pytest.mark.parametrize("text", [
+    "# heading",
+    "title\n=====",
+    "- item",
+    "1. item",
+    "> quoted",
+    "```\nfenced\n```",
+    "    indented code",
+    "| a |\n|---|\n| 1 |",
+    "[t](https://example.com/a)",
+    "<https://example.com/a>",
+    "run `board next`",
+    "some **bold** text",
+    "~~dropped~~ kept",
+])
+def test_ab20_any_markdown_construct_renders_as_markdown(text):
+    assert plain(web.markdown(text)) is None
+
+
+def test_ab20_plain_text_is_escaped_and_hides_comments():
+    html = web.markdown('<script>alert(1)</script> & "q"\n<!-- hidden -->kept')
+    body = plain(html)
+    assert body == '&lt;script&gt;alert(1)&lt;/script&gt; &amp; &quot;q&quot;\nkept'
+    assert "<script" not in html
+
+
+def test_ab20_allowlisted_bare_urls_still_link_in_plain_text():
+    html = web.markdown("pr https://github.com/a/b.\nnot https://example.com/x")
+    body = plain(html)
+    assert body.startswith('pr <a href="https://github.com/a/b" '
+                           'rel="noopener noreferrer" target="_blank">https://github.com/a/b</a>.\n')
+    assert '<a href="https://example.com' not in html
+
+
+def test_ab20_a_plain_body_and_note_render_verbatim_on_the_page(board, client):
+    iid = ready(board, body="line 1\nline 2")
+    core.annotate(board, iid, "note a\nnote b", actor=CHAOS, actor_kind=HUMAN)
+    html = client.get(f"/issues/{iid}").text
+    assert '<div class="plain">line 1\nline 2</div>' in html
+    assert '<div class="plain">note a\nnote b</div>' in html
+
+
+def test_ab20_plain_text_is_styled_to_keep_whitespace(client):
+    css = client.get("/").text
+    assert re.search(r"\.plain\s*\{[^}]*white-space: pre-wrap", css)
+
+
+def test_ab20_a_body_of_only_a_comment_renders_nothing():
+    assert str(web.markdown("<!-- hidden -->\n")) == ""
+
+
+def test_ab20_a_nul_in_plain_text_is_replaced_as_markdown_would():
+    assert plain(web.markdown("x\x00y")) == "x\ufffdy"
+
+
+def test_ab20_a_backslash_cannot_smuggle_an_off_list_host_in_plain_text():
+    # Plain text keeps both backslashes, so the link carries %5C twice.
+    html = web.markdown(r"https://evil.example\\.github.com/x")
+    assert plain(html) is not None
+    assert 'href="https://evil.example%5C%5C.github.com/x"' in html
+
+
+@pytest.mark.parametrize("text", [
+    "see https://github.com/a/b and `x`",
+    "# h\n\nsee https://github.com/a/b",
+    "- see https://github.com/a/b",
+])
+def test_ab20_bare_urls_still_link_in_markdown_text(text):
+    html = web.markdown(text)
+    assert plain(html) is None
+    assert ('<a href="https://github.com/a/b" rel="noopener noreferrer" target="_blank">'
+            "https://github.com/a/b</a>") in html

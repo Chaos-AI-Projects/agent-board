@@ -154,6 +154,12 @@ subdomain of one. `BOARD_LINK_DOMAINS` sets the allowlist, comma-separated, and 
 `github.com,chaoseternal.net`. Other hosts stay plain text. `[text](url)` and `<url>` stay links for
 any domain.
 
+A body or note that uses no markdown renders verbatim instead, keeping its line breaks and spacing,
+so a pasted log reads as it was written. Markdown here means a heading, list, blockquote, fenced or
+indented code, table, link, code span, `**strong**` or `~~strike~~`. Single `*emphasis*` does not
+count, because a stray `*` in a log is the common case. Nor does `__strong__`, because that is how
+`__init__.py` in a traceback parses.
+
 Files can be attached from the new-issue form, the Edit issue form and the Note form. A note's
 files show under that note in the history, and the rest are listed under Attachments on the issue
 page. The web page is the only way to upload; the CLI and MCP server cannot. Two settings govern it:

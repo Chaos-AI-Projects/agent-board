@@ -153,17 +153,22 @@ def _allowed(url: str, domains: tuple[str, ...]) -> bool:
     return any(host == d or host.endswith("." + d) for d in domains)
 
 
-def _linkify_text(state, tok: Token, domains: tuple[str, ...]) -> list[Token]:
-    out, at, text = [], 0, tok.content
+def _bare_urls(text: str, domains: tuple[str, ...]):
+    """(start, end, href) for each bare URL in `text` that may become a link."""
     for m in _BARE_URL.finditer(text):
         url = _url_end(m.group(0))
-        href = state.md.normalizeLink(url)
-        if not (_allowed(url, domains) and state.md.validateLink(href)):
-            continue
+        href = _md.normalizeLink(url)
+        if _allowed(url, domains) and _md.validateLink(href):
+            yield m.start(), m.start() + len(url), href
+
+
+def _linkify_text(state, tok: Token, domains: tuple[str, ...]) -> list[Token]:
+    out, at, text = [], 0, tok.content
+    for start, end, href in _bare_urls(text, domains):
         for kind, tag, nesting, content in (
-            ("text", "", 0, text[at:m.start()]),
+            ("text", "", 0, text[at:start]),
             ("link_open", "a", 1, ""),
-            ("text", "", 0, url),
+            ("text", "", 0, text[start:end]),
             ("link_close", "a", -1, ""),
         ):
             if kind == "text" and not content:
@@ -173,7 +178,7 @@ def _linkify_text(state, tok: Token, domains: tuple[str, ...]) -> list[Token]:
             if kind == "link_open":
                 t.attrs = {"href": href, "rel": "noopener noreferrer", "target": "_blank"}
             out.append(t)
-        at = m.start() + len(url)
+        at = end
     if not out:
         return [tok]
     if at < len(text):
@@ -197,8 +202,53 @@ def _bare_links(state) -> None:
 _md.core.ruler.push("bare_links", _bare_links)
 
 
+# Text that uses none of these renders verbatim instead (AB-20), so a pasted log
+# keeps its line breaks. Single emphasis does not count: a stray * is the common
+# case. **strong** and ~~strike~~ read as written on purpose, but __strong__ does
+# not, because it is what `__init__.py` in a traceback parses as.
+_MARKDOWN_BLOCKS = frozenset({
+    "heading_open", "bullet_list_open", "ordered_list_open", "blockquote_open",
+    "fence", "code_block", "table_open",
+})
+_MARKDOWN_INLINE = frozenset({"code_inline", "s_open"})
+
+
+def _is_markdown(tokens: list[Token]) -> bool:
+    for tok in tokens:
+        if tok.type in _MARKDOWN_BLOCKS:
+            return True
+        for child in tok.children or ():
+            if child.type in _MARKDOWN_INLINE:
+                return True
+            if child.type == "strong_open" and child.markup == "**":
+                return True
+            # A bare URL the allowlist linked is not the author writing a link.
+            if child.type == "link_open" and child.markup != "linkify":
+                return True
+    return False
+
+
+def _plain(text: str) -> str:
+    """`text` escaped, comments dropped (AB-3), and allowlisted bare URLs linked."""
+    text = _COMMENT.sub("", text).strip("\n").replace("\0", "\ufffd")
+    if not text.strip():
+        return ""
+    out, at = [], 0
+    for start, end, href in _bare_urls(text, link_domains()):
+        out += [escapeHtml(text[at:start]),
+                f'<a href="{escapeHtml(href)}" rel="noopener noreferrer" target="_blank">'
+                f"{escapeHtml(text[start:end])}</a>"]
+        at = end
+    out.append(escapeHtml(text[at:]))
+    return f'<div class="plain">{"".join(out)}</div>'
+
+
 def markdown(text: str | None) -> Markup:
-    return Markup(_md.render(text or ""))
+    text, env = text or "", {}
+    tokens = _md.parse(text, env)
+    if text.strip() and not _is_markdown(tokens):
+        return Markup(_plain(text))
+    return Markup(_md.renderer.render(tokens, _md.options, env))
 
 
 def zone(name: str | None) -> ZoneInfo | None:
