@@ -72,6 +72,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.templating import Jinja2Templates
 from markdown_it import MarkdownIt
 from markdown_it.common.utils import escapeHtml
+from markdown_it.token import Token
 from markupsafe import Markup
 from mcp.server.auth.provider import construct_redirect_uri
 
@@ -88,7 +89,9 @@ PREFS_MAX_AGE = 365 * 24 * 3600
 TZ_ENV = "BOARD_TIMEZONE"
 ATTACH_DIR_ENV = "BOARD_ATTACHMENT_DIR"
 MAX_UPLOAD_ENV = "BOARD_MAX_UPLOAD_MB"
+LINK_DOMAINS_ENV = "BOARD_LINK_DOMAINS"
 DEFAULT_MAX_UPLOAD_MB = 25
+DEFAULT_LINK_DOMAINS = ("github.com", "chaoseternal.net")
 # Raster images only: an SVG can carry script, so it downloads like HTML does.
 INLINE_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
 UTC = ZoneInfo("UTC")
@@ -114,6 +117,84 @@ def _raw_html(self, tokens, idx, options, env):
 
 _md.add_render_rule("html_block", _raw_html)
 _md.add_render_rule("html_inline", _raw_html)
+
+
+# A bare http(s) URL becomes a link only when its host is on the allowlist or
+# under it (AB-19), so an agent cannot plant a clickable third-party URL just by
+# naming it. [text](url) and <url> are explicit, and stay links for any domain.
+_BARE_URL = re.compile(r"https?://[^\s<>]+", re.I)
+_TRAILING = ".,:;!?'\"*_~"
+
+
+def link_domains() -> tuple[str, ...]:
+    raw = os.environ.get(LINK_DOMAINS_ENV, "")
+    names = tuple(d.strip().lower().strip(".") for d in raw.split(",") if d.strip(" ."))
+    return names or DEFAULT_LINK_DOMAINS
+
+
+def _url_end(url: str) -> str:
+    """The URL without the sentence punctuation or unbalanced `)` after it."""
+    end, opens, closes = len(url), url.count("("), url.count(")")
+    while end:
+        if url[end - 1] in _TRAILING:
+            end -= 1
+        elif url[end - 1] == ")" and closes > opens:
+            end, closes = end - 1, closes - 1
+        else:
+            break
+    return url[:end]
+
+
+def _allowed(url: str, domains: tuple[str, ...]) -> bool:
+    try:
+        host = (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return False
+    return any(host == d or host.endswith("." + d) for d in domains)
+
+
+def _linkify_text(state, tok: Token, domains: tuple[str, ...]) -> list[Token]:
+    out, at, text = [], 0, tok.content
+    for m in _BARE_URL.finditer(text):
+        url = _url_end(m.group(0))
+        href = state.md.normalizeLink(url)
+        if not (_allowed(url, domains) and state.md.validateLink(href)):
+            continue
+        for kind, tag, nesting, content in (
+            ("text", "", 0, text[at:m.start()]),
+            ("link_open", "a", 1, ""),
+            ("text", "", 0, url),
+            ("link_close", "a", -1, ""),
+        ):
+            if kind == "text" and not content:
+                continue
+            t = Token(kind, tag, nesting, content=content, level=tok.level,
+                      markup="linkify" if tag else "", info="auto" if tag else "")
+            if kind == "link_open":
+                t.attrs = {"href": href, "rel": "noopener noreferrer", "target": "_blank"}
+            out.append(t)
+        at = m.start() + len(url)
+    if not out:
+        return [tok]
+    if at < len(text):
+        out.append(Token("text", "", 0, content=text[at:], level=tok.level))
+    return out
+
+
+def _bare_links(state) -> None:
+    domains = link_domains()
+    for block in state.tokens:
+        if block.type != "inline" or not block.children:
+            continue
+        children, depth = [], 0
+        for tok in block.children:
+            depth += {"link_open": 1, "link_close": -1}.get(tok.type, 0)
+            children.extend(_linkify_text(state, tok, domains)
+                            if tok.type == "text" and not depth else [tok])
+        block.children = children
+
+
+_md.core.ruler.push("bare_links", _bare_links)
 
 
 def markdown(text: str | None) -> Markup:

@@ -149,6 +149,11 @@ is neither a workflow step nor already planned also offers "Plan as workflow". E
 a `ready` step, as `plan` does. A step's page and a planned issue's page both show the workflow
 chart.
 
+A bare `https://` URL in a body or note becomes a link only when its host is on the allowlist or a
+subdomain of one. `BOARD_LINK_DOMAINS` sets the allowlist, comma-separated, and defaults to
+`github.com,chaoseternal.net`. Other hosts stay plain text. `[text](url)` and `<url>` stay links for
+any domain.
+
 Files can be attached from the new-issue form, the Edit issue form and the Note form. A note's
 files show under that note in the history, and the rest are listed under Attachments on the issue
 page. The web page is the only way to upload; the CLI and MCP server cannot. Two settings govern it:

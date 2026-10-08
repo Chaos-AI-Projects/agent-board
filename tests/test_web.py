@@ -33,6 +33,7 @@ def default_hosts(monkeypatch):
     monkeypatch.delenv(web.PORT_ENV, raising=False)
     monkeypatch.delenv(web.HOSTS_ENV, raising=False)
     monkeypatch.delenv(web.TZ_ENV, raising=False)
+    monkeypatch.delenv(web.LINK_DOMAINS_ENV, raising=False)
 
 
 @pytest.fixture
@@ -3134,3 +3135,96 @@ def test_ab18_rendered_tables_are_styled(client):
     css = client.get("/").text
     assert re.search(r"\.markdown table\s*\{[^}]*border-collapse", css)
     assert re.search(r"\.markdown (th|td)[^{]*\{[^}]*border", css)
+
+
+# --- AB-19: bare URLs on allowlisted domains render as links ---------------
+
+
+def links(html):
+    """Every rendered markdown link as (href, attributes, text)."""
+    return re.findall(r'<a href="([^"]*)"([^>]*)>([^<]*)</a>', html)
+
+
+def test_ab19_a_bare_github_url_in_a_body_and_a_note_is_a_link(board, client):
+    url = "https://github.com/ChaosEternal/memory-solution/pull/1"
+    iid = ready(board, body=f"see {url} today")
+    core.annotate(board, iid, f"merged {url}", actor=CHAOS, actor_kind=HUMAN)
+    found = [a for a in links(client.get(f"/issues/{iid}").text) if a[0] == url]
+    assert len(found) == 2
+    for _, attrs, text in found:
+        assert text == url
+        assert 'rel="noopener noreferrer"' in attrs
+
+
+@pytest.mark.parametrize("url", [
+    "https://web.chaoseternal.net/doc/x",
+    "http://chaoseternal.net/",
+    "https://GitHub.com/a/b",
+])
+def test_ab19_a_subdomain_http_and_any_case_host_are_linked(url):
+    assert f'<a href="{url}"' in web.markdown(f"x {url} y")
+
+
+@pytest.mark.parametrize("url", [
+    "https://example.com/a",
+    "https://evilgithub.com/a",
+    "https://github.com.evil.example/a",
+    "https://github.com@evil.example/a",
+    "ftp://github.com/a",
+])
+def test_ab19_a_bare_url_off_the_allowlist_stays_text(url):
+    assert "<a " not in web.markdown(f"x {url} y")
+
+
+def test_ab19_the_allowlist_comes_from_the_environment(monkeypatch):
+    monkeypatch.setenv(web.LINK_DOMAINS_ENV, " example.org , .Docs.Example ")
+    html = web.markdown("https://example.org/a https://www.docs.example/b https://github.com/c")
+    assert '<a href="https://example.org/a"' in html
+    assert '<a href="https://www.docs.example/b"' in html
+    assert '<a href="https://github.com/c"' not in html
+
+
+def test_ab19_explicit_links_still_work_for_any_domain():
+    html = web.markdown("[t](https://example.com/a) and <https://example.com/b>")
+    assert '<a href="https://example.com/a">t</a>' in html
+    assert '<a href="https://example.com/b">' in html
+
+
+@pytest.mark.parametrize("text, href", [
+    ("see https://github.com/a/b.", "https://github.com/a/b"),
+    ("(see https://github.com/a/b)", "https://github.com/a/b"),
+    ("https://github.com/a/b_(c), next", "https://github.com/a/b_(c)"),
+    ("is it https://github.com/a?", "https://github.com/a"),
+    ("https://github.com/a?x=1&y=2", "https://github.com/a?x=1&amp;y=2"),
+])
+def test_ab19_trailing_punctuation_is_not_part_of_the_link(text, href):
+    assert f'<a href="{href}"' in web.markdown(text)
+
+
+def test_ab19_a_url_in_code_or_already_in_a_link_is_not_linked_again():
+    html = web.markdown("`https://github.com/a`\n\n    https://github.com/b\n\n"
+                        "[https://github.com/c](https://github.com/d)")
+    assert "<code>https://github.com/a</code>" in html
+    assert "https://github.com/b\n</code>" in html
+    assert html.count("<a ") == 1
+
+
+def test_ab19_a_hostile_bare_url_cannot_break_out_of_the_attribute():
+    html = web.markdown('https://github.com/"onmouseover="alert(1)')
+    assert 'onmouseover="alert' not in html
+    assert "<script" not in web.markdown("https://github.com/<script>alert(1)</script>")
+
+
+def test_ab19_a_backslash_cannot_smuggle_an_off_list_host():
+    # Two backslashes in markdown are one literal backslash. A browser would read
+    # it as `/`, so the link must carry it percent-encoded, which no browser accepts.
+    html = web.markdown(r"https://evil.example\\.github.com/x")
+    assert 'href="https://evil.example%5C.github.com/x"' in html
+    assert "href=\"https://evil.example\\" not in html
+
+
+def test_ab19_a_run_of_closing_parens_renders_in_linear_time():
+    import time
+    start = time.monotonic()
+    web.markdown("https://github.com/" + ")" * 100_000)
+    assert time.monotonic() - start < 1.0
