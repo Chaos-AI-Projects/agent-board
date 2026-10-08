@@ -103,7 +103,8 @@ templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
 # fetch a third-party URL just by opening the issue.
 # The parser does see HTML, so it can tell a comment from text and code (AB-3):
 # a comment renders as nothing, any other tag as escaped text, as before.
-_md = MarkdownIt("commonmark", {"html": True}).disable("image")
+# Tables and ~~strikethrough~~ are GFM, which the commonmark preset leaves off (AB-18).
+_md = MarkdownIt("commonmark", {"html": True}).enable(["table", "strikethrough"]).disable("image")
 _COMMENT = re.compile(r"<!--.*?-->", re.S)
 
 

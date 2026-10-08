@@ -3103,3 +3103,34 @@ def test_ab17_hidden_old_done_cards_stay_out_of_the_groups(board, client):
     old, new = closed(board, "old", 15), closed(board, "new", 1)
     client.post("/preferences/done/hide")
     assert date_groups(client.get("/").text, "done") == [("Yesterday (1)", [new])]
+
+
+# --- AB-18: GFM tables and strikethrough -----------------------------------
+
+
+def test_ab18_a_pipe_table_renders_as_a_table(board, client):
+    iid = ready(board, body="| card | state |\n| --- | :-: |\n| AB-18 | ready |")
+    core.annotate(board, iid, "| a | b |\n|---|---|\n| 1 | 2 |", actor=CHAOS, actor_kind=HUMAN)
+    html = client.get(f"/issues/{iid}").text
+    assert html.count("<table>") == 2
+    assert "<th>card</th>" in html
+    assert '<td style="text-align:center">ready</td>' in html
+
+
+def test_ab18_strikethrough_renders(board, client):
+    iid = ready(board, body="~~dropped~~ kept")
+    assert "<s>dropped</s> kept" in client.get(f"/issues/{iid}").text
+
+
+def test_ab18_raw_html_in_a_table_cell_is_still_escaped(board, client):
+    iid = ready(board, body="| x |\n|---|\n| <script>alert(1)</script> ![t](https://t.example/t.png) |")
+    html = client.get(f"/issues/{iid}").text
+    assert "<table>" in html
+    assert "<script>alert" not in html and "&lt;script&gt;" in html
+    assert "<img" not in html
+
+
+def test_ab18_rendered_tables_are_styled(client):
+    css = client.get("/").text
+    assert re.search(r"\.markdown table\s*\{[^}]*border-collapse", css)
+    assert re.search(r"\.markdown (th|td)[^{]*\{[^}]*border", css)
