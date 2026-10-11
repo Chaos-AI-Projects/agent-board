@@ -22,6 +22,11 @@ error JSON plus the exit code the CLI would have used:
 Code 4 is lease lost and 5 a conflict, `LeaseHeld` included. Everything
 else is 1, as it is in the CLI. An argument that fails the tool's schema
 is the SDK's own error text, the counterpart of the CLI's usage error.
+
+With BOARD_BRAIN_DIR set, three read-only tools reach a brain checkout's
+KB and docs (AB-22): `brain_search`, `brain_read` and `brain_list`. They
+carry a `brain_` prefix because `search` already finds issues. Unset, the
+tools are absent rather than failing; board.brain has the rest.
 """
 
 from __future__ import annotations
@@ -36,6 +41,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent
 
 from board import cli, core, store
+from board.brain import Brain
 
 DEFAULT_TTL_MINUTES = core.DEFAULT_TTL.total_seconds() / 60
 
@@ -63,10 +69,16 @@ def _ttl(minutes: float) -> timedelta:
     return ttl
 
 
-def build_server(engine, actor: str | Callable[[], str]) -> FastMCP:
+_FROM_ENV = object()
+
+
+def build_server(engine, actor: str | Callable[[], str], brain=_FROM_ENV) -> FastMCP:
     """A server whose tools act on `engine` as the agent `actor`, or as whoever
-    `actor()` returns at each call."""
+    `actor()` returns at each call. `brain` defaults to Brain.from_env(), and
+    None leaves the brain tools out."""
     mcp = FastMCP("agent-board")
+    if brain is _FROM_ENV:
+        brain = Brain.from_env()
     current = actor if callable(actor) else (lambda: actor)
 
     def who() -> dict:
@@ -207,7 +219,35 @@ def build_server(engine, actor: str | Callable[[], str]) -> FastMCP:
         """Extend the lease on an issue this agent claimed."""
         return run(lambda: core.heartbeat(engine, id, current(), token, ttl=_ttl(ttl_minutes)))
 
+    if brain is not None:
+        _brain_tools(mcp, brain, run)
     return mcp
+
+
+def _brain_tools(mcp: FastMCP, brain: Brain, run) -> None:
+    @mcp.tool()
+    def brain_search(q: str, scope: str = "all") -> CallToolResult:
+        """Search the brain's markdown for files holding every word of `q`.
+
+        Matching is case-insensitive substring, not semantic; browse by
+        meaning from the KB's index.md instead. `scope` is kb, docs or all.
+        Returns up to 20 results, title and filename hits first, each with
+        path, title and up to 3 matching lines with their numbers.
+        """
+        return run(lambda: {"results": brain.search(q, scope)})
+
+    @mcp.tool()
+    def brain_read(path: str, scope: str = "all") -> CallToolResult:
+        """One markdown file's text, by the path brain_list or brain_search gave.
+
+        A path outside the scope's directories, or not ending .md, is refused.
+        """
+        return run(brain.read, path, scope)
+
+    @mcp.tool()
+    def brain_list(scope: str = "all") -> CallToolResult:
+        """Every markdown file in the scope (kb, docs or all), with its title."""
+        return run(lambda: {"files": brain.list(scope)})
 
 
 def main() -> int:

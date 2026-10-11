@@ -268,6 +268,26 @@ as a tool error whose text is the CLI's error JSON plus the exit code the CLI wo
   "env": {"BOARD_DATABASE_URL": "...", "BOARD_ACTOR": "overlord"}}}}
 ```
 
+### Brain KB and docs
+
+Both servers can also read a brain checkout's markdown, which is off until `BOARD_BRAIN_DIR` names
+the checkout. Three more tools then appear:
+
+- `brain_list` gives every `.md` file in the scope with its title.
+- `brain_search` gives up to 20 files holding every word of `q`, each with its path, its title and up
+  to 3 matching lines.
+- `brain_read` gives one file's text, by the path the other two returned.
+
+Each takes `scope`: `kb`, `docs` or `all`. `BOARD_KB_DIR` is the wiki, `kb/wiki` by default, and
+`BOARD_DOC_DIRS` is a colon-separated list of doc directories, both relative to the checkout. Only
+`.md` files under those directories are visible. A path is judged by where it resolves, so `..` and
+symlinks cannot reach past them. The tools are prefixed `brain_` because `search` already finds
+issues.
+
+Search keeps no index and scans the files on each query. Matching is case-insensitive substring,
+not semantic. Title and filename hits rank first, then total hits. An agent browsing by meaning
+starts from the wiki's `index.md`.
+
 ### Remote MCP
 
 `board-web` also serves the same tools over Streamable HTTP at `/mcp`, for a client such as a

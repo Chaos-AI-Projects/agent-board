@@ -12,6 +12,7 @@ import anyio
 from mcp.shared.memory import create_connected_server_and_client_session
 
 from board import core
+from board.brain import BRAIN_DIR_ENV, Brain
 from board.mcp_server import build_server
 
 WORKER = "worker-1"
@@ -67,7 +68,8 @@ def claimed(engine):
     return issue_id, claim["lease_token"]
 
 
-def test_the_tools_are_the_cli_operations(migrated):
+def test_the_tools_are_the_cli_operations(migrated, monkeypatch):
+    monkeypatch.delenv(BRAIN_DIR_ENV, raising=False)
     names = {t.name for t in list_tools(migrated)}
     assert names == {"next", "show", "transition", "annotate", "link", "create",
                      "instantiate", "heartbeat", "plan", "depend", "undepend",
@@ -263,3 +265,73 @@ def test_projects_lists_every_project_with_its_issue_count(migrated):
     assert ok(migrated, "projects") == {"projects": [
         {"key": "AB", "name": "agent-board", "issues": 0},
         {"key": "MS", "name": "memory-solution", "issues": 1}]}
+
+
+# --- the brain's KB and docs (AB-22) ---
+
+BRAIN_TOOLS = {"brain_search", "brain_read", "brain_list"}
+
+
+def brain_dir(tmp_path):
+    root = tmp_path / "brain"
+    (root / "kb/wiki").mkdir(parents=True)
+    (root / "plans").mkdir()
+    (root / "kb/wiki/index.md").write_text("# Index\n\nThe lease page.\n")
+    (root / "plans/fatigue.md").write_text("# Fatigue\n\nA lease, once.\n")
+    (root / "CLAUDE.md").write_text("# Secret\n\nlease\n")
+    return root
+
+
+def brain_call(root, tool, **arguments):
+    async def run():
+        server = build_server(None, WORKER, brain=Brain(root, doc_dirs=["plans"]))
+        async with create_connected_server_and_client_session(server) as client:
+            result = await client.call_tool(tool, arguments)
+        return result.isError, json.loads(result.content[0].text)
+
+    return anyio.run(run)
+
+
+def tool_names(server):
+    async def run():
+        async with create_connected_server_and_client_session(server) as client:
+            return {t.name for t in (await client.list_tools()).tools}
+
+    return anyio.run(run)
+
+
+def test_brain_tools_are_absent_while_board_brain_dir_is_unset(migrated, monkeypatch):
+    monkeypatch.delenv(BRAIN_DIR_ENV, raising=False)
+    assert not tool_names(build_server(migrated, WORKER)) & BRAIN_TOOLS
+
+
+def test_board_brain_dir_adds_the_brain_tools(migrated, monkeypatch, tmp_path):
+    monkeypatch.setenv(BRAIN_DIR_ENV, str(brain_dir(tmp_path)))
+    assert BRAIN_TOOLS <= tool_names(build_server(migrated, WORKER))
+
+
+def test_brain_list_by_scope(tmp_path):
+    root = brain_dir(tmp_path)
+    assert brain_call(root, "brain_list", scope="docs") == (
+        False, {"files": [{"path": "plans/fatigue.md", "title": "Fatigue"}]})
+    is_error, out = brain_call(root, "brain_list")
+    assert [f["path"] for f in out["files"]] == ["kb/wiki/index.md", "plans/fatigue.md"]
+
+
+def test_brain_search_returns_ranked_hits_with_lines(tmp_path):
+    is_error, out = brain_call(brain_dir(tmp_path), "brain_search", q="lease", scope="all")
+    assert not is_error
+    assert out["results"][0] == {"path": "kb/wiki/index.md", "title": "Index",
+                                 "lines": [{"line": 3, "text": "The lease page."}]}
+    assert [r["path"] for r in out["results"]] == ["kb/wiki/index.md", "plans/fatigue.md"]
+
+
+def test_brain_read_returns_the_page(tmp_path):
+    is_error, out = brain_call(brain_dir(tmp_path), "brain_read", path="kb/wiki/index.md")
+    assert (is_error, out["text"]) == (False, "# Index\n\nThe lease page.\n")
+
+
+def test_brain_read_outside_the_named_directories_is_code_1(tmp_path):
+    is_error, out = brain_call(brain_dir(tmp_path), "brain_read", path="kb/wiki/../../CLAUDE.md")
+    assert is_error
+    assert (out["error"], out["code"]) == ("BrainError", 1)
