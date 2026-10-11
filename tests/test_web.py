@@ -3329,3 +3329,41 @@ def test_ab20_bare_urls_still_link_in_markdown_text(text):
     assert plain(html) is None
     assert ('<a href="https://github.com/a/b" rel="noopener noreferrer" target="_blank">'
             "https://github.com/a/b</a>") in html
+
+
+# --- AB-24: reopening a done card ---------------------------------------------------
+
+
+def finished_card(engine):
+    iid = ready(engine)
+    claim = core.next(engine, "run-2")
+    core.transition(engine, iid, "done", note="merged", actor="run-2", actor_kind=AGENT,
+                    token=claim["lease_token"])
+    return iid
+
+
+def test_ab24_a_done_card_offers_reopen_and_reopening_sends_it_to_ready(board, client):
+    iid = finished_card(board)
+    page = client.get(f"/issues/{iid}", headers=AS_CHAOS).text
+    form = re.search(rf'<form[^>]*action="/issues/{iid}/reopen[^"]*".*?</form>', page, re.S)
+    assert form and re.search(r'<textarea name="note" required', form.group(0))
+    r = client.post(f"/issues/{iid}/reopen", data={"note": "the fix regressed"},
+                    headers=AS_CHAOS)
+    assert r.status_code == 303
+    issue = core.show(board, iid)
+    assert issue["state"] == "ready"
+    last = issue["events"][-1]
+    assert (last["actor"], last["from_state"], last["note"]) == (
+        CHAOS, "done", "the fix regressed")
+
+
+def test_ab24_reopen_without_a_reason_is_refused(board, client):
+    iid = finished_card(board)
+    r = client.post(f"/issues/{iid}/reopen", data={"note": "  "}, headers=AS_CHAOS)
+    assert r.status_code == 422
+    assert core.show(board, iid)["state"] == "done"
+
+
+def test_ab24_only_a_done_card_offers_reopen(board, client):
+    iid = ready(board)
+    assert f"/issues/{iid}/reopen" not in client.get(f"/issues/{iid}", headers=AS_CHAOS).text

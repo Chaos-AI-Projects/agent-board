@@ -1671,3 +1671,180 @@ def test_ab13_without_a_done_event_the_finish_time_falls_back_to_updated_at(boar
         s.execute(store.Event.__table__.delete().where(store.Event.issue_id == i))
         updated = s.get(store.Issue, i).updated_at
     assert core.done_times(board)[i] == core._iso(updated)
+
+
+# --- AB-24: reopening a done card ---------------------------------------------------
+
+
+def done_card(engine, title="x", worker="w1", **kw):
+    """A card an agent claimed and closed itself, as AB-23 runs it."""
+    i = ready(engine, title, **kw)
+    claim = core.next(engine, worker)
+    assert claim["issue"]["id"] == i
+    core.transition(engine, i, "done", note="merged", actor=worker, actor_kind=AGENT,
+                    token=claim["lease_token"])
+    return i
+
+
+def reopen(engine, i, note="the fix regressed", actor=CHAOS, actor_kind=HUMAN):
+    return core.transition(engine, i, "ready", note=note, actor=actor, actor_kind=actor_kind)
+
+
+def test_ab24_a_human_reopens_a_done_card_with_a_reason(board):
+    i = done_card(board)
+    issue = reopen(board, i)
+    assert issue["state"] == "ready"
+    last = issue["events"][-1]
+    assert (last["kind"], last["from_state"], last["to_state"], last["note"]) == (
+        "transition", "done", "ready", "the fix regressed")
+    assert core.next(board, "w2")["issue"]["id"] == i
+
+
+def test_ab24_reopening_needs_a_note(board):
+    i = done_card(board)
+    for note in (None, ""):
+        with pytest.raises(core.NoteRequired):
+            reopen(board, i, note=note)
+    assert core.show(board, i)["state"] == "done"
+
+
+def test_ab24_an_agent_reopens_a_done_card_without_a_lease(board):
+    i = done_card(board, worker="w1")
+    issue = reopen(board, i, actor="w2", actor_kind=AGENT)
+    assert issue["state"] == "ready"
+    assert (issue["events"][-1]["actor"], issue["events"][-1]["actor_kind"]) == ("w2", AGENT)
+
+
+def test_ab24_done_reopens_only_to_ready(board):
+    i = done_card(board)
+    for state in ("backlog", "onhold", "need-input", "processing", "cancelled"):
+        with pytest.raises((core.InvalidTransition, core.LeaseLost)):
+            core.transition(board, i, state, note="x", actor=CHAOS, actor_kind=HUMAN)
+    assert core.show(board, i)["state"] == "done"
+
+
+def test_ab24_cancelled_stays_final(board):
+    i = ready(board)
+    core.transition(board, i, "cancelled", actor=CHAOS, actor_kind=HUMAN)
+    with pytest.raises(core.InvalidTransition):
+        reopen(board, i)
+    with pytest.raises(core.LeaseLost):
+        reopen(board, i, actor="w1", actor_kind=AGENT)
+
+
+def test_ab24_reopening_lifts_a_closing_artifact_so_next_hands_it_out(board):
+    i = ready(board)
+    claim = core.next(board, "w1")
+    core.link(board, i, "https://example.com/pr/1", kind="pr", closes=True, actor="w1",
+              actor_kind=AGENT, token=claim["lease_token"])
+    core.transition(board, i, "done", note="merged", actor="w1", actor_kind=AGENT,
+                    token=claim["lease_token"])
+    issue = reopen(board, i)
+    assert issue["closed_by_artifact"] is False
+    assert [a["ref"] for a in issue["artifacts"]] == ["https://example.com/pr/1"]
+    assert core.next(board, "w2")["issue"]["id"] == i
+
+
+def test_ab24_done_times_report_the_latest_close_after_a_reopen(board):
+    i = done_card(board)
+    age_done(board, i, 30)
+    first = core.done_times(board)[i]
+    reopen(board, i)
+    assert i not in core.done_times(board)
+    claim = core.next(board, "w2")
+    core.transition(board, i, "done", note="fixed again", actor="w2", actor_kind=AGENT,
+                    token=claim["lease_token"])
+    with store.session(board) as s:
+        latest = s.scalar(select(func.max(store.Event.at))
+                          .where(store.Event.issue_id == i, store.Event.to_state == "done"))
+    times = core.done_times(board)
+    assert times[i] == core._iso(latest) and times[i] != first
+
+
+def test_ab24_a_reopened_card_blocks_a_dependent_that_has_not_started(board):
+    blocker = done_card(board, "blocker", rank=20)
+    waiting = ready(board, "waiting", rank=10)
+    depend(board, waiting, blocker)
+    reopen(board, blocker)
+    claim = core.next(board, "w2")
+    assert claim["issue"]["id"] == blocker, "the dependent waits again"
+    assert core.next(board, "w3") is None
+
+
+def test_ab24_a_reopened_card_does_not_block_a_dependent_already_started(board):
+    blocker = done_card(board, "blocker", rank=20)
+    started = ready(board, "started", rank=10)
+    depend(board, started, blocker)
+    claim = core.next(board, "w2")
+    assert claim["issue"]["id"] == started
+    # A checkpoint hands the started card back to the queue.
+    core.transition(board, started, "ready", note="checkpoint", actor="w2", actor_kind=AGENT,
+                    token=claim["lease_token"])
+    reopen(board, blocker)
+    assert core.next(board, "w3")["issue"]["id"] == started
+
+
+def test_ab24_a_started_dependent_with_a_lapsed_lease_is_still_reclaimed(board):
+    blocker = done_card(board, "blocker", rank=20)
+    started = ready(board, "started", rank=10)
+    depend(board, started, blocker)
+    core.next(board, "w2", ttl=timedelta(seconds=-1))
+    reopen(board, blocker)
+    assert core.next(board, "w3")["issue"]["id"] == started
+
+
+def test_ab24_a_reopened_step_blocks_later_steps_not_yet_started(board):
+    core.create_template(board, "pair", "Pair", ["first", "second"])
+    steps = core.instantiate(board, "pair", "MS", actor=CHAOS, actor_kind=HUMAN)["steps"]
+    claim = core.next(board, "w1")
+    core.transition(board, steps[0]["id"], "done", note="did it", actor="w1",
+                    actor_kind=AGENT, token=claim["lease_token"])
+    reopen(board, steps[0]["id"])
+    assert core.next(board, "w2")["issue"]["id"] == steps[0]["id"]
+    assert core.next(board, "w3") is None
+
+
+def planned_origin(engine):
+    """An origin planned as one step, that step done, so the origin is back in ready."""
+    iid, token = claimed(engine)
+    step = plan(engine, iid, token, steps=("a",))["plan"]["steps"][0]["id"]
+    claim = core.next(engine, "w2")
+    core.transition(engine, step, "done", note="did a", actor="w2", actor_kind=AGENT,
+                    token=claim["lease_token"])
+    assert core.show(engine, iid)["state"] == "ready"
+    return iid, step
+
+
+def test_ab24_a_reopened_step_sends_a_resumed_origin_back_to_waiting(board):
+    iid, step = planned_origin(board)
+    reopen(board, step)
+    origin = core.show(board, iid)
+    assert origin["state"] == "onhold"
+    last = origin["events"][-1]
+    assert (last["from_state"], last["to_state"], last["actor_kind"]) == (
+        "ready", "onhold", "system")
+    assert step in last["note"]
+    # The step done again resumes the origin as before.
+    claim = core.next(board, "w3")
+    assert claim["issue"]["id"] == step
+    core.transition(board, step, "done", note="did a again", actor="w3", actor_kind=AGENT,
+                    token=claim["lease_token"])
+    assert core.show(board, iid)["state"] == "ready"
+
+
+@pytest.mark.parametrize("close_origin", [False, True])
+def test_ab24_a_reopened_step_leaves_a_started_origin_where_it_is(board, close_origin):
+    iid, step = planned_origin(board)
+    claim = core.next(board, "w3")
+    assert claim["issue"]["id"] == iid
+    if close_origin:
+        core.transition(board, iid, "done", note="checked", actor="w3", actor_kind=AGENT,
+                        token=claim["lease_token"])
+    before = core.show(board, iid)
+    reopen(board, step)
+    origin = core.show(board, iid)
+    assert origin["state"] == before["state"]
+    assert origin["lease_holder"] == before["lease_holder"]
+    last = origin["events"][-1]
+    assert (last["kind"], last["actor_kind"]) == ("annotate", "system")
+    assert step in last["note"]

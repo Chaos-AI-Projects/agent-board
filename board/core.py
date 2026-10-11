@@ -34,16 +34,19 @@ DEFAULT_TTL = timedelta(minutes=90)
 # `backlog`, so a human must authorize the item again. An answer can finish
 # the work outright, so `need-input` reaches `done` too (AB-8). An agent
 # closes its own finished card (AB-23, superseding AB-9's human-only close).
+# A done card reopens to `ready`, with a reason, by any actor (AB-24).
 TRANSITIONS: dict[str, set[str]] = {
     "backlog": {"ready", "onhold", "cancelled"},
     "ready": {"onhold", "cancelled"},
     "need-input": {"ready", "onhold", "done", "cancelled"},
     "processing": {"done", "need-input", "ready"},
     "onhold": {"backlog"},
-    "done": set(),
+    "done": {"ready"},
     "cancelled": set(),
 }
 NOTE_REQUIRED = {"done", "need-input"}
+# A move that needs a note though its target state does not: the reason for a reopen.
+NOTE_REQUIRED_MOVES = {("done", "ready")}
 # One line per lane, shown under its column heading and beside an issue's
 # state, so the board explains itself. Keys match TRANSITIONS, in its order.
 LANE_HINTS: dict[str, str] = {
@@ -56,8 +59,8 @@ LANE_HINTS: dict[str, str] = {
                   "a card here.",
     "onhold": "Frozen; exits only to backlog. A card split into a workflow waits here "
               "and returns to ready when the last step is done.",
-    "done": "Finished, with a required note such as a PR. Final. The agent that "
-            "finished a card closes it.",
+    "done": "Finished, with a required note such as a PR. The agent that finished "
+            "a card closes it. Reopening sends it back to ready with a reason.",
     "cancelled": "Dropped. Final.",
 }
 CREATE_STATES = {"backlog", "ready"}
@@ -415,7 +418,7 @@ def transition(engine, issue_id: str, state: str, *, actor: str, actor_kind: str
         issue = _get(s, issue_id, lock=True)
         now = store.db_now(s)
         if actor_kind == "agent" and issue.lease_holder is None:
-            if not _left_by(s, issue, actor, state):
+            if not (_left_by(s, issue, actor, state) or _reopens(issue, state)):
                 raise LeaseLost(f"{issue.id}: an agent moves an issue only under a lease")
         else:
             _guard(s, issue, actor, actor_kind, token, now, preempt, None)
@@ -954,7 +957,8 @@ def _candidates(now, project):
             ~exists().where(Artifact.issue_id == Issue.id, Artifact.closes.is_(True)),
             ~exists().where(Dependency.issue_id == Issue.id,
                             blocker.id == Dependency.depends_on_id,
-                            blocker.state != "done"),
+                            blocker.state != "done",
+                            ~_started_after_done(Issue, blocker)),
             or_(
                 Issue.workflow_id.is_(None),
                 # A step of a workflow that declares dependencies waits only
@@ -963,7 +967,8 @@ def _candidates(now, project):
                                Dependency.issue_id == sibling.id),
                 ~exists().where(earlier.workflow_id == Issue.workflow_id,
                                 earlier.position < Issue.position,
-                                earlier.state != "done"),
+                                earlier.state != "done",
+                                ~_started_after_done(Issue, earlier)),
             ),
         )
         .order_by(Issue.rank, Issue.id)
@@ -973,6 +978,22 @@ def _candidates(now, project):
     if project is not None:
         q = q.where(Issue.project_key == project)
     return q
+
+
+def _started_after_done(issue, blocker):
+    """Whether `issue` was claimed after `blocker` last went done (AB-24).
+
+    A reopened blocker holds back only the issues that have not started on
+    the strength of it. Events are compared by id: imported ones share an `at`.
+    Nested two levels deep, it must correlate `issue` explicitly, or the
+    subquery lists the issue table afresh and matches any claim at all.
+    """
+    claimed, arrived = aliased(Event), aliased(Event)
+    return exists().where(
+        claimed.issue_id == issue.id, claimed.kind.in_(("claim", "reclaim")),
+        arrived.issue_id == blocker.id, arrived.to_state == "done",
+        or_(arrived.from_state.is_(None), arrived.from_state != "done"),
+        claimed.id > arrived.id).correlate_except(claimed, arrived)
 
 
 def _create(s, project, title, actor, actor_kind, body, state, rank, labels,
@@ -1002,6 +1023,8 @@ def _apply_state(s, issue, state, note, actor, actor_kind, now, key, key_used):
     if state in NOTE_REQUIRED and not note:
         raise NoteRequired(f"a transition into {state} needs a note")
     old = issue.state
+    if (old, state) in NOTE_REQUIRED_MOVES and not note:
+        raise NoteRequired(f"{issue.id}: a move from {old} to {state} needs a note")
     if state != old:
         if state not in TRANSITIONS[old]:
             raise InvalidTransition(f"{issue.id}: {old} -> {state} is not allowed")
@@ -1014,7 +1037,50 @@ def _apply_state(s, issue, state, note, actor, actor_kind, now, key, key_used):
                 None if key_used else key)
     if state == "done" and old != "done":
         _resume_origin(s, issue, now)
+    if _reopened(old, state):
+        _reopen(s, issue, actor, now)
     return ev
+
+
+def _reopens(issue, state):
+    """Whether moving `issue` to `state` reopens it, which needs no lease (AB-24)."""
+    return _reopened(issue.state, state)
+
+
+def _reopened(old, state):
+    return old == "done" and state == "ready"
+
+
+def _reopen(s, issue, actor, now):
+    """What reopening a done card undoes beyond its own state (AB-24).
+
+    A closing artifact would hide the card from `next`, so it stops closing;
+    the artifact stays. A reopened step sends a plan origin that came back
+    to `ready` and nobody has claimed since back to `onhold`, to wait for
+    the step again; any other origin stays where it is, with a note.
+    Dependents need nothing here: `next` judges them, in `_candidates`.
+    """
+    for a in issue.artifacts:
+        a.closes = False
+    wf = issue.workflow
+    if wf is None or wf.origin_issue_id is None:
+        return
+    origin = _get(s, wf.origin_issue_id, lock=True)
+    note = f"step {issue.id} of workflow {wf.id} was reopened by {actor}"
+    entered = s.scalars(select(Event)
+                        .where(Event.issue_id == origin.id, Event.kind == "transition",
+                               Event.to_state == "ready")
+                        .order_by(Event.id.desc()).limit(1)).first()
+    # Resumed, not since claimed and handed back by a checkpoint.
+    if origin.state == "ready" and entered is not None and entered.from_state == "onhold":
+        origin.state = "onhold"
+        origin.version += 1
+        origin.updated_at = now
+        _event(s, origin.id, now, "board", "system", "transition", "ready", "onhold",
+               f"{note}; this waits for it again", None)
+    elif origin.state != "onhold":
+        _event(s, origin.id, now, "board", "system", "annotate", None, None,
+               f"{note}; this stays {origin.state}", None)
 
 
 def _left_by(s, issue, actor, state):

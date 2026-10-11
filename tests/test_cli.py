@@ -414,3 +414,15 @@ def test_create_batch_rejects_malformed_json_as_code_1(url):
     proc = board(url, "create-batch", "-", stdin="{not json")
     assert proc.returncode == 1
     assert "error" in json.loads(proc.stderr)
+
+
+def test_ab24_an_agent_reopens_a_done_card_without_a_token(url):
+    issue_id = ready(url)
+    token = claim(url)["lease_token"]
+    ok(board(url, "transition", issue_id, "done", "--note", "merged", "--token", token))
+    refused = board(url, "transition", issue_id, "ready")
+    assert refused.returncode != 0
+    assert json.loads(refused.stderr)["error"] == "NoteRequired"
+    out = ok(board(url, "transition", issue_id, "ready", "--note", "regressed"))
+    assert out["state"] == "ready"
+    assert claim(url, actor="worker-2")["issue"]["id"] == issue_id

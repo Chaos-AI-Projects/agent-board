@@ -103,6 +103,15 @@
 </form>
 </details>
 
+{% if issue.state == "done" %}
+<h2>Reopen</h2>
+<form autocomplete="off" method="post" action="/issues/{{ issue.id }}/reopen{{ embed_q }}">
+  <textarea name="note" required placeholder="Why it needs more work"></textarea>
+  <button>Reopen</button>
+  <div>Sends this card back to ready, where board next hands it out again. The reason goes in its history.</div>
+</form>
+{% endif %}
+
 <h2>Note</h2>
 <form autocomplete="off" method="post" action="/issues/{{ issue.id }}/note{{ embed_q }}" enctype="multipart/form-data">
   <input type="hidden" name="version" value="{{ issue.version }}">
@@ -115,7 +124,8 @@
 </form>
 <script>
   // Without JS the note is always required and the button reads Save. With it,
-  // an unchanged state is a plain note ("Add note"); a changed one may go without.
+  // an unchanged state is a plain note ("Add note"); a changed one may go without,
+  // except leaving done, which is a reopen and needs its reason (AB-24).
   (function () {
     var select = document.querySelector("select[data-current]");
     if (!select) return;
@@ -123,7 +133,7 @@
     var button = form.querySelector("button");
     function sync() {
       var moving = select.value !== select.dataset.current;
-      note.required = !moving;
+      note.required = !moving || select.dataset.current === "done";
       button.textContent = moving ? "Save" : "Add note";
     }
     select.addEventListener("change", sync);

@@ -97,7 +97,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--assignee")
 
     sp = op("transition", help="move an issue to another state; an agent closes its "
-                               "own card, and one it left at need-input needs no lease")
+                               "own card, and one it left at need-input needs no lease; "
+                               "done reopens to ready with a --note, no lease needed")
     sp.add_argument("id")
     sp.add_argument("state")
     sp.add_argument("--note")

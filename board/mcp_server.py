@@ -134,7 +134,8 @@ def build_server(engine, actor: str | Callable[[], str], brain=_FROM_ENV) -> Fas
         """Move an issue to another state. `done` and `need-input` need a note.
 
         An agent closes its own card as `done`. A card it left at `need-input`
-        it may still move to `done` or `cancelled` without a lease.
+        it may still move to `done` or `cancelled` without a lease. A `done`
+        card reopens to `ready` with a note giving the reason, no lease needed.
         """
         return run(core.transition, engine, id, state, note=note, token=token,
                    request_id=request_id, preempt=preempt, **who())

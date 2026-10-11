@@ -1319,6 +1319,15 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
                   actor_kind=me.kind, closes=f.get("closes") == "1")
         return back(issue_id, request)
 
+    @app.post("/issues/{issue_id}/reopen")
+    async def reopen(request: Request, issue_id: str):
+        """Send a done card back to ready, the note its required reason (AB-24)."""
+        me = await run_in_threadpool(actor, request)
+        f = await request.form()
+        core.transition(engine, issue_id, "ready", note=(f.get("note") or "").strip() or None,
+                        actor=me.email, actor_kind=me.kind)
+        return back(issue_id, request)
+
     @app.post("/issues/{issue_id}/release")
     def release(request: Request, issue_id: str):
         """Hand a card back to the queue. Refused under someone else's lease."""

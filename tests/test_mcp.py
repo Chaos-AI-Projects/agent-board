@@ -335,3 +335,13 @@ def test_brain_read_outside_the_named_directories_is_code_1(tmp_path):
     is_error, out = brain_call(brain_dir(tmp_path), "brain_read", path="kb/wiki/../../CLAUDE.md")
     assert is_error
     assert (out["error"], out["code"]) == ("BrainError", 1)
+
+
+def test_ab24_an_agent_reopens_a_done_card_without_a_token(migrated):
+    issue_id, token = claimed(board(migrated))
+    ok(migrated, "transition", id=issue_id, state="done", note="merged", token=token)
+    err = failed(migrated, "transition", id=issue_id, state="ready")
+    assert err["error"] == "NoteRequired"
+    out = ok(migrated, "transition", id=issue_id, state="ready", note="regressed")
+    assert out["state"] == "ready"
+    assert out["events"][-1]["actor"] == WORKER
