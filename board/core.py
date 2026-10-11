@@ -32,9 +32,8 @@ DEFAULT_TTL = timedelta(minutes=90)
 # Design section 3, under the lane names of MS-632, in board column order.
 # `processing` is entered only by `next`, and a lifted hold returns to
 # `backlog`, so a human must authorize the item again. An answer can finish
-# the work outright, so `need-input` reaches `done` too (AB-8). A human
-# closes every card that is not a workflow step: an agent finishes a
-# standalone card or a plan origin at `need-input` (AB-9).
+# the work outright, so `need-input` reaches `done` too (AB-8). An agent
+# closes its own finished card (AB-23, superseding AB-9's human-only close).
 TRANSITIONS: dict[str, set[str]] = {
     "backlog": {"ready", "onhold", "cancelled"},
     "ready": {"onhold", "cancelled"},
@@ -57,8 +56,8 @@ LANE_HINTS: dict[str, str] = {
                   "a card here.",
     "onhold": "Frozen; exits only to backlog. A card split into a workflow waits here "
               "and returns to ready when the last step is done.",
-    "done": "Finished, with a required note such as a PR. Final. Only a human closes a "
-            "card here, except a workflow step, which its agent closes.",
+    "done": "Finished, with a required note such as a PR. Final. The agent that "
+            "finished a card closes it.",
     "cancelled": "Dropped. Final.",
 }
 CREATE_STATES = {"backlog", "ready"}
@@ -416,8 +415,10 @@ def transition(engine, issue_id: str, state: str, *, actor: str, actor_kind: str
         issue = _get(s, issue_id, lock=True)
         now = store.db_now(s)
         if actor_kind == "agent" and issue.lease_holder is None:
-            raise LeaseLost(f"{issue.id}: an agent moves an issue only under a lease")
-        _guard(s, issue, actor, actor_kind, token, now, preempt, None)
+            if not _left_by(s, issue, actor, state):
+                raise LeaseLost(f"{issue.id}: an agent moves an issue only under a lease")
+        else:
+            _guard(s, issue, actor, actor_kind, token, now, preempt, None)
         _apply_state(s, issue, state, note, actor, actor_kind, now, key, key_used=False)
         return _view(s, issue)
 
@@ -1004,9 +1005,6 @@ def _apply_state(s, issue, state, note, actor, actor_kind, now, key, key_used):
     if state != old:
         if state not in TRANSITIONS[old]:
             raise InvalidTransition(f"{issue.id}: {old} -> {state} is not allowed")
-        if state == "done" and actor_kind == "agent" and issue.workflow_id is None:
-            raise InvalidTransition(f"{issue.id}: only a human closes a card that is not a "
-                                    "workflow step; move it to need-input with a review note")
         issue.state = state
         if old == "processing":
             issue.lease_holder = issue.lease_token = issue.lease_expires_at = None
@@ -1017,6 +1015,22 @@ def _apply_state(s, issue, state, note, actor, actor_kind, now, key, key_used):
     if state == "done" and old != "done":
         _resume_origin(s, issue, now)
     return ev
+
+
+def _left_by(s, issue, actor, state):
+    """Whether `actor`, an agent, may finish this need-input card without a lease.
+
+    Entering need-input drops the lease, so a card an agent parked there for
+    review before AB-23 could never be closed by it. The agent that made the
+    latest move into need-input may still close or cancel it; nothing else.
+    """
+    if issue.state != "need-input" or state not in {"done", "cancelled"}:
+        return False
+    last = s.scalars(select(Event)
+                     .where(Event.issue_id == issue.id, Event.kind == "transition",
+                            Event.to_state == "need-input")
+                     .order_by(Event.id.desc()).limit(1)).first()
+    return last is not None and last.actor == actor and last.actor_kind == "agent"
 
 
 def _release_answered(s, issue, actor, actor_kind, now):
@@ -1050,8 +1064,8 @@ def _resume_origin(s, step, now):
     origin.version += 1
     origin.updated_at = now
     _event(s, origin.id, now, "board", "system", "transition", "onhold", "ready",
-           f"every step of workflow {wf.id} is done; check the result and move this to "
-           "need-input for a human to close", None)
+           f"every step of workflow {wf.id} is done; check the result and close this",
+           None)
 
 
 def _guard(s, issue, actor, actor_kind, token, now, preempt, key):

@@ -23,8 +23,9 @@ MCP in `board.oauth` and `board.remote`.
 except `heartbeat`, which only moves a lease expiry, and an `edit` whose form changed nothing.
 `plan` breaks an issue into a workflow of `ready` steps the caller lists. The issue goes `onhold`
 and returns to `ready` when the last step is done, so `next` hands it back to be checked.
-An agent closes a workflow step itself, but only a human closes any other card, a plan's origin
-included. An agent finishes one by moving it to `need-input` with a review note (AB-9).
+An agent closes its own finished card, a plan's origin included (AB-23, which replaced AB-9's
+human-only close). Entering `need-input` drops the lease, so the agent that made the latest move
+into `need-input` may still take that card to `done` or `cancelled` without one, and to nothing else.
 `create_batch` creates several issues in one transaction, all or nothing. Each item may list `after`:
 other items by 0-based index or `ref`, or existing issue ids, which become dependencies. With
 `workflow_title` the items become a new workflow in list order. The CLI is `board create-batch FILE`,

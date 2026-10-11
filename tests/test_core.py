@@ -175,16 +175,6 @@ def test_a_human_closes_a_need_input_card_as_done(board):
         "done", "need-input", "done")
 
 
-def test_an_agent_cannot_close_a_need_input_card(board):
-    iid = ready(board)
-    tok = core.next(board, "w1")["lease_token"]
-    core.transition(board, iid, "need-input", note="q", actor="w1", actor_kind=AGENT,
-                    token=tok)
-    with pytest.raises(core.LeaseLost):
-        core.transition(board, iid, "done", note="d", actor="w1", actor_kind=AGENT,
-                        token=tok)
-
-
 def asking(engine):
     """A card an agent has parked at need-input with a question."""
     iid = ready(engine)
@@ -251,24 +241,16 @@ def test_ab10_a_human_note_replayed_moves_once(board):
         "the create and one release, not two releases"
 
 
-def test_an_agent_cannot_close_a_standalone_card(board):
-    """AB-9, option B: a standalone card waits at need-input for a human to close it."""
+def test_an_agent_closes_its_own_card(board):
+    """AB-23, superseding AB-9: an agent closes a standalone card under its lease."""
     iid = ready(board)
     tok = core.next(board, "w1")["lease_token"]
-    with pytest.raises(core.InvalidTransition, match="need-input"):
-        core.transition(board, iid, "done", note="shipped", actor="w1", actor_kind=AGENT,
-                        token=tok)
-    issue = core.show(board, iid)
-    assert (issue["state"], issue["lease_holder"]) == ("processing", "w1")
-    core.transition(board, iid, "need-input", note="PR #1 merged, please review",
-                    actor="w1", actor_kind=AGENT, token=tok)
-    issue = core.transition(board, iid, "done", note="reviewed", actor=CHAOS,
-                            actor_kind=HUMAN)
-    assert issue["state"] == "done"
+    issue = core.transition(board, iid, "done", note="PR #1 merged", actor="w1",
+                            actor_kind=AGENT, token=tok)
+    assert (issue["state"], issue["lease_holder"]) == ("done", None)
 
 
 def test_an_agent_closes_a_workflow_step_itself(board):
-    """AB-9, option B: a step of a workflow is not a card a human must close."""
     core.create_template(board, "solo", "Solo", ["only"])
     step = core.instantiate(board, "solo", "MS", actor=CHAOS, actor_kind=HUMAN)["steps"][0]
     claim = core.next(board, "w1")
@@ -277,8 +259,8 @@ def test_an_agent_closes_a_workflow_step_itself(board):
     assert issue["state"] == "done"
 
 
-def test_an_agent_cannot_close_a_plan_origin(board):
-    """AB-9, option B: the card a workflow was planned from waits for a human too."""
+def test_an_agent_closes_a_plan_origin(board):
+    """AB-23: the origin comes back to ready and the agent that checks it closes it."""
     iid = ready(board, "big job")
     tok = core.next(board, "w1")["lease_token"]
     core.plan(board, iid, [{"title": "a"}], actor="w1", actor_kind=AGENT, token=tok)
@@ -288,13 +270,66 @@ def test_an_agent_cannot_close_a_plan_origin(board):
     claim = core.next(board, "w3")
     assert claim["issue"]["id"] == iid
     resumed = [e for e in claim["issue"]["events"] if e["to_state"] == "ready"][-1]
-    assert "need-input" in resumed["note"] and "close this" not in resumed["note"]
-    with pytest.raises(core.InvalidTransition, match="need-input"):
-        core.transition(board, iid, "done", note="all steps done", actor="w3",
-                        actor_kind=AGENT, token=claim["lease_token"])
-    core.transition(board, iid, "need-input", note="all steps done, please review",
-                    actor="w3", actor_kind=AGENT, token=claim["lease_token"])
+    assert "for a human to close" not in resumed["note"]
+    issue = core.transition(board, iid, "done", note="all steps done", actor="w3",
+                            actor_kind=AGENT, token=claim["lease_token"])
+    assert issue["state"] == "done"
+
+
+def parked(engine, worker="w1"):
+    """A card an agent worked and left at need-input, which drops its lease."""
+    iid = ready(engine)
+    tok = core.next(engine, worker)["lease_token"]
+    core.transition(engine, iid, "need-input", note="PR #1 merged", actor=worker,
+                    actor_kind=AGENT, token=tok)
+    return iid
+
+
+@pytest.mark.parametrize("state", ["done", "cancelled"])
+def test_an_agent_closes_a_card_it_left_at_need_input(board, state):
+    """AB-23: the cards AB-9 parked for a human close need no lease to finish."""
+    iid = parked(board)
+    issue = core.transition(board, iid, state, note="finished", actor="w1", actor_kind=AGENT)
+    assert issue["state"] == state
+    assert issue["events"][-1]["actor"] == "w1"
+
+
+def test_an_agent_cannot_close_a_card_another_agent_left_at_need_input(board):
+    iid = parked(board, "w1")
+    with pytest.raises(core.LeaseLost):
+        core.transition(board, iid, "done", note="finished", actor="w2", actor_kind=AGENT)
     assert core.show(board, iid)["state"] == "need-input"
+
+
+def test_only_the_agent_that_last_left_a_card_at_need_input_closes_it(board):
+    iid = parked(board, "w1")
+    core.transition(board, iid, "ready", actor=CHAOS, actor_kind=HUMAN)
+    core.transition(board, iid, "onhold", actor=CHAOS, actor_kind=HUMAN)
+    core.transition(board, iid, "backlog", actor=CHAOS, actor_kind=HUMAN)
+    core.transition(board, iid, "ready", actor=CHAOS, actor_kind=HUMAN)
+    tok = core.next(board, "w2")["lease_token"]
+    core.transition(board, iid, "need-input", note="question", actor="w2", actor_kind=AGENT,
+                    token=tok)
+    with pytest.raises(core.LeaseLost):
+        core.transition(board, iid, "done", note="finished", actor="w1", actor_kind=AGENT)
+
+
+def test_an_agent_without_a_lease_only_finishes_its_need_input_card(board):
+    """No lease reopens, holds or otherwise moves the card; only done and cancelled."""
+    iid = parked(board)
+    for state in ("ready", "onhold"):
+        with pytest.raises(core.LeaseLost):
+            core.transition(board, iid, state, note="x", actor="w1", actor_kind=AGENT)
+    assert core.show(board, iid)["state"] == "need-input"
+
+
+def test_an_agent_cannot_close_a_need_input_card_nobody_parked(board):
+    """An imported card can sit in need-input with no transition event at all."""
+    iid = core.create(board, "MS", "imported", actor=CHAOS, actor_kind=HUMAN)["id"]
+    with store.session(board) as s, s.begin():
+        s.get(store.Issue, iid).state = "need-input"
+    with pytest.raises(core.LeaseLost):
+        core.transition(board, iid, "done", note="finished", actor=CHAOS, actor_kind=AGENT)
 
 
 def test_a_lifted_hold_returns_to_backlog_not_ready(board):
@@ -1106,7 +1141,7 @@ def depend(engine, iid, on, **kw):
 
 
 def finish(engine, claim, note="did it"):
-    """An agent hands a standalone card to review and a human closes it (AB-9)."""
+    """An agent hands a card to review and a human closes it, a path AB-8 keeps open."""
     core.transition(engine, claim["issue"]["id"], "need-input", note=note,
                     actor=claim["issue"]["lease_holder"], actor_kind=AGENT,
                     token=claim["lease_token"])
