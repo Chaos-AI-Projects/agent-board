@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% block title %}agent-board{% endblock %}</title>
+{# AB-39: a Game of Life glider, inline so it needs no route behind sign-in. #}
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='-.25 -.25 3.5 3.5'%3E%3Crect x='-.25' y='-.25' width='3.5' height='3.5' rx='.6' fill='%230891b2'/%3E%3Crect class='cell' x='1.1' y='0.1' width='.8' height='.8' fill='%23fff'/%3E%3Crect class='cell' x='2.1' y='1.1' width='.8' height='.8' fill='%23fff'/%3E%3Crect class='cell' x='0.1' y='2.1' width='.8' height='.8' fill='%23fff'/%3E%3Crect class='cell' x='1.1' y='2.1' width='.8' height='.8' fill='%23fff'/%3E%3Crect class='cell' x='2.1' y='2.1' width='.8' height='.8' fill='%23fff'/%3E%3C/svg%3E">
 <script>
   // AB-37: the theme is set ahead of the first paint, so a dark choice never
   // flashes light. A saved choice wins over the system's; another tab or the

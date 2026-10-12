@@ -3636,3 +3636,19 @@ def test_ab34_a_date_group_wholly_past_the_cap_hides_its_list_too(board, client)
     col = column(html, "done")
     groups = re.findall(r'<h3 class="date-group( done-extra)?">.*?</h3>\s*<div class="cards( done-extra)?"', col, re.S)
     assert groups and all(h == d for h, d in groups)
+
+
+def _favicon_svg(html):
+    from urllib.parse import unquote
+    link = re.search(r'<link rel="icon" type="image/svg\+xml" href="data:image/svg\+xml,([^"]*)">', html)
+    return unquote(link.group(1)) if link else None
+
+
+def test_ab39_every_page_has_a_glider_favicon(board, client):
+    glider = {(1, 0), (2, 1), (0, 2), (1, 2), (2, 2)}
+    for path in ("/", "/projects", "/stats", f"/issues/{ready(board)}"):
+        svg = _favicon_svg(client.get(path).text)
+        assert svg, path
+        cells = {(int(float(x)), int(float(y)))
+                 for x, y in re.findall(r"<rect class='cell' x='([\d.]+)' y='([\d.]+)'", svg)}
+        assert cells == glider, path
