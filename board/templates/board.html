@@ -47,15 +47,19 @@
 {% for state, workflows, issues, groups in columns %}
 <section class="column" data-state="{{ state }}">
   <h2 title="{{ lane_hints[state] }}">{{ state }} ({{ workflows|length + issues|length }}){% if state == "done" and old_done %}<span class="old-done-count"> + {{ old_done }} older hidden</span>{% endif %}{% if columns|length > 1 %}<form autocomplete="off" method="post" action="/preferences/lanes/hide"><input type="hidden" name="lane" value="{{ state }}"><button class="hide-lane" title="Hide this lane" aria-label="Hide the {{ state }} lane">&times;</button></form>{% endif %}</h2>
-  <p class="lane-hint">{{ lane_hints[state] }}</p>
   {% if state == "done" %}<form class="old-done" autocomplete="off" method="post" action="/preferences/done/{{ "show" if hide_old_done else "hide" }}"><button title="Cards finished more than 14 days ago">{{ "Show older" if hide_old_done else "Hide finished over 2 weeks ago" }}</button></form>{% endif %}
+  {# AB-34: past done_cap cards the done lane hides the rest behind a button. #}
+  {% set ns = namespace(n=0) %}
+  {% set capped = state == "done" and workflows|length + issues|length > done_cap %}
   {% for name, cards in groups %}
-  <h3 class="date-group">{{ name }} ({{ cards|length }})</h3>
-  <div class="cards" data-state="{{ state }}">
+  {% set group_extra = capped and ns.n >= done_cap %}
+  <h3 class="date-group{% if group_extra %} done-extra{% endif %}">{{ name }} ({{ cards|length }})</h3>
+  <div class="cards{% if group_extra %} done-extra{% endif %}" data-state="{{ state }}">
   {% for kind, item in cards %}
+  {% set extra = capped and ns.n >= done_cap %}{% set ns.n = ns.n + 1 %}
   {% if kind == "workflow" %}{% set wf = item %}
   {% if wf.project %}{% set pc = project_colour(wf.project) %}{% endif %}
-  <article class="card workflow-card" data-workflow="{{ wf.id }}" data-href="/issues/{{ wf.target }}"{% if wf.project %} style="--proj-bg: {{ pc.bg }}; --proj-border: {{ pc.border }}"{% endif %}>
+  <article class="card workflow-card{% if extra %} done-extra{% endif %}" data-workflow="{{ wf.id }}" data-href="/issues/{{ wf.target }}"{% if wf.project %} style="--proj-bg: {{ pc.bg }}; --proj-border: {{ pc.border }}"{% endif %}>
     <a href="/issues/{{ wf.target }}">{{ wf.title }}</a>
     <div class="steps-summary">{{ wf.steps|length }} step{{ "" if wf.steps|length == 1 else "s" }}{% if wf.current %} &middot; current: {{ wf.current.title }}{% endif %}</div>
   </article>
@@ -65,6 +69,7 @@
   {% else %}
   <div class="cards" data-state="{{ state }}"></div>
   {% endfor %}
+  {% if capped %}<button type="button" class="show-more" hidden>Show {{ workflows|length + issues|length - done_cap }} more</button>{% endif %}
 </section>
 {% endfor %}
 </div>
@@ -264,6 +269,26 @@
     frame.contentWindow.scrollTo(kept.x, kept.y);
   }
   window.onAutoReload = keepPanel;
+</script>
+<script>
+  // AB-34: a long done lane shows its first cards and a button for the rest.
+  // Without this script nothing is hidden. The choice outlives an auto-reload.
+  var SHOW_DONE = "ab34-show-done";
+  document.querySelectorAll(".column .show-more").forEach(function (button) {
+    var column = button.closest(".column");
+    var shown = false;
+    try { shown = sessionStorage.getItem(SHOW_DONE) === "1"; } catch (_) { /* private mode */ }
+    function draw() {
+      column.classList.toggle("capped", !shown);
+      button.hidden = shown;
+    }
+    button.addEventListener("click", function () {
+      shown = true;
+      try { sessionStorage.setItem(SHOW_DONE, "1"); } catch (_) { /* private mode */ }
+      draw();
+    });
+    draw();
+  });
 </script>
 <script>
   // AB-28: choosing "+ New project" shows and enables the key and name fields

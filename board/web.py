@@ -329,6 +329,21 @@ def filesize(n: int) -> str:
 NEW_PROJECT = "+new"
 
 
+# AB-32: 80 + 9 * 25 = 305, so with +-5 of shade every hue sits in 75-310.
+HUE_START, HUE_STEP = 80, 25
+
+
+def lane_age(entered_at: str, now: str) -> str:
+    """How long a card has sat in its lane, coarsely: now, 45m, 5h, 3d (AB-35)."""
+    minutes = int((datetime.fromisoformat(now) - datetime.fromisoformat(entered_at))
+                  .total_seconds() // 60)
+    if minutes < 1:
+        return "now"
+    if minutes < 60:
+        return f"{minutes}m"
+    return f"{minutes // 60}h" if minutes < 24 * 60 else f"{minutes // (24 * 60)}d"
+
+
 def project_colour(key: str, bucket: int | None = None) -> dict:
     """A project's card colours: a hue from its bucket, a shade from its key (MS-655).
 
@@ -337,18 +352,20 @@ def project_colour(key: str, bucket: int | None = None) -> dict:
     not recolour every card, and sha256 rather than hash(), which Python salts
     per process. Two projects sharing a bucket differ by up to 10 deg of hue
     and a small lightness step; saturation stays MS-652's so dark text reads
-    on every tint.
+    on every tint. AB-32: the buckets span 75-315 deg only, so no project is
+    red or orange, the colours that mean trouble.
     """
     if bucket is None:
         bucket = core.key_bucket(key)
     shade = int.from_bytes(hashlib.sha256(key.encode()).digest()[4:8], "big")
-    h = (bucket * 360 // core.BUCKETS + shade % 21 - 10) % 360
+    h = HUE_START + bucket * HUE_STEP + shade % 11 - 5
     step = (shade // 21) % 3 - 1
     return {"bg": f"hsl({h} 70% {92 + 3 * step}%)", "border": f"hsl({h} 65% {45 + 4 * step}%)"}
 
 
 templates.env.globals["project_colour"] = project_colour
 templates.env.globals["new_project"] = NEW_PROJECT
+templates.env.globals["lane_age"] = lane_age
 templates.env.filters["markdown"] = markdown
 templates.env.filters["filesize"] = filesize
 templates.env.filters["localtime"] = localtime
@@ -356,6 +373,10 @@ templates.env.filters["localtime"] = localtime
 
 class Unauthenticated(Exception):
     pass
+
+
+# AB-34: the done lane shows this many cards; a button reveals the rest.
+DONE_CAP = 10
 
 
 # How often a board or issue page asks whether what it shows has changed (AB-4).
@@ -380,7 +401,8 @@ def board_stamp(ctx: dict, buckets: dict) -> str:
     now = ctx["now"]
 
     def card(i):
-        return {k: i[k] for k in _CARD_FIELDS} | {"lease": lease_status(i, now)}
+        return ({k: i[k] for k in _CARD_FIELDS} | {"lease": lease_status(i, now)}
+                | {"pr": ctx["lane_meta"].get(i["id"], {}).get("pr")})
 
     def flow(w):
         current = w["current"]
@@ -1056,6 +1078,7 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
             columns.append((state, wfs, issues, lane_groups(wfs, issues, view["now"], tz)))
         hidden = [s for s in core.TRANSITIONS if s not in prefs["lanes"]]
         return {"view": view, "columns": columns, "now": view["now"],
+                "lane_meta": core.lane_meta(engine), "done_cap": DONE_CAP,
                 "tracked": prefs["projects"], "hidden": hidden,
                 "hide_old_done": prefs["hide_old_done"], "old_done": old_done}
 

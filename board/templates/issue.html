@@ -4,7 +4,7 @@
 {% set ls = lease_status(issue, now) %}
 <h1>{{ issue.id }} {{ issue.title }}</h1>
 {% set pc = project_colour(issue.project) %}
-<p><span class="project-key" style="--proj-bg: {{ pc.bg }}; --proj-border: {{ pc.border }}">{{ issue.project }}</span> &middot; State <b>{{ issue.state }}</b> <span class="lane-hint">{{ lane_hints[issue.state] }}</span> &middot; rank {{ issue.rank }} &middot; version {{ issue.version }}
+<p><span class="project-key" style="--proj-bg: {{ pc.bg }}; --proj-border: {{ pc.border }}">{{ issue.project }}</span> &middot; State <b title="{{ lane_hints[issue.state] }}">{{ issue.state }}</b>
 {% if issue.workflow %} &middot; step {{ issue.workflow.position }} of <i>{{ issue.workflow.title }}</i> ({{ issue.workflow.state }}){% if issue.workflow.origin_issue_id %}, planned from <a href="/issues/{{ issue.workflow.origin_issue_id }}">{{ issue.workflow.origin_issue_id }}</a>{% endif %}{% endif %}
 {% if issue.plan %} &middot; planned as <i>{{ issue.plan.title }}</i> ({{ issue.plan.state }}){% endif %}</p>
 <div class="card{% if ls %} lease-{{ ls }}{% endif %}">

@@ -193,6 +193,28 @@ def done_times(engine) -> dict[str, str]:
         return {i: _iso(at) for i, at in rows}
 
 
+def lane_meta(engine) -> dict[str, dict]:
+    """Each issue's card meta line, by id (AB-35).
+
+    `entered_at` is its latest move into the state it is in now, falling back
+    to its `updated_at`, as `done_times` does for done. `pr` is the ref of its
+    newest PR artifact, or None.
+    """
+    with store.session(engine) as s:
+        arrived = (select(Event.issue_id, Event.to_state, func.max(Event.at).label("at"))
+                   .where(Event.to_state.is_not(None),
+                          or_(Event.from_state.is_(None), Event.from_state != Event.to_state))
+                   .group_by(Event.issue_id, Event.to_state).subquery())
+        rows = s.execute(select(Issue.id, func.coalesce(arrived.c.at, Issue.updated_at))
+                         .outerjoin(arrived, (arrived.c.issue_id == Issue.id)
+                                    & (arrived.c.to_state == Issue.state)))
+        meta = {i: {"entered_at": _iso(at), "pr": None} for i, at in rows}
+        for issue_id, ref in s.execute(select(Artifact.issue_id, Artifact.ref)
+                                       .where(Artifact.kind == "pr").order_by(Artifact.id)):
+            meta[issue_id]["pr"] = ref
+        return meta
+
+
 def rename_project(engine, key: str, name: str) -> dict:
     """A new name for a project. The key cannot change: every issue id carries it."""
     name = _project_name(name)

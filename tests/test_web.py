@@ -100,19 +100,20 @@ def test_the_columns_are_the_seven_lanes_in_order(board, client):
                      "cancelled"]
 
 
-def test_ms660_every_column_shows_its_lane_hint_without_hover(board, client):
+def test_every_column_carries_its_lane_hint_on_hover_only(board, client):
     html = client.get("/").text
     for state, hint in core.LANE_HINTS.items():
         col = unescape(column(html, state))
         assert re.search(rf'<h2 title="{re.escape(hint)}"', col), state
-        assert f'<p class="lane-hint">{hint}</p>' in col, state
+        # AB-33: the hint lives only in the header's tooltip now.
+        assert 'class="lane-hint"' not in col, state
 
 
 def test_ms660_the_issue_page_explains_its_state_and_each_option(board, client):
     iid = ready(board)
     html = unescape(client.get(f"/issues/{iid}").text)
-    assert re.search(r'State <b>ready</b> <span class="lane-hint">'
-                     + re.escape(core.LANE_HINTS["ready"]) + "</span>", html)
+    # AB-36: the hint is the state's tooltip, not a repeated line.
+    assert re.search(r'State <b title="' + re.escape(core.LANE_HINTS["ready"]) + '">ready</b>', html)
     select = re.search(r'<select name="state".*?</select>', html, re.S).group(0)
     options = re.findall(r'<option title="([^"]*)"[^>]*>([^<]+)</option>', select)
     # MS-661: the select offers only where the card is and where it may go next.
@@ -1603,7 +1604,9 @@ def test_the_hide_control_sits_outside_the_drag_lists(client, board):
 
 def test_the_localstorage_hide_closed_toggle_is_gone(client, board):
     html = client.get("/").text
-    assert "hide-closed" not in html and "localStorage" not in html
+    assert "hide-closed" not in html
+    # AB-37's theme choice is the one thing the page keeps in localStorage.
+    assert set(re.findall(r'localStorage\.\w+\("([^"]+)"', html)) <= {"board-theme"}
 
 
 def test_the_current_step_moves_past_a_done_step(client, board):
@@ -2177,8 +2180,8 @@ def test_a_project_colour_comes_from_its_bucket_and_key():
     assert c == web.project_colour("MS", 3)
     assert set(c) == {"bg", "border"}
     assert hue(c["bg"]) == hue(c["border"])
-    # Within +-10 deg of the bucket's base hue, 36 deg apart.
-    assert abs(hue(c["bg"]) - 3 * 36) <= 10
+    # AB-32: within +-5 deg of the bucket's base hue, 25 deg apart from 80.
+    assert abs(hue(c["bg"]) - (80 + 3 * 25)) <= 5
     assert 88 <= lightness(c["bg"]) <= 96 and 40 <= lightness(c["border"]) <= 50
 
 
@@ -3516,3 +3519,120 @@ def test_ab29_a_bad_window_is_refused(client):
 
 def test_ab29_the_header_links_to_stats(client):
     assert '<a href="/stats">Stats</a>' in client.get("/").text
+
+
+# --- AB-32..AB-38: the 2026-10-12 UI round ---------------------------------------
+
+
+def test_ab32_no_project_colour_is_red_or_orange():
+    # Red and orange mean trouble; no project may look like it.
+    keys = ["MS", "BR", "AB", "DR", "HC", "GS", "PE", "GP", "LW", "X", "ZZ9"]
+    for key in keys:
+        for b in range(core.BUCKETS):
+            h = hue(web.project_colour(key, b)["border"])
+            assert 75 <= h <= 315, (key, b, h)
+
+
+def done_cards(board, n):
+    ids = [ready(board, f"d{k}") for k in range(n)]
+    for _ in ids:
+        claim = core.next(board, "run-d")
+        core.transition(board, claim["issue"]["id"], "done", actor="run-d", actor_kind=AGENT,
+                        note="shipped", token=claim["lease_token"])
+    return ids
+
+
+def test_ab34_a_long_done_lane_shows_ten_and_offers_the_rest(board, client):
+    done_cards(board, 12)
+    col = column(client.get("/").text, "done")
+    assert len(re.findall(r'<article class="card[^"]*"[^>]*data-id=', col)) == 12
+    assert len(re.findall(r'<article class="card[^"]*done-extra', col)) == 2
+    assert re.search(r'<button[^>]*class="show-more"[^>]*>Show 2 more</button>', col)
+
+
+def test_ab34_a_short_done_lane_has_no_show_more(board, client):
+    done_cards(board, 3)
+    col = column(client.get("/").text, "done")
+    assert "done-extra" not in col and "show-more" not in col
+
+
+def test_ab35_a_card_shows_its_age_in_its_lane(board, client):
+    issue_id = ready(board)
+    c = card(client.get("/").text, issue_id)
+    assert re.search(r'<div class="card-meta">.*?<span class="age" title="in ready since [^"]+">'
+                     r'(?:now|\d+[mhd])</span>', c, re.S)
+
+
+def test_ab35_a_card_with_a_pr_shows_a_pr_link(board, client):
+    issue_id = ready(board)
+    url = "https://github.com/o/r/pull/7"
+    core.link(board, issue_id, url, kind="pr", actor=CHAOS, actor_kind=HUMAN)
+    c = card(client.get("/").text, issue_id)
+    assert re.search(rf'<a class="pr" href="{re.escape(url)}"[^>]*>', c)
+    bare = ready(board, "bare")
+    assert 'class="pr"' not in card(client.get("/").text, bare)
+
+
+def test_ab35_a_pr_ref_that_is_not_http_is_not_a_link(board, client):
+    issue_id = ready(board)
+    core.link(board, issue_id, "javascript:alert(1)", kind="pr", actor=CHAOS, actor_kind=HUMAN)
+    assert 'class="pr"' not in card(client.get("/").text, issue_id)
+
+
+def test_ab35_card_age_is_counted_from_the_move_into_the_lane():
+    now = "2026-10-12T12:00:00+00:00"
+    assert web.lane_age("2026-10-12T11:59:30+00:00", now) == "now"
+    assert web.lane_age("2026-10-12T11:15:00+00:00", now) == "45m"
+    assert web.lane_age("2026-10-12T07:00:00+00:00", now) == "5h"
+    assert web.lane_age("2026-10-09T12:00:00+00:00", now) == "3d"
+
+
+def test_ab35_core_reports_when_each_issue_entered_its_state(board):
+    issue_id = ready(board)
+    claim = core.next(board, "run-e")
+    meta = core.lane_meta(board)[issue_id]
+    moved = core.show(board, issue_id)["events"][-1]["at"]
+    assert claim and meta["entered_at"] == moved and meta["pr"] is None
+
+
+def test_ab36_the_issue_header_drops_rank_and_version(board, client):
+    html = client.get(f"/issues/{ready(board)}").text
+    header = re.search(r'<p><span class="project-key".*?</p>', html, re.S).group(0)
+    assert "&middot; rank" not in header and "version" not in header
+    assert "lane-hint" not in header
+
+
+def test_ab37_every_page_has_a_theme_switcher(board, client):
+    for path in ("/", "/projects", "/stats", f"/issues/{ready(board)}"):
+        html = client.get(path).text
+        assert re.search(r'<button[^>]*id="theme-toggle"', html), path
+        assert ':root[data-theme="dark"]' in html, path
+
+
+def test_ab37_the_theme_is_applied_before_the_page_paints(client):
+    html = client.get("/").text
+    # In <head>, so a dark choice never flashes light first.
+    head = html.split("</head>")[0]
+    assert "localStorage" in head and "data-theme" in head
+
+
+def test_ab38_the_header_puts_preferences_projects_stats_and_user_top_right(client):
+    html = client.get("/").text
+    right = re.search(r'<nav class="header-right">(.*?)</nav>', html, re.S)
+    assert right, "no header-right nav"
+    order = [right.group(1).find(s) for s in ('href="/preferences"', 'href="/projects"',
+                                               'href="/stats"', 'class="me"')]
+    assert -1 not in order and order == sorted(order)
+
+
+def test_ab37_the_workflow_diagram_keeps_a_light_ground_in_both_themes(client):
+    # Mermaid's default arrows are near #333; a dark ground would hide them.
+    assert re.search(r"pre\.mermaid \{ background: #fff;", client.get("/").text)
+
+
+def test_ab34_a_date_group_wholly_past_the_cap_hides_its_list_too(board, client):
+    done_cards(board, 12)
+    html = client.get("/").text
+    col = column(html, "done")
+    groups = re.findall(r'<h3 class="date-group( done-extra)?">.*?</h3>\s*<div class="cards( done-extra)?"', col, re.S)
+    assert groups and all(h == d for h, d in groups)
