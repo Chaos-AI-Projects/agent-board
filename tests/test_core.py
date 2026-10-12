@@ -1865,3 +1865,67 @@ def test_ab24_a_reopened_step_leaves_a_started_origin_where_it_is(board, close_o
     last = origin["events"][-1]
     assert (last["kind"], last["actor_kind"]) == ("annotate", "system")
     assert step in last["note"]
+
+
+# --- AB-29: per-actor activity over a window ----------------------------------------
+
+
+def by_actor(view):
+    return {row["actor"]: row for row in view["actors"]}
+
+
+def test_ab29_stats_count_each_actors_created_moved_done_and_noted(board):
+    a = ready(board, "a")
+    core.create(board, "MS", "b", actor=CHAOS, actor_kind=HUMAN)
+    claim = core.next(board, "w1")
+    core.annotate(board, a, "halfway", actor="w1", actor_kind=AGENT, token=claim["lease_token"])
+    core.transition(board, a, "done", actor="w1", actor_kind=AGENT, note="PR 1",
+                    token=claim["lease_token"])
+    core.annotate(board, a, "thanks", actor=CHAOS, actor_kind=HUMAN)
+    rows = by_actor(core.stats(board))
+    assert {k: rows[CHAOS][k] for k in ("created", "moved", "done", "noted")} == \
+        {"created": 2, "moved": 0, "done": 0, "noted": 1}
+    # The claim moves ready -> processing, and the close moves processing -> done.
+    assert {k: rows["w1"][k] for k in ("created", "moved", "done", "noted")} == \
+        {"created": 0, "moved": 2, "done": 1, "noted": 1}
+    assert rows["w1"]["actor_kind"] == AGENT
+    assert rows["w1"]["events"] == 3
+
+
+def test_ab29_a_repeated_state_is_not_a_move(board):
+    a = ready(board, "a")
+    core.transition(board, a, "ready", actor=CHAOS, actor_kind=HUMAN)
+    assert by_actor(core.stats(board))[CHAOS]["moved"] == 0
+
+
+def test_ab29_stats_leave_out_events_older_than_the_window(board):
+    old = ready(board, "old")
+    age_done(board, old, 20)
+    ready(board, "new")
+    assert by_actor(core.stats(board))[CHAOS]["created"] == 1
+    assert by_actor(core.stats(board, days=30))[CHAOS]["created"] == 2
+    assert [e["title"] for e in core.stats(board)["activity"]] == ["new"]
+    assert core.stats(board)["days"] == 14
+
+
+def test_ab29_stats_list_the_busiest_actor_first(board):
+    ready(board, "a")
+    core.create(board, "MS", "b", actor="bot", actor_kind=AGENT)
+    core.create(board, "MS", "c", actor="bot", actor_kind=AGENT)
+    assert [r["actor"] for r in core.stats(board)["actors"]] == ["bot", CHAOS]
+
+
+def test_ab29_recent_activity_is_newest_first_with_the_issue_title(board):
+    a = ready(board, "first card")
+    core.annotate(board, a, "a note", actor=CHAOS, actor_kind=HUMAN)
+    recent = core.stats(board, limit=1)["activity"]
+    assert len(recent) == 1
+    assert recent[0] | {"at": None} == {
+        "issue_id": a, "title": "first card", "actor": CHAOS, "actor_kind": HUMAN,
+        "kind": "annotate", "from_state": None, "to_state": None, "note": "a note",
+        "at": None}
+
+
+def test_ab29_a_window_under_one_day_is_refused(board):
+    with pytest.raises(core.BoardError):
+        core.stats(board, days=0)

@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Stats -- agent-board{% endblock %}
+{% block main %}
+<h1>Activity, last {{ stats.days }} days</h1>
+<form method="get" action="/stats" class="filters">
+  <label>Days <input type="number" name="days" value="{{ stats.days }}" min="1" max="{{ days_max }}"></label>
+  <button>Show</button>
+</form>
+{% if stats.actors %}
+<table class="projects stats">
+  <tr><th>Actor</th><th>Kind</th><th>Created</th><th>Moved</th><th>Done</th><th>Noted</th><th>All events</th></tr>
+  {% for a in stats.actors %}<tr data-actor="{{ a.actor }}"><td>{{ a.actor }}</td><td>{{ a.actor_kind }}</td><td>{{ a.created }}</td><td>{{ a.moved }}</td><td>{{ a.done }}</td><td>{{ a.noted }}</td><td>{{ a.events }}</td></tr>
+  {% endfor %}
+</table>
+<p class="meta">Moved counts every change of state, a claim included. Done counts the moves into done. Noted counts notes added on their own.</p>
+<h2>Recent activity</h2>
+<ol class="activity">
+{% for e in stats.activity %}
+  <li>{{ e.at|localtime(tz) }} &middot; {{ e.actor }} &middot; {{ e.kind }}{% if e.from_state != e.to_state %} {{ e.from_state or "" }} &rarr; {{ e.to_state or "" }}{% endif %} &middot; <a href="/issues/{{ e.issue_id }}">{{ e.issue_id }}</a> {{ e.title }}{% if e.note %}<div class="meta">{{ e.note|truncate(200) }}</div>{% endif %}</li>
+{% endfor %}
+</ol>
+{% else %}
+<p class="no-hits">Nothing happened in this window.</p>
+{% endif %}
+{% endblock %}

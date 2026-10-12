@@ -1081,6 +1081,11 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
                     header_q=filters["q"],
                     results=view["issues"] if searched else [])
 
+    @app.get("/stats", response_class=HTMLResponse)
+    def stats_page(request: Request, days: int = core.STATS_DAYS):
+        return page(request, "stats.html", stats=core.stats(engine, days=days),
+                    days_max=core.STATS_DAYS_MAX)
+
     @app.get("/preferences", response_class=HTMLResponse)
     def preferences_page(request: Request):
         view = core.overview(engine)

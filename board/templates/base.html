@@ -99,11 +99,14 @@
     #issue-panel { width: 100vw; }
     body.issue-panel-open header, body.issue-panel-open main { margin-right: 0; }
   }
+  .activity { background: #fff; border-radius: 4px; padding: 8px 8px 8px 28px; }
+  .activity li { margin-bottom: 4px; }
+  .activity .meta { font-size: 12px; color: #5e6c84; white-space: pre-wrap; }
   table.projects th, table.projects td { padding: 4px 12px; text-align: left; border-bottom: 1px solid #dfe1e6; }
 </style>
 </head>
 <body>
-{% if not embed_q %}<header><a href="/">agent-board</a><form autocomplete="off" method="get" action="/search" class="header-search"><input type="search" name="q" value="{{ header_q or "" }}" placeholder="Search issues" aria-label="Search issues"><button type="submit">Search</button></form><a href="/search">Advanced search</a><a href="/preferences">Preferences</a><a href="/projects">Projects</a><span>{{ me or "not signed in" }}</span>{% if sign_in and me %}<form method="post" action="/logout" style="margin:0"><button type="submit">Sign out</button></form>{% elif sign_in %}<a href="/login">Sign in</a>{% endif %}</header>{% endif %}
+{% if not embed_q %}<header><a href="/">agent-board</a><form autocomplete="off" method="get" action="/search" class="header-search"><input type="search" name="q" value="{{ header_q or "" }}" placeholder="Search issues" aria-label="Search issues"><button type="submit">Search</button></form><a href="/search">Advanced search</a><a href="/preferences">Preferences</a><a href="/projects">Projects</a><a href="/stats">Stats</a><span>{{ me or "not signed in" }}</span>{% if sign_in and me %}<form method="post" action="/logout" style="margin:0"><button type="submit">Sign out</button></form>{% elif sign_in %}<a href="/login">Sign in</a>{% endif %}</header>{% endif %}
 <main>{% block main %}{% endblock %}</main>
 <script>
   // AB-7: a project filter's "Select all" / "Unselect all" ticks or clears

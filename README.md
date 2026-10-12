@@ -142,6 +142,10 @@ name plays no part.
 `/projects` lists every project and creates new ones. A project's name can be changed there, but not
 its key, because every issue id carries the key. Delete appears only for a project with no issues.
 
+`/stats` is read-only and counts what each actor did over the last 14 days, or `?days=N` for any
+window from 1 to 3650 days. Each row gives an actor's cards created, state changes, moves into done
+and notes, then all their events. Below the table, the newest 50 events link to their issues.
+
 An issue page shows its body as rendered markdown. Its "Edit issue" control opens a form with the
 title, the raw body, rank, labels and files. State changes live in the Note form: its State select
 offers the current state and the moves allowed from it, and its one textarea is either a plain note

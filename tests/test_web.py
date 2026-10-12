@@ -3461,3 +3461,58 @@ def test_ab24_reopen_without_a_reason_is_refused(board, client):
 def test_ab24_only_a_done_card_offers_reopen(board, client):
     iid = ready(board)
     assert f"/issues/{iid}/reopen" not in client.get(f"/issues/{iid}", headers=AS_CHAOS).text
+
+
+# --- AB-29: the stats page --------------------------------------------------------
+
+
+def stats_row(html, actor):
+    m = re.search(rf'<tr[^>]*data-actor="{re.escape(actor)}"[^>]*>(.*?)</tr>', html, re.S)
+    assert m, f"no stats row for {actor}"
+    return [unescape(c).strip() for c in re.findall(r"<td[^>]*>(.*?)</td>", m.group(1), re.S)]
+
+
+def test_ab29_the_stats_page_counts_each_actors_activity(board, client):
+    a = ready(board, "worked card")
+    claim = core.next(board, "w1")
+    core.transition(board, a, "done", actor="w1", actor_kind=AGENT, note="PR 1",
+                    token=claim["lease_token"])
+    core.annotate(board, a, "nice", actor=CHAOS, actor_kind=HUMAN)
+    r = client.get("/stats")
+    assert r.status_code == 200
+    # actor, kind, created, moved, done, noted, events
+    assert stats_row(r.text, CHAOS) == [CHAOS, HUMAN, "1", "0", "0", "1", "2"]
+    assert stats_row(r.text, "w1") == ["w1", AGENT, "0", "2", "1", "0", "2"]
+    assert "last 14 days" in r.text
+
+
+def test_ab29_the_stats_page_lists_recent_activity_with_links(board, client):
+    a = ready(board, "linked card")
+    core.annotate(board, a, "a **bold** note", actor=CHAOS, actor_kind=HUMAN)
+    html = client.get("/stats").text
+    recent = re.search(r'<ol class="activity">(.*?)</ol>', html, re.S).group(1)
+    items = re.findall(r"<li[^>]*>(.*?)</li>", recent, re.S)
+    assert len(items) == 2
+    assert f'href="/issues/{a}"' in items[0] and "annotate" in items[0]
+    assert "a **bold** note" in unescape(items[0])
+    assert "create" in items[1]
+
+
+def test_ab29_the_window_is_chosen_with_days(board, client):
+    old = ready(board, "old")
+    with store.session(board) as s, s.begin():
+        then = store.db_now(s) - timedelta(days=20)
+        s.execute(store.Event.__table__.update().where(store.Event.issue_id == old)
+                  .values(at=then))
+    assert "data-actor=" not in client.get("/stats").text
+    html = client.get("/stats", params={"days": 30}).text
+    assert stats_row(html, CHAOS)[2] == "1"
+    assert "last 30 days" in html
+
+
+def test_ab29_a_bad_window_is_refused(client):
+    assert client.get("/stats", params={"days": 0}).status_code == 422
+
+
+def test_ab29_the_header_links_to_stats(client):
+    assert '<a href="/stats">Stats</a>' in client.get("/").text

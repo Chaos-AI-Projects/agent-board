@@ -19,7 +19,7 @@ import re
 import secrets
 from datetime import timedelta
 
-from sqlalchemy import and_, exists, func, or_, select, text, update
+from sqlalchemy import and_, case, exists, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import aliased
 
@@ -397,6 +397,55 @@ def _search(s, q, project, label, assignee, creator=None):
         stmt = stmt.where(exists().where(Event.issue_id == Issue.id, Event.kind == "create",
                                          Event.actor == creator))
     return [_row(i) for i in s.scalars(stmt)]
+
+
+STATS_DAYS = 14
+STATS_DAYS_MAX = 3650
+
+
+def stats(engine, *, days: int = STATS_DAYS, limit: int = 50) -> dict:
+    """What each actor did in the last `days` days, read from the event log (AB-29).
+
+    Per actor and actor kind: `created` counts create events, `moved` counts
+    events that changed an issue's state (a claim or a transition), `done`
+    the moves into done, `noted` the annotations, and `events` every event of
+    any kind. A reclaim, a preempt, or a transition to the state the issue is
+    already in records an event but is not a move. `actors` is busiest first.
+    `activity` is the newest `limit` events in the window, newest first by
+    event id, because imported events share one timestamp.
+    """
+    if not 1 <= days <= STATS_DAYS_MAX:
+        raise BoardError(f"the window is 1 to {STATS_DAYS_MAX} days, not {days}")
+    moved = and_(Event.from_state.is_not(None), Event.to_state.is_not(None),
+                 Event.from_state != Event.to_state)
+
+    def count(cond):
+        return func.count(case((cond, 1)))
+
+    with store.session(engine) as s:
+        now = store.db_now(s)
+        since = now - timedelta(days=days)
+        rows = s.execute(
+            select(Event.actor, Event.actor_kind,
+                   count(Event.kind == "create"), count(moved),
+                   count(and_(moved, Event.to_state == "done")),
+                   count(Event.kind == "annotate"), func.count())
+            .where(Event.at >= since).group_by(Event.actor, Event.actor_kind)).all()
+        activity = s.execute(
+            select(Event, Issue.title).join(Issue, Event.issue_id == Issue.id)
+            .where(Event.at >= since).order_by(Event.id.desc()).limit(limit)).all()
+        return {
+            "now": _iso(now), "since": _iso(since), "days": days,
+            "actors": sorted(
+                ({"actor": a, "actor_kind": k, "created": c, "moved": m, "done": d,
+                  "noted": n, "events": e} for a, k, c, m, d, n, e in rows),
+                key=lambda r: (-r["events"], r["actor"], r["actor_kind"])),
+            "activity": [{"issue_id": ev.issue_id, "title": title, "at": _iso(ev.at),
+                          "actor": ev.actor, "actor_kind": ev.actor_kind, "kind": ev.kind,
+                          "from_state": ev.from_state, "to_state": ev.to_state,
+                          "note": ev.note}
+                         for ev, title in activity],
+        }
 
 
 def _row(i):
