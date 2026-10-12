@@ -2472,6 +2472,35 @@ def test_ab5_an_open_panel_narrows_the_board_instead_of_covering_it(client):
     assert 'classList.toggle("issue-panel-open"' in html
 
 
+# AB-25: a long unbroken title (a path, a URL) ran past the card's edge, and
+# a long lane's cards ran below its grey column. A flex row capped by
+# max-height stretches its columns to the cap, not to their content; a grid's
+# auto row is as tall as the tallest column, so every column holds its cards
+# and stays as tall as the tallest, which the sticky lane headers need.
+def _css_rule(html, selector):
+    m = re.search(r"(?:^|\})\s*" + re.escape(selector) + r" \{([^}]*)\}", html, re.M)
+    assert m, selector
+    return m.group(1)
+
+
+def test_ab25_a_long_word_wraps_inside_its_card(board, client):
+    ready(board, title="x" * 200)
+    html = client.get("/").text
+    assert "overflow-wrap: anywhere" in _css_rule(html, ".card")
+    assert "min-width: 0" in _css_rule(html, ".card")
+
+
+def test_ab25_columns_grow_with_their_cards_not_with_the_viewport(client):
+    html = client.get("/").text
+    kanban = " ".join(m.group(1) for m in re.finditer(r"\n\s*\.kanban \{([^}]*)\}", html))
+    assert "display: grid" in kanban
+    assert "grid-auto-flow: column" in kanban
+    assert "grid-auto-rows: max-content" in kanban
+    assert "display: flex" not in kanban and "align-items: stretch" not in kanban
+    # A column never shrinks below its cards, so its background covers them.
+    assert "flex" not in _css_rule(html, ".column")
+
+
 # AB-4: the board and an issue page keep themselves current. Each page carries
 # a stamp, a digest of what it shows, and polls its stamp URL for a new one.
 
