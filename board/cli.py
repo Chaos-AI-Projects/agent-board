@@ -95,6 +95,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--project")
     sp.add_argument("--label")
     sp.add_argument("--assignee")
+    sp.add_argument("--creator", help="the actor who created the issue")
 
     sp = op("transition", help="move an issue to another state; an agent closes its "
                                "own card, and one it left at need-input needs no lease; "
@@ -184,7 +185,7 @@ def _run(engine, a) -> dict | None:
             return core.show(engine, a.id)
         case "search":
             return {"issues": core.search(engine, q=a.q, project=a.project, label=a.label,
-                                          assignee=a.assignee)}
+                                          assignee=a.assignee, creator=a.creator)}
         case "transition":
             return core.transition(engine, a.id, a.state, note=a.note, token=a.token,
                                    request_id=a.request_id, preempt=a.preempt, **who)

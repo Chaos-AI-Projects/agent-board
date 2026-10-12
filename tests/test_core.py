@@ -804,6 +804,23 @@ def test_search_filters_by_project_label_and_assignee(searchable):
     assert ids(core.search(board, assignee="worker-1")) == [b]
 
 
+def test_ab27_search_filters_by_creator(board):
+    """The creator is whoever wrote the issue's create event."""
+    mine = core.create(board, "MS", "mine", actor=CHAOS, actor_kind=HUMAN)["id"]
+    theirs = core.create(board, "MS", "theirs", actor="overlord", actor_kind="agent")["id"]
+    assert ids(core.search(board, creator=CHAOS)) == [mine]
+    assert ids(core.search(board, creator="overlord")) == [theirs]
+    assert ids(core.search(board, creator="overlord", q="mine")) == []
+    assert core.overview(board)["creators"] == sorted([CHAOS, "overlord"])
+
+
+def test_ab27_a_later_actor_is_not_the_creator(board):
+    iid = ready(board, "claimed by an agent")
+    core.next(board, "worker-2")
+    assert ids(core.search(board, creator="worker-2")) == []
+    assert ids(core.search(board, creator=CHAOS)) == [iid]
+
+
 def test_search_filters_combine_with_q(searchable):
     board, a, b, c = searchable
     assert ids(core.search(board, q="w", label="web", project="MS")) == [a]

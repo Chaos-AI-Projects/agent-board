@@ -302,6 +302,14 @@ def test_search_filters_combine_with_the_query(url):
     assert len(out["issues"]) == 2
 
 
+def test_ab27_search_by_creator(url):
+    mine = ok(board(url, "--actor-kind", "human", "create", "--project", "MS",
+                    "--title", "mine", actor=CHAOS))["id"]
+    ok(board(url, "create", "--project", "MS", "--title", "theirs", actor="overlord"))
+    out = ok(board(url, "search", "--creator", CHAOS, actor=None))
+    assert [i["id"] for i in out["issues"]] == [mine]
+
+
 def test_search_with_no_hits_exits_3(url):
     ready(url, "Search box")
     proc = board(url, "search", "nothing", "--assignee", "nobody", actor=None)

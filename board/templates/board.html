@@ -2,9 +2,13 @@
 {% block main %}
 <div class="board-controls">
 <details>
-  <summary>New issue</summary>
+  <summary class="new-issue">New issue</summary>
   <form autocomplete="off" method="post" action="/issues" enctype="multipart/form-data">
-    <label>Project <select name="project" required><option value="" disabled selected>choose a project</option>{% for p in view.projects %}<option value="{{ p.key }}">{{ p.key }} ({{ p.name }})</option>{% endfor %}</select></label>
+    <label>Project <select name="project" required><option value="" disabled selected>choose a project</option>{% for p in view.projects %}<option value="{{ p.key }}">{{ p.key }} ({{ p.name }})</option>{% endfor %}<option value="{{ new_project }}">+ New project</option></select></label>
+    <fieldset class="new-project" hidden disabled>
+      <label>Project key <input name="new_project_key" size="16" maxlength="16" pattern="[A-Z][A-Z0-9]{0,15}" title="1-16 of A-Z and 0-9, starting with a letter"></label>
+      <label>Project name <input name="new_project_name" size="40"></label>
+    </fieldset>
     <label>Title <input name="title" required size="60"></label>
     <label>Body <textarea name="body"></textarea></label>
     <label>State <select name="state"><option>backlog</option><option>ready</option></select></label>
@@ -260,5 +264,22 @@
     frame.contentWindow.scrollTo(kept.x, kept.y);
   }
   window.onAutoReload = keepPanel;
+</script>
+<script>
+  // AB-28: choosing "+ New project" shows and enables the key and name fields
+  // and makes them required; any other project hides and disables them, so a
+  // half-typed key is neither validated nor sent.
+  document.querySelectorAll('form[action="/issues"]').forEach(function (form) {
+    var select = form.querySelector('select[name="project"]');
+    var box = form.querySelector(".new-project");
+    function sync() {
+      var on = select.value === {{ new_project|tojson }};
+      box.hidden = !on;
+      box.disabled = !on;
+      box.querySelectorAll("input").forEach(function (i) { i.required = on; });
+    }
+    select.addEventListener("change", sync);
+    sync();
+  });
 </script>
 {% endblock %}

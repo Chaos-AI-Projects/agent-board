@@ -7,6 +7,7 @@
   <label>Project <select name="project"><option value="">any</option>{% for p in view.projects %}<option value="{{ p.key }}"{% if p.key == filters.project %} selected{% endif %}>{{ p.key }}</option>{% endfor %}</select></label>
   <label>Label <select name="label"><option value="">any</option>{% for l in view.labels %}<option value="{{ l }}"{% if l == filters.label %} selected{% endif %}>{{ l }}</option>{% endfor %}</select></label>
   <label>Assignee <select name="assignee"><option value="">any</option>{% for a in view.assignees %}<option value="{{ a }}"{% if a == filters.assignee %} selected{% endif %}>{{ a }}</option>{% endfor %}</select></label>
+  <label>Creator <select name="creator"><option value="">any</option>{% for c in view.creators %}<option value="{{ c }}"{% if c == filters.creator %} selected{% endif %}>{{ c }}</option>{% endfor %}</select></label>
   <button>Search</button>{% if searched %} <a href="/search">Clear</a>{% endif %}
 </form>
 {% if results %}

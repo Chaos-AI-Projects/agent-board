@@ -308,13 +308,14 @@ def now(engine) -> str:
 
 
 def overview(engine, *, q: str | None = None, project: str | None = None,
-             label: str | None = None, assignee: str | None = None) -> dict:
+             label: str | None = None, assignee: str | None = None,
+             creator: str | None = None) -> dict:
     """Everything the web board renders, read in one session.
 
     `now` is the database clock, so the board judges a lease expired by the
     same clock `next` uses to reclaim it. Issues carry no events or token.
-    The filters are `search`'s; `labels` and `assignees` are every value in
-    use, for the filter dropdowns, whatever the filters matched.
+    The filters are `search`'s; `labels`, `assignees` and `creators` are
+    every value in use, for the filter dropdowns, whatever the filters matched.
     """
     with store.session(engine) as s:
         return {
@@ -325,9 +326,11 @@ def overview(engine, *, q: str | None = None, project: str | None = None,
             "assignees": sorted({a for col in (Issue.assignee, Issue.lease_holder)
                                  for a in s.scalars(select(col).distinct()
                                                     .where(col.is_not(None)))}),
+            "creators": sorted(s.scalars(select(Event.actor).distinct()
+                                         .where(Event.kind == "create"))),
             "templates": [{"name": t.name, "title": t.title}
                           for t in s.scalars(select(Template).order_by(Template.name))],
-            "issues": _search(s, q, project, label, assignee),
+            "issues": _search(s, q, project, label, assignee, creator),
             "workflows": [_workflow_view(s, wf)
                           for wf in s.scalars(select(Workflow).order_by(Workflow.id))],
         }
@@ -354,7 +357,8 @@ def workflow(engine, workflow_id: int) -> dict:
 
 
 def search(engine, *, q: str | None = None, project: str | None = None,
-           label: str | None = None, assignee: str | None = None) -> list[dict]:
+           label: str | None = None, assignee: str | None = None,
+           creator: str | None = None) -> list[dict]:
     """Issues matching every filter given, in board order.
 
     `q` is a case-insensitive substring of the id, title, body or any label,
@@ -362,14 +366,14 @@ def search(engine, *, q: str | None = None, project: str | None = None,
     extension on either engine. `%` and `_` in it are literal characters.
     `project`, `label` and `assignee` match exactly. Nothing writes an
     issue's `assignee` yet, so `assignee` also matches the lease holder: the
-    agent or human holding a card is the one working it. An empty filter is
-    no filter.
+    agent or human holding a card is the one working it. `creator` is the
+    actor of the issue's create event (AB-27). An empty filter is no filter.
     """
     with store.session(engine) as s:
-        return _search(s, q, project, label, assignee)
+        return _search(s, q, project, label, assignee, creator)
 
 
-def _search(s, q, project, label, assignee):
+def _search(s, q, project, label, assignee, creator=None):
     stmt = select(Issue).order_by(Issue.rank, Issue.id)
     q = (q or "").strip()
     if q:
@@ -389,6 +393,9 @@ def _search(s, q, project, label, assignee):
         stmt = stmt.where(exists().where(Label.issue_id == Issue.id, Label.name == label))
     if assignee:
         stmt = stmt.where(or_(Issue.assignee == assignee, Issue.lease_holder == assignee))
+    if creator:
+        stmt = stmt.where(exists().where(Event.issue_id == Issue.id, Event.kind == "create",
+                                         Event.actor == creator))
     return [_row(i) for i in s.scalars(stmt)]
 
 

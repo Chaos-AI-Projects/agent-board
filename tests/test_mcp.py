@@ -254,6 +254,12 @@ def test_search_finds_issues_by_query_and_project(migrated):
     assert [i["id"] for i in ok(migrated, "search", q="lease", project="MS")["issues"]] == [hit]
 
 
+def test_ab27_search_by_creator(migrated):
+    mine = ready(board(migrated), "mine")
+    core.create(migrated, "MS", "theirs", actor="overlord", actor_kind="agent")
+    assert [i["id"] for i in ok(migrated, "search", creator=CHAOS)["issues"]] == [mine]
+
+
 def test_search_with_no_match_is_an_empty_result_not_an_error(migrated):
     ready(board(migrated))
     assert ok(migrated, "search", q="nothing like this") == {"issues": []}

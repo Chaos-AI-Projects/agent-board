@@ -594,6 +594,61 @@ def test_ab11_a_create_with_no_project_says_to_choose_one(board, client):
     assert core.search(board, q="orphan") == []
 
 
+def test_ab30_new_issue_is_styled_as_a_button(board, client):
+    html = client.get("/").text
+    assert '<summary class="new-issue">New issue</summary>' in html
+    style = re.search(r"<style>(.*?)</style>", html, re.S).group(1)
+    rule = re.search(r"summary\.new-issue\s*\{([^}]*)\}", style).group(1)
+    assert "background" in rule and "cursor: pointer" in rule
+
+
+def test_ab28_the_project_select_offers_a_new_project(board, client):
+    select = new_issue_project_select(client.get("/").text)
+    assert select.rstrip().endswith('<option value="{0}">+ New project</option>'
+                                    .format(web.NEW_PROJECT))
+    form = client.get("/").text.split('action="/issues"', 1)[1].split("</form>", 1)[0]
+    assert re.search(r'<fieldset class="new-project" hidden disabled>.*name="new_project_key"'
+                     r'.*name="new_project_name"', form, re.S)
+
+
+def test_ab28_a_new_project_is_created_with_the_issue(board, client):
+    r = client.post("/issues", data={"project": web.NEW_PROJECT, "new_project_key": "NP",
+                                     "new_project_name": "new one", "title": "first"},
+                    headers=AS_CHAOS)
+    assert r.status_code == 303
+    [hit] = core.search(board, q="first")
+    assert hit["project"] == "NP"
+    assert {"key": "NP", "name": "new one", "issues": 1} in core.projects(board)
+
+
+@pytest.mark.parametrize("fields, says", [
+    ({"new_project_key": "MS", "new_project_name": "dup"}, "already exists"),
+    ({"new_project_key": "bad/key", "new_project_name": "x"}, "project key"),
+    ({"new_project_key": "NP", "new_project_name": "x", "title": ""}, "title"),
+])
+def test_ab28_a_refused_new_project_saves_nothing(board, client, fields, says):
+    data = {"project": web.NEW_PROJECT, "title": "orphan"} | fields
+    r = client.post("/issues", data=data, headers=AS_CHAOS)
+    assert r.status_code in (409, 422)
+    assert says in r.text
+    assert core.search(board, q="orphan") == []
+    assert [p["key"] for p in core.projects(board)] == ["MS"]
+
+
+def test_ab28_a_refused_issue_removes_the_project_it_made(board, client):
+    r = client.post("/issues", data={"project": web.NEW_PROJECT, "new_project_key": "NP",
+                                     "new_project_name": "x", "title": "orphan",
+                                     "state": "done"}, headers=AS_CHAOS)
+    assert r.status_code == 422
+    assert core.search(board, q="orphan") == []
+    assert [p["key"] for p in core.projects(board)] == ["MS"]
+
+
+def test_ab28_the_new_project_fields_start_disabled(board, client):
+    form = client.get("/").text.split('action="/issues"', 1)[1].split("</form>", 1)[0]
+    assert '<fieldset class="new-project" hidden disabled>' in form
+
+
 def test_an_edit_saves_and_redirects(board, client):
     iid = ready(board)
     issue = core.show(board, iid)
@@ -1133,6 +1188,16 @@ def test_search_offers_every_label_and_assignee(client, board):
     assert re.search(r'<select name="assignee"', html)
 
 
+def test_ab27_search_filters_by_creator_and_keeps_the_choice(client, board):
+    mine = ready(board, "mine")
+    core.create(board, "MS", "theirs", actor="overlord", actor_kind="agent")
+    html = client.get("/search", params={"creator": CHAOS}).text
+    assert hits(html) == [mine]
+    creators = re.search(r'<select name="creator"[^>]*>(.*?)</select>', html, re.S).group(1)
+    assert f'<option value="{CHAOS}" selected>' in creators
+    assert '<option value="overlord">' in creators
+
+
 def test_search_finds_workflow_steps_too(client, board):
     wf = release(board, ["build", "ship"])
     assert hits(client.get("/search", params={"q": "ship"}).text) == [wf["steps"][1]["id"]]
@@ -1392,7 +1457,7 @@ def test_the_toggles_and_the_view_banner_share_one_row_view_last(client, board):
     html = client.get("/").text
     row = controls_row(html)
     assert banner(html) in row
-    assert row.index("<summary>New issue</summary>") < row.index('class="filter-banner"')
+    assert row.index('<summary class="new-issue">New issue</summary>') < row.index('class="filter-banner"')
     assert row.index(banner(html)) + len(banner(html)) == row.rindex("</details>") + len("</details>")
     assert html.index(row) < html.index('<div class="kanban">')
 

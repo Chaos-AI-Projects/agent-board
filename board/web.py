@@ -54,6 +54,7 @@ token, the session cookie. Local mode is off, and every path but `/login` and
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -323,6 +324,11 @@ def filesize(n: int) -> str:
     return f"{n / 1024:.1f} KB" if n < 1024 * 1024 else f"{n / (1024 * 1024):.1f} MB"
 
 
+# The new-issue form's project choice that creates a project (AB-28). Not a
+# valid project key, so it can never name a real one.
+NEW_PROJECT = "+new"
+
+
 def project_colour(key: str, bucket: int | None = None) -> dict:
     """A project's card colours: a hue from its bucket, a shade from its key (MS-655).
 
@@ -342,6 +348,7 @@ def project_colour(key: str, bucket: int | None = None) -> dict:
 
 
 templates.env.globals["project_colour"] = project_colour
+templates.env.globals["new_project"] = NEW_PROJECT
 templates.env.filters["markdown"] = markdown
 templates.env.filters["filesize"] = filesize
 templates.env.filters["localtime"] = localtime
@@ -1064,8 +1071,9 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
 
     @app.get("/search", response_class=HTMLResponse)
     def search_page(request: Request, q: str = "", project: str = "", label: str = "",
-                    assignee: str = ""):
-        filters = {"q": q.strip(), "project": project, "label": label, "assignee": assignee}
+                    assignee: str = "", creator: str = ""):
+        filters = {"q": q.strip(), "project": project, "label": label, "assignee": assignee,
+                   "creator": creator}
         view = core.overview(engine, **filters)
         # With no filter at all the page is just the form, not every issue.
         searched = any(filters.values())
@@ -1209,11 +1217,29 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         # The form's select is required; this answers a post that skipped it (AB-11).
         if not f.get("project"):
             return error(request, 422, "Choose a project for the new issue. Nothing was saved.")
-        files = await save_uploads(f)
-        issue = core.create(engine, f.get("project", ""), f.get("title", ""), actor=me.email,
-                            actor_kind=me.kind, body=f.get("body", ""),
-                            state=f.get("state") or "backlog", rank=_form_int(f.get("rank")),
-                            labels=_form_labels(f.get("labels")) or (), attachments=files)
+        project = f.get("project", "")
+        made = None
+        if project == NEW_PROJECT:
+            # AB-28: the form's "+ New project" creates the project with the
+            # issue. A refused issue removes it again, so nothing is half-saved.
+            if not f.get("title", "").strip():
+                return error(request, 422, "A new issue needs a title. Nothing was saved.")
+            made = core.create_project(engine, f.get("new_project_key", ""),
+                                       f.get("new_project_name", ""))
+            project = made["key"]
+        try:
+            files = await save_uploads(f)
+            issue = core.create(engine, project, f.get("title", ""), actor=me.email,
+                                actor_kind=me.kind, body=f.get("body", ""),
+                                state=f.get("state") or "backlog",
+                                rank=_form_int(f.get("rank")),
+                                labels=_form_labels(f.get("labels")) or (), attachments=files)
+        except BaseException:
+            if made:
+                # The issue's own error is the one to report, not a failed undo.
+                with contextlib.suppress(core.BoardError):
+                    core.delete_project(engine, made["key"])
+            raise
         return back(issue["id"])
 
     @app.post("/workflows")

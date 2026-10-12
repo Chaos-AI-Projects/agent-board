@@ -65,6 +65,11 @@
   textarea { width: 100%; min-height: 8em; }
   .events li { margin-bottom: 4px; }
   details { margin-bottom: 16px; }
+  /* AB-30: a bare summary did not read as clickable, so New issue is a button. */
+  summary.new-issue { display: inline-block; cursor: pointer; background: #0052cc; color: #fff;
+                      font-weight: 600; padding: 6px 12px; border-radius: 4px; }
+  summary.new-issue:hover { background: #0065ff; }
+  summary.new-issue:focus-visible { outline: 2px solid #4c9aff; outline-offset: 2px; }
   .hits { background: #fff; border-radius: 4px; padding: 8px 8px 8px 28px; }
   .hits li { margin-bottom: 4px; background: var(--proj-bg); border-left: 4px solid var(--proj-border); padding-left: 4px; }
   .hit .meta { font-size: 12px; color: #5e6c84; }
