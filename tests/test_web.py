@@ -12,6 +12,7 @@ import re
 import time
 from datetime import datetime, timedelta
 from html import unescape
+from pathlib import Path
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
@@ -908,7 +909,7 @@ def test_ms661_the_note_form_carries_the_state_select(board, client):
     assert f'name="version" value="{core.show(board, iid)["version"]}"' in form
     assert len(re.findall(r'name="note"', form)) == 1, "one note box serves both"
     # Without JS the button reads Save; the script relabels it Add note.
-    assert "<button>Save</button>" in form
+    assert '<button class="primary">Save</button>' in form
     script = re.search(r"<script>(.*?)</script>", html[html.index(form):], re.S)
     assert script and "Add note" in script.group(1) and "data-current" in script.group(1)
 
@@ -3895,7 +3896,7 @@ def test_ab45_the_new_issue_form_has_a_cancel_beside_create(board, client):
     """Cancel resets the form rather than submitting it, and sits after Create."""
     form = client.get("/").text.split('action="/issues"', 1)[1].split("</form>", 1)[0]
     assert '<button type="reset" class="cancel">Cancel</button>' in form
-    assert form.index("<button>Create</button>") < form.index('class="cancel"')
+    assert form.index('<button class="primary">Create</button>') < form.index('class="cancel"')
 
 
 def test_ab45_cancel_closes_the_form_and_hides_the_new_project_fields(board, client):
@@ -3905,3 +3906,78 @@ def test_ab45_cancel_closes_the_form_and_hides_the_new_project_fields(board, cli
     assert 'addEventListener("reset"' in script
     assert ".open = false" in script
     assert "setTimeout(sync" in script
+
+
+# AB-46: the primary action of each form is a filled accent button, one class
+# used everywhere; secondary actions (Cancel, filters, Search) stay plain.
+TEMPLATES = Path(web.__file__).parent / "templates"
+PRIMARY = {
+    "board.html": ["Create", "Instantiate"],
+    "issue.html": ["Plan", "Save", "Reopen", "Link"],
+    "preferences.html": ["Save"],
+    "projects.html": ["Create"],
+    "takeover.html": ["Take over and save"],
+}
+
+
+def test_ab46_each_forms_primary_action_carries_the_primary_class():
+    for name, labels in PRIMARY.items():
+        src = (TEMPLATES / name).read_text()
+        for label in labels:
+            assert f'<button class="primary">{label}</button>' in src, (name, label)
+            assert f"<button>{label}</button>" not in src, (name, label)
+
+
+def test_ab46_secondary_actions_stay_plain(board, client):
+    html = client.get("/").text
+    assert '<button type="reset" class="cancel">Cancel</button>' in html
+    assert "<button>Apply</button>" in html
+    assert '<button type="submit">Search</button>' in html
+    assert '<button class="primary">Search' not in client.get("/search").text
+
+
+def test_ab46_rendered_pages_show_the_highlighted_buttons(board, client):
+    issue_id = ready(board)
+    assert '<button class="primary">Create</button>' in client.get("/").text
+    issue = client.get(f"/issues/{issue_id}").text
+    for label in ("Plan", "Save", "Link"):
+        assert f'<button class="primary">{label}</button>' in issue
+    assert '<button class="primary">Save</button>' in client.get("/preferences").text
+    assert '<button class="primary">Create</button>' in client.get("/projects").text
+
+
+def test_ab46_the_note_button_is_primary_whatever_its_label(board, client):
+    """The AB-24 script swaps Save for Add note; the class stays on the button."""
+    html = client.get(f"/issues/{ready(board)}").text
+    form = html.split("/note", 1)[1].split("</form>", 1)[0]
+    assert '<button class="primary">Save</button>' in form
+    assert "button.textContent" in html
+
+
+def _hex_luminance(colour):
+    if len(colour) == 4:
+        colour = "#" + "".join(c * 2 for c in colour[1:])
+    rgb = [int(colour[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+    lin = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in rgb]
+    return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]
+
+
+def _theme_var(html, selector, name):
+    rule = _css_rule(html, selector)
+    m = re.search(re.escape(name) + r": (#[0-9a-fA-F]{6}|#[0-9a-fA-F]{3});", rule)
+    assert m, (selector, name)
+    return m.group(1)
+
+
+def test_ab46_primary_buttons_are_filled_accent_with_readable_text(client):
+    html = client.get("/").text
+    rule = _css_rule(html, "button.primary")
+    assert "background: var(--accent)" in rule
+    assert "color: var(--accent-fg)" in rule
+    for selector in (":root", ':root[data-theme="dark"]'):
+        a = _hex_luminance(_theme_var(html, selector, "--accent"))
+        b = _hex_luminance(_theme_var(html, selector, "--accent-fg"))
+        ratio = (max(a, b) + 0.05) / (min(a, b) + 0.05)
+        assert ratio >= 4.5, (selector, ratio)
+    # Hover must not lighten the light accent under white text.
+    assert "brightness(0.9)" in _css_rule(html, "button.primary:hover")

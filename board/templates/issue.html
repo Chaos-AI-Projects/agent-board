@@ -84,7 +84,7 @@
 <summary>Plan as workflow</summary>
 <form autocomplete="off" method="post" action="/issues/{{ issue.id }}/plan{{ embed_q }}">
   <label>Steps, one per line, in order <textarea name="steps" required></textarea></label>
-  <button>Plan</button>
+  <button class="primary">Plan</button>
   <div>Each line becomes a ready step. This issue goes on hold and comes back ready when the last step is done.</div>
 </form>
 </details>
@@ -99,7 +99,7 @@
   <label>Rank <input name="rank" value="{{ issue.rank }}" size="6"></label>
   <label>Labels <input name="labels" value="{{ issue.labels|join(', ') }}"></label>
   <label>Attach files <input type="file" name="files" multiple></label>
-  <button>Save</button>
+  <button class="primary">Save</button>
 </form>
 </details>
 
@@ -107,7 +107,7 @@
 <h2>Reopen</h2>
 <form autocomplete="off" method="post" action="/issues/{{ issue.id }}/reopen{{ embed_q }}">
   <textarea name="note" required placeholder="Why it needs more work"></textarea>
-  <button>Reopen</button>
+  <button class="primary">Reopen</button>
   <div>Sends this card back to ready, where board next hands it out again. The reason goes in its history.</div>
 </form>
 {% endif %}
@@ -119,7 +119,7 @@
   <label>State <select name="state" data-current="{{ issue.state }}">{% for s in states %}<option title="{{ lane_hints[s] }}"{% if s == issue.state %} selected{% endif %}>{{ s }}</option>{% endfor %}</select></label>
   <textarea name="note" required></textarea>
   <label>Files <input type="file" name="files" multiple></label>
-  <button>Save</button>
+  <button class="primary">Save</button>
   <div>A note never needs the lease. A state change does, and the note becomes its reason; done and need-input need one.</div>
 </form>
 <script>
@@ -157,7 +157,7 @@
 <form autocomplete="off" method="post" action="/issues/{{ issue.id }}/link{{ embed_q }}">
   <select name="kind"><option>pr</option><option>commit</option><option>path</option><option>url</option></select>
   <input name="ref" required> <input name="name" placeholder="name (url only)" maxlength="200"> <label class="inline"><input type="checkbox" name="closes" value="1"> closes the issue</label>
-  <button>Link</button>
+  <button class="primary">Link</button>
 </form>
 
 <h2>History</h2>

@@ -9,7 +9,7 @@
     <input type="hidden" name="preempt" value="1">
     {% if dropped %}<p>Your files were not attached. Choose them again: {{ dropped|join(", ") }}</p>{% endif %}
     <input type="file" name="files" multiple>
-    <button>Take over and save</button>
+    <button class="primary">Take over and save</button>
   </form>
   <a href="/issues/{{ issue.id }}{{ embed_q }}">Cancel</a>
 </div>
