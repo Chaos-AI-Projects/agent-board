@@ -81,6 +81,9 @@ from board import auth, core, oauth, remote, signin, store
 
 ACTOR_HEADER = "Cf-Access-Authenticated-User-Email"
 ACTOR_ENV = "BOARD_WEB_ACTOR"
+# Sent by the issue page's own fetch of a form: a refusal comes back as JSON
+# for its popup rather than as the error page (AB-50).
+FETCH_HEADER = "x-board-fetch"
 HUMAN = "human"
 DEFAULT_PORT = 28090
 PORT_ENV = "BOARD_WEB_PORT"
@@ -894,13 +897,19 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
                 "tz": zone(saved_tz) or default_tz, "inline_types": INLINE_TYPES,
                 "sign_in": google is not None,
                 "moves": lambda issue: sorted(core.TRANSITIONS[issue["state"]]),
-                "lane_hints": core.LANE_HINTS, "stamp_poll_ms": STAMP_POLL_SECONDS * 1000, "embed_q": "?embed=1" if embedded(request) else ""}
+                "lane_hints": core.LANE_HINTS, "fetch_header": FETCH_HEADER, "stamp_poll_ms": STAMP_POLL_SECONDS * 1000, "embed_q": "?embed=1" if embedded(request) else ""}
         r = templates.TemplateResponse(request, name, ctx, status_code=status)
         # The board frames its own issue pages (MS-662); nobody else may.
         r.headers["content-security-policy"] = "frame-ancestors 'self'"
         return r
 
     def error(request, status, message, issue_id=None):
+        if request.headers.get(FETCH_HEADER):
+            return JSONResponse({"error": message}, status_code=status)
+        # A refused write on an issue leads back to that issue (AB-50), unless
+        # the issue itself is what was not found.
+        if issue_id is None and status != 404:
+            issue_id = request.path_params.get("issue_id")
         return page(request, "error.html", status, message=message, issue_id=issue_id)
 
     def back(issue_id=None, request=None):
@@ -1134,7 +1143,8 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
 
     @app.get("/stats", response_class=HTMLResponse)
     def stats_page(request: Request, days: int = core.STATS_DAYS):
-        return page(request, "stats.html", stats=core.stats(engine, days=days),
+        return page(request, "stats.html",
+                    stats=core.stats(engine, days=days, agents=auth.mapped_agents()),
                     days_max=core.STATS_DAYS_MAX)
 
     @app.get("/preferences", response_class=HTMLResponse)

@@ -108,10 +108,15 @@
     if (evt.from.dataset.state === evt.to.dataset.state) { dragging = false; return; }
     var card = evt.item, state = evt.to.dataset.state;
     var body = new URLSearchParams({version: card.dataset.version, state: state});
-    if (state === "done" || state === "need-input") {
-      var note = prompt("A move to " + state + " needs a note:");
+    if (state === "need-input") {
+      var note = prompt("A move to need-input needs a note:");
       if (!note) { location.reload(); return; }
       body.set("note", note);
+    } else if (state === "done") {
+      // A human closes without a note (AB-49); Cancel still abandons the move.
+      var reason = prompt("A note for done (optional):");
+      if (reason === null) { location.reload(); return; }
+      if (reason) body.set("note", reason);
     }
     var r;
     try {

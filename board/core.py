@@ -45,6 +45,8 @@ TRANSITIONS: dict[str, set[str]] = {
     "cancelled": set(),
 }
 NOTE_REQUIRED = {"done", "need-input"}
+# States a human may move a card into without a note (AB-49).
+HUMAN_NOTE_OPTIONAL = {"done"}
 # A move that needs a note though its target state does not: the reason for a reopen.
 NOTE_REQUIRED_MOVES = {("done", "ready")}
 # One line per lane, shown under its column heading and beside an issue's
@@ -53,14 +55,14 @@ LANE_HINTS: dict[str, str] = {
     "backlog": "Filed, not authorized. Agents never pick it.",
     "ready": "Authorized. board next takes the highest-ranked card here.",
     "need-input": "An agent is waiting on you: a question, or finished work to review. "
-                  "Your note or edit sends it back to ready; pick done with the "
-                  "note if nothing is left.",
+                  "Your note or edit sends it back to ready; pick done if nothing "
+                  "is left.",
     "processing": "An agent holds it under a 90-minute lease. Only board next puts "
                   "a card here.",
     "onhold": "Frozen; exits only to backlog. A card split into a workflow waits here "
               "and returns to ready when the last step is done.",
-    "done": "Finished, with a required note such as a PR. The agent that finished "
-            "a card closes it. Reopening sends it back to ready with a reason.",
+    "done": "Finished. An agent closes with a note such as a PR; you may close "
+            "without one. Reopening sends it back to ready with a reason.",
     "cancelled": "Dropped. Final.",
 }
 CREATE_STATES = {"backlog", "ready"}
@@ -432,7 +434,25 @@ STATS_DAYS = 14
 STATS_DAYS_MAX = 3650
 
 
-def stats(engine, *, days: int = STATS_DAYS, limit: int = 50) -> dict:
+SERVICE_ACCOUNT_SUFFIX = ".gserviceaccount.com"
+
+
+def counted_kind(actor: str, kind: str, agents=frozenset()) -> str:
+    """The kind /stats counts an event under (AB-48).
+
+    Before AB-41, a call made with a human's token was stamped `agent`. An
+    email that is not a service account's and is not in `agents` (the
+    emails BOARD_SA_MAP maps service accounts to) is a human's, so its
+    agent events count as human. A bare name such as `overlord` stays agent.
+    """
+    who = actor.lower()
+    if (kind == "agent" and "@" in who and not who.endswith(SERVICE_ACCOUNT_SUFFIX)
+            and who not in agents):
+        return "human"
+    return kind
+
+
+def stats(engine, *, days: int = STATS_DAYS, limit: int = 50, agents=frozenset()) -> dict:
     """What each actor did in the last `days` days, read from the event log (AB-29).
 
     Per actor and actor kind: `created` counts create events, `moved` counts
@@ -441,7 +461,8 @@ def stats(engine, *, days: int = STATS_DAYS, limit: int = 50) -> dict:
     any kind. A reclaim, a preempt, or a transition to the state the issue is
     already in records an event but is not a move. `actors` is busiest first.
     `activity` is the newest `limit` events in the window, newest first by
-    event id, because imported events share one timestamp.
+    event id, because imported events share one timestamp. Kinds are as
+    `counted_kind` reads them, with `agents` passed through.
     """
     if not 1 <= days <= STATS_DAYS_MAX:
         raise BoardError(f"the window is 1 to {STATS_DAYS_MAX} days, not {days}")
@@ -463,14 +484,22 @@ def stats(engine, *, days: int = STATS_DAYS, limit: int = 50) -> dict:
         activity = s.execute(
             select(Event, Issue.title).join(Issue, Event.issue_id == Issue.id)
             .where(Event.at >= since).order_by(Event.id.desc()).limit(limit)).all()
+        actors: dict[tuple[str, str], dict] = {}
+        for a, k, *counts in rows:
+            kind = counted_kind(a, k, agents)
+            row = actors.setdefault((a, kind), {"actor": a, "actor_kind": kind, "created": 0,
+                                                "moved": 0, "done": 0, "noted": 0,
+                                                "events": 0})
+            for name, n in zip(("created", "moved", "done", "noted", "events"), counts):
+                row[name] += n
         return {
             "now": _iso(now), "since": _iso(since), "days": days,
-            "actors": sorted(
-                ({"actor": a, "actor_kind": k, "created": c, "moved": m, "done": d,
-                  "noted": n, "events": e} for a, k, c, m, d, n, e in rows),
-                key=lambda r: (-r["events"], r["actor"], r["actor_kind"])),
+            "actors": sorted(actors.values(),
+                             key=lambda r: (-r["events"], r["actor"], r["actor_kind"])),
             "activity": [{"issue_id": ev.issue_id, "title": title, "at": _iso(ev.at),
-                          "actor": ev.actor, "actor_kind": ev.actor_kind, "kind": ev.kind,
+                          "actor": ev.actor,
+                          "actor_kind": counted_kind(ev.actor, ev.actor_kind, agents),
+                          "kind": ev.kind,
                           "from_state": ev.from_state, "to_state": ev.to_state,
                           "note": ev.note}
                          for ev, title in activity],
@@ -1118,7 +1147,8 @@ def _create(s, project, title, actor, actor_kind, body, state, rank, labels,
 def _apply_state(s, issue, state, note, actor, actor_kind, now, key, key_used):
     if state not in TRANSITIONS:
         raise InvalidTransition(f"unknown state {state!r}")
-    if state in NOTE_REQUIRED and not note:
+    if (state in NOTE_REQUIRED and not note
+            and not (actor_kind == "human" and state in HUMAN_NOTE_OPTIONAL)):
         raise NoteRequired(f"a transition into {state} needs a note")
     old = issue.state
     if (old, state) in NOTE_REQUIRED_MOVES and not note:

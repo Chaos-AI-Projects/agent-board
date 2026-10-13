@@ -134,7 +134,8 @@ def build_server(engine, actor: str | Callable[[], str], brain=_FROM_ENV,
     @mcp.tool()
     def transition(id: str, state: str, token: str | None = None, note: str | None = None,
                    request_id: str | None = None, preempt: bool = False) -> CallToolResult:
-        """Move an issue to another state. `done` and `need-input` need a note.
+        """Move an issue to another state. `need-input` needs a note, and so does an
+        agent's `done`; a human may close without one.
 
         An agent closes its own card as `done`. A card it left at `need-input`
         it may still move to `done` or `cancelled` without a lease. A `done`

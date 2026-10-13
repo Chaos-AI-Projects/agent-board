@@ -123,6 +123,14 @@ def _split(value: str | None) -> frozenset[str]:
     return frozenset(v.strip().lower() for v in (value or "").split(",") if v.strip())
 
 
+def mapped_agents() -> frozenset[str]:
+    """The emails BOARD_SA_MAP maps service accounts to: agents whatever their domain."""
+    try:
+        return frozenset(_sa_map(os.environ.get(SA_MAP_ENV)).values())
+    except ValueError:
+        return frozenset()
+
+
 def _sa_map(value: str | None) -> dict[str, str]:
     """BOARD_SA_MAP as {service-account id: email}; a malformed entry refuses to start."""
     found: dict[str, str] = {}

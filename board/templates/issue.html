@@ -120,7 +120,7 @@
   <textarea name="note" required></textarea>
   <label>Files <input type="file" name="files" multiple></label>
   <button class="primary">Save</button>
-  <div>A note never needs the lease. A state change does, and the note becomes its reason; done and need-input need one.</div>
+  <div>A note never needs the lease. A state change does, and the note becomes its reason; need-input needs one, and so does leaving done.</div>
 </form>
 <script>
   // Without JS the note is always required and the button reads Save. With it,
@@ -164,4 +164,53 @@
 <ul class="events">{% for e in issue.events|reverse %}
 <li>{{ e.at|localtime(tz) }} &middot; {{ e.actor }} ({{ e.actor_kind }}) &middot; {{ e.kind }}{% if e.from_state or e.to_state %} {{ e.from_state or "" }} &rarr; {{ e.to_state or "" }}{% endif %}{% if e.note and e.kind in ("annotate", "transition") %}<div class="markdown">{{ e.note|markdown }}</div>{% elif e.note %}: {{ e.note }}{% endif %}{{ files(e.attachments) }}</li>
 {% endfor %}</ul>
+
+<dialog id="write-error" class="error">
+  <p></p>
+  <form autocomplete="off" method="dialog"><button class="primary">OK</button></form>
+</dialog>
+<script>
+  // AB-50: a write from this page is sent with fetch, so a refusal pops up over
+  // the issue and keeps what was typed. A success follows the redirect; any
+  // other page, such as the take-over form, replaces this one. Without JS the
+  // forms post as before and the error page links back here.
+  (function () {
+    var dlg = document.getElementById("write-error");
+    if (!dlg || !window.fetch) return;
+    function show(message) {
+      dlg.querySelector("p").textContent = message;
+      if (!dlg.open) dlg.showModal();
+    }
+    // The take-over page is written over this one at the same address, so this
+    // window's stamp poll, and the board's in embed mode, must not reload it.
+    var replaced = false;
+    window.extraBusy = function () { return dlg.open || replaced; };
+    document.querySelectorAll('form[method=post][action^="/issues/"]').forEach(function (form) {
+      form.addEventListener("submit", function (ev) {
+        if (ev.defaultPrevented) return;
+        ev.preventDefault();
+        if (form.dataset.sending) return;
+        form.dataset.sending = "1";
+        var body = new FormData(form);
+        if (ev.submitter && ev.submitter.name) body.append(ev.submitter.name, ev.submitter.value);
+        var headers = {};
+        headers["{{ fetch_header }}"] = "1";
+        fetch(form.action, {method: "POST", body: body, headers: headers, credentials: "same-origin"})
+          .then(function (r) {
+            var type = r.headers.get("content-type") || "";
+            if (!r.ok && type.indexOf("application/json") === 0) {
+              return r.json().then(function (got) { show(got.error); });
+            }
+            if (r.redirected) { location.href = r.url; return; }
+            return r.text().then(function (html) {
+              replaced = true;
+              document.open(); document.write(html); document.close();
+            });
+          })
+          .catch(function () { show("The board did not answer, or your sign-in has expired. Reload the page, then try again."); })
+          .finally(function () { delete form.dataset.sending; });
+      });
+    });
+  })();
+</script>
 {% endblock %}

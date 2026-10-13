@@ -679,7 +679,7 @@ def test_a_board_rule_is_shown_not_raised(board, client):
     core.edit(board, iid, actor=CHAOS, expected_version=core.show(board, iid)["version"],
               title="t", preempt=True)
     issue = core.show(board, iid)
-    r = client.post(f"/issues/{iid}/note", data=note_form(issue, state="done"),
+    r = client.post(f"/issues/{iid}/note", data=note_form(issue, state="need-input"),
                     headers=AS_CHAOS)
     assert r.status_code == 422
     assert "needs a note" in r.text
@@ -3981,3 +3981,64 @@ def test_ab46_primary_buttons_are_filled_accent_with_readable_text(client):
         assert ratio >= 4.5, (selector, ratio)
     # Hover must not lighten the light accent under white text.
     assert "brightness(0.9)" in _css_rule(html, "button.primary:hover")
+
+
+# --- AB-48 / AB-49 / AB-50 -------------------------------------------------------------
+
+
+def test_ab48_the_stats_page_shows_a_human_emails_agent_events_as_human(board, client,
+                                                                        monkeypatch):
+    monkeypatch.setenv("BOARD_SA_MAP", "123=mapped@example.com")
+    core.create(board, "MS", "a", actor=CHAOS, actor_kind=AGENT)
+    core.create(board, "MS", "b", actor=CHAOS, actor_kind=HUMAN)
+    core.create(board, "MS", "c", actor="mapped@example.com", actor_kind=AGENT)
+    html = client.get("/stats").text
+    assert stats_row(html, CHAOS) == [CHAOS, HUMAN, "2", "0", "0", "0", "2"]
+    assert stats_row(html, "mapped@example.com")[1] == AGENT
+
+
+def test_ab49_the_note_form_closes_a_card_without_a_note(board, client):
+    iid = ready(board)
+    tok = core.next(board, "w1")["lease_token"]
+    core.transition(board, iid, "need-input", note="merged", actor="w1", actor_kind=AGENT,
+                    token=tok)
+    version = core.show(board, iid)["version"]
+    r = client.post(f"/issues/{iid}/note", data={"state": "done", "from_state": "need-input",
+                                                 "version": version, "note": ""},
+                    headers=AS_CHAOS)
+    assert r.status_code == 303
+    assert core.show(board, iid)["state"] == "done"
+
+
+def test_ab50_a_refused_issue_write_links_back_to_the_issue(board, client):
+    iid = ready(board)
+    r = client.post(f"/issues/{iid}/link", data={"kind": "nope", "ref": "x"}, headers=AS_CHAOS)
+    assert r.status_code == 422
+    assert f'href="/issues/{iid}"' in r.text
+    assert "Back to the board" not in r.text
+
+
+def test_ab50_a_fetched_issue_write_gets_its_refusal_as_json(board, client):
+    iid = ready(board)
+    r = client.post(f"/issues/{iid}/link", data={"kind": "nope", "ref": "x"},
+                    headers=AS_CHAOS | {web.FETCH_HEADER: "1"})
+    assert r.status_code == 422
+    assert r.headers["content-type"].startswith("application/json")
+    assert r.json()["error"]
+
+
+def test_ab50_the_issue_page_pops_up_write_errors(board, client):
+    html = client.get(f"/issues/{ready(board)}").text
+    assert '<dialog id="write-error"' in html
+    assert web.FETCH_HEADER in html
+
+
+def test_ab49_a_drag_to_done_asks_for_an_optional_note(client):
+    html = client.get("/").text
+    assert "A note for done (optional)" in html
+    assert 'prompt("A move to " + state' not in html
+
+
+def test_ab50_a_written_take_over_page_holds_the_auto_reload(board, client):
+    html = client.get(f"/issues/{ready(board)}").text
+    assert "return dlg.open || replaced;" in html

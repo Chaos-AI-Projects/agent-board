@@ -166,8 +166,6 @@ def test_a_human_closes_a_need_input_card_as_done(board):
     tok = core.next(board, "w1")["lease_token"]
     core.transition(board, iid, "need-input", note="merged, please review", actor="w1",
                     actor_kind=AGENT, token=tok)
-    with pytest.raises(core.NoteRequired):
-        core.transition(board, iid, "done", actor=CHAOS, actor_kind=HUMAN)
     issue = core.transition(board, iid, "done", note="reviewed", actor=CHAOS,
                             actor_kind=HUMAN)
     last = issue["events"][-1]
@@ -1989,3 +1987,56 @@ def test_ab43_lane_meta_gives_each_url_its_name(board):
     assert core.lane_meta(board)[iid]["urls"] == [
         {"ref": "https://a.example/1", "name": "One"},
         {"ref": "https://b.example/2", "name": None}]
+
+
+# --- AB-48 / AB-49 ---------------------------------------------------------------------
+
+
+def test_ab48_stats_count_a_human_emails_agent_events_as_human(board):
+    """Before AB-41 a call on a human's token was stamped agent; it counts as human."""
+    a = core.create(board, "MS", "a", actor=CHAOS, actor_kind=AGENT, state="ready")["id"]
+    core.annotate(board, a, "n", actor=CHAOS, actor_kind=HUMAN)
+    sa = "bot@proj.iam.gserviceaccount.com"
+    core.create(board, "MS", "b", actor=sa, actor_kind=AGENT)
+    core.create(board, "MS", "c", actor="mapped@example.com", actor_kind=AGENT)
+    core.create(board, "MS", "d", actor="w1", actor_kind=AGENT)
+    view = core.stats(board, agents={"mapped@example.com"})
+    rows = {(r["actor"], r["actor_kind"]): r for r in view["actors"]}
+    assert set(rows) == {(CHAOS, HUMAN), (sa, AGENT), ("mapped@example.com", AGENT),
+                         ("w1", AGENT)}
+    assert (rows[CHAOS, HUMAN]["created"], rows[CHAOS, HUMAN]["noted"],
+            rows[CHAOS, HUMAN]["events"]) == (1, 1, 2)
+    assert {e["actor_kind"] for e in view["activity"] if e["actor"] == CHAOS} == {HUMAN}
+
+
+def test_ab49_a_human_closes_a_card_without_a_note(board):
+    iid = ready(board)
+    tok = core.next(board, "w1")["lease_token"]
+    core.transition(board, iid, "need-input", note="merged", actor="w1", actor_kind=AGENT,
+                    token=tok)
+    for note in (None, ""):
+        issue = core.transition(board, iid, "done", note=note, actor=CHAOS, actor_kind=HUMAN)
+        assert issue["state"] == "done"
+        if note is None:
+            core.transition(board, iid, "ready", note="again", actor=CHAOS, actor_kind=HUMAN)
+            tok = core.next(board, "w1")["lease_token"]
+            core.transition(board, iid, "need-input", note="m", actor="w1", actor_kind=AGENT,
+                            token=tok)
+
+
+def test_ab49_an_agent_still_needs_a_note_for_done_and_need_input(board):
+    iid = ready(board)
+    tok = core.next(board, "w1")["lease_token"]
+    for state in ("done", "need-input"):
+        with pytest.raises(core.NoteRequired):
+            core.transition(board, iid, state, actor="w1", actor_kind=AGENT, token=tok)
+
+
+def test_ab49_a_human_still_needs_a_note_for_need_input_and_a_reopen(board):
+    iid = ready(board)
+    tok = core.next(board, "w1")["lease_token"]
+    with pytest.raises(core.NoteRequired):
+        core.transition(board, iid, "need-input", actor=CHAOS, actor_kind=HUMAN, preempt=True)
+    core.transition(board, iid, "done", actor="w1", actor_kind=AGENT, note="PR", token=tok)
+    with pytest.raises(core.NoteRequired):
+        core.transition(board, iid, "ready", actor=CHAOS, actor_kind=HUMAN)
