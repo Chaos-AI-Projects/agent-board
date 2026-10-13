@@ -321,7 +321,9 @@ A request to `/mcp` needs `Authorization: Bearer` with a token the board issued,
 two Bearer tokens verified mode accepts above: a Google access token or a service-account ID token. Anything else gets 401 naming the
 metadata URL. The email behind the token must be in `BOARD_ALLOWED_EMAILS`, re-checked on every call,
 so removing an email cuts off its grants without revoking them. That email is the actor of each
-tool call, recorded as an `agent`. The issuer is `https://` plus the first `BOARD_WEB_HOSTS` entry,
+tool call. Its kind follows the token (AB-41). A grant the board issued is `human`, since only a
+signed-in browser session can approve one, and a Google token takes the kind verified mode gives
+its email. A service account is always an `agent`, and so is every stdio call. The issuer is `https://` plus the first `BOARD_WEB_HOSTS` entry,
 or the loopback URL when that is unset.
 
 ## Database

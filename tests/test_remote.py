@@ -172,13 +172,29 @@ def test_code_flow_then_tool_call_writes_as_the_authorizing_email(board, migrate
     assert initialize(board, access).status_code == 200
     made = create_issue(board, access)
     events = core.show(migrated, made["id"])["events"]
-    assert (events[0]["actor"], events[0]["actor_kind"]) == (CHAOS, auth.AGENT)
+    # The grant was approved at a human's browser session, so its calls are that human's (AB-41).
+    assert (events[0]["actor"], events[0]["actor_kind"]) == (CHAOS, auth.HUMAN)
 
 
 def test_google_access_token_is_accepted(board, migrated):
     assert initialize(board, "google-token").status_code == 200
     made = create_issue(board, "google-token")
-    assert core.show(migrated, made["id"])["events"][0]["actor"] == CHAOS
+    events = core.show(migrated, made["id"])["events"]
+    assert (events[0]["actor"], events[0]["actor_kind"]) == (CHAOS, auth.HUMAN)
+
+
+def test_ab41_a_human_token_note_answers_a_need_input_card(board, migrated):
+    # Human-only rules apply over MCP too: a human's note releases need-input (AB-10).
+    issue_id = core.create(migrated, "MS", "asks", state="ready", actor="overlord",
+                           actor_kind="agent")["id"]
+    lease = core.next(migrated, "overlord")["lease_token"]
+    core.transition(migrated, issue_id, "need-input", token=lease, note="which one?",
+                    actor="overlord", actor_kind="agent")
+    r = rpc(board, "google-token", "tools/call", {"name": "annotate", "arguments": {
+        "id": issue_id, "note": "the second"}}, id=2)
+    assert r.status_code == 200, r.text
+    assert not body(r)["result"].get("isError"), r.text
+    assert core.show(migrated, issue_id)["state"] == "ready"
 
 
 def test_token_of_an_email_since_removed_is_refused(board, migrated, monkeypatch):
@@ -406,3 +422,17 @@ def test_no_mcp_when_verified_without_the_sa_audience(migrated, monkeypatch):
         env, tokeninfo=tokeninfo), sign_in=None)
     with TestClient(app, base_url=ORIGIN) as c:
         assert initialize(c, "google-token").status_code in (404, 405)
+
+
+def test_ab41_a_board_grant_to_a_service_account_email_stays_agent():
+    # Consent needs a human session, but the kind still follows the email as auth's does.
+    from mcp.server.auth.provider import AccessToken
+    from board import remote
+
+    class Granted:
+        async def load_access_token(self, token):
+            return AccessToken(token=token, client_id="c", scopes=[remote.SCOPE], subject=BOT)
+
+    found = asyncio.run(remote.Verifier(Granted(), auth.Authenticator(), lambda _email: True)
+                        .verify_token("t"))
+    assert found.claims[remote.KIND_CLAIM] == auth.AGENT

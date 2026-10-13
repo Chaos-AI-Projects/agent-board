@@ -10,7 +10,10 @@ A Bearer token is either one the board issued or, for Claude Code, an
 MS-631 Google access token. The board's own tokens are re-checked against
 BOARD_ALLOWED_EMAILS and its files on every call, so removing an email cuts
 off the grants it made without revoking them. The actor of a tool call is the token's
-email, recorded as kind `agent`.
+email. Its kind is the token's (AB-41): a grant the board issued was approved
+at a human's browser session, so it is `human` unless its email is a service
+account's, and a Google token is
+whatever `auth.Authenticator` says, so a service account stays `agent`.
 
 The issuer is `https://` plus the first BOARD_WEB_HOSTS entry, since that is
 the name clients reach the board by; with none set it is the loopback URL.
@@ -54,6 +57,8 @@ PATHS = frozenset({MCP_PATH, "/.well-known/oauth-authorization-server",
                    "/.well-known/oauth-protected-resource" + MCP_PATH,
                    "/register", "/authorize", "/token", "/revoke"})
 GOOGLE_CLIENT = "google"
+# The AccessToken claim carrying the caller's actor kind.
+KIND_CLAIM = "actor_kind"
 
 
 def issuer(hosts: list[str], loopback: str) -> str:
@@ -75,12 +80,19 @@ class Verifier:
         found = (await self.provider.load_access_token(token)
                  if self.provider is not None else None)
         if found is not None:
-            return found if found.subject and self.allowed(found.subject) else None
+            if not found.subject or not self.allowed(found.subject):
+                return None
+            # Only a signed-in human can approve the consent that made this grant,
+            # but a service account's email is an agent wherever it appears.
+            kind = (auth.AGENT if found.subject.endswith(auth.SERVICE_ACCOUNT_SUFFIX)
+                    else auth.HUMAN)
+            return found.model_copy(update={"claims": {**(found.claims or {}),
+                                                       KIND_CLAIM: kind}})
         who = await run_in_threadpool(self.authn.identify, {"authorization": f"Bearer {token}"})
         if who is None:
             return None
         return AccessToken(token=token, client_id=GOOGLE_CLIENT, scopes=[SCOPE],
-                           subject=who.email)
+                           subject=who.email, claims={KIND_CLAIM: who.kind})
 
 
 def public_revocation(app):
@@ -124,6 +136,13 @@ def _actor() -> str:
     return token.subject
 
 
+def _kind() -> str:
+    token = get_access_token()
+    kind = (token.claims or {}).get(KIND_CLAIM) if token is not None else None
+    # Anything the Verifier did not stamp is the least trusted kind.
+    return kind if kind in (auth.HUMAN, auth.AGENT) else auth.AGENT
+
+
 def build(engine, provider: oauth.Provider | None, authn: auth.Authenticator,
           allowed: Callable[[str], bool], issuer_url: str):
     """The routes to mount, and a lifespan that runs the MCP session manager.
@@ -132,7 +151,7 @@ def build(engine, provider: oauth.Provider | None, authn: auth.Authenticator,
     base = AnyHttpUrl(issuer_url)
     resource = AnyHttpUrl(issuer_url.rstrip("/") + MCP_PATH)
     manager = StreamableHTTPSessionManager(
-        app=mcp_server.build_server(engine, _actor)._mcp_server, stateless=True)
+        app=mcp_server.build_server(engine, _actor, kind=_kind)._mcp_server, stateless=True)
 
     async def handle(scope, receive, send):
         await manager.handle_request(scope, receive, send)

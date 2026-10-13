@@ -244,6 +244,25 @@ def test_a_callable_actor_is_resolved_on_every_call(migrated):
     assert core.show(migrated, first)["events"][-1]["actor_kind"] == "agent"
 
 
+def test_ab41_a_callable_actor_kind_is_resolved_on_every_call(migrated):
+    # Over HTTP a human's token acts as a human, a service account's as an agent.
+    board(migrated)
+    kinds = iter(["human", "agent"])
+
+    async def run():
+        server = build_server(migrated, WORKER, kind=lambda: next(kinds))
+        async with create_connected_server_and_client_session(server) as client:
+            made = []
+            for title in ("by a human", "by an agent"):
+                result = await client.call_tool("create", {"project": "MS", "title": title})
+                made.append(json.loads(result.content[0].text)["id"])
+            return made
+
+    by_human, by_agent = anyio.run(run)
+    assert core.show(migrated, by_human)["events"][0]["actor_kind"] == "human"
+    assert core.show(migrated, by_agent)["events"][0]["actor_kind"] == "agent"
+
+
 def test_search_finds_issues_by_query_and_project(migrated):
     board(migrated)
     core.create_project(migrated, "AB", "agent-board")

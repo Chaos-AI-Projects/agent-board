@@ -7,10 +7,10 @@ edits. `projects` is the one tool the CLI lacks (AB-6): an agent creating a
 card needs the project keys, and over MCP it has no other way to learn them.
 
 Over stdio one server is one agent, and the actor comes from BOARD_ACTOR
-when the server starts. Over HTTP (MS-649) the actor is a callable, asked
-on every tool call for whoever the request's token names. Either way every
-write is recorded as `agent`. The lease token is a tool
-argument, as it is the CLI's `--token`.
+when the server starts; every write is recorded as `agent`. Over HTTP
+(MS-649) the actor and its kind are callables, asked on every tool call for
+whoever the request's token names, so a human's token writes as `human`
+(AB-41). The lease token is a tool argument, as it is the CLI's `--token`.
 
 A success returns the operation's dict as JSON. `next` on an empty queue
 is a success, `{"issue": null}`, because an empty queue is not a fault. An
@@ -72,17 +72,19 @@ def _ttl(minutes: float) -> timedelta:
 _FROM_ENV = object()
 
 
-def build_server(engine, actor: str | Callable[[], str], brain=_FROM_ENV) -> FastMCP:
-    """A server whose tools act on `engine` as the agent `actor`, or as whoever
-    `actor()` returns at each call. `brain` defaults to Brain.from_env(), and
-    None leaves the brain tools out."""
+def build_server(engine, actor: str | Callable[[], str], brain=_FROM_ENV,
+                 kind: str | Callable[[], str] = "agent") -> FastMCP:
+    """A server whose tools act on `engine` as `actor` of kind `kind`, or as
+    whoever `actor()` and `kind()` return at each call. `brain` defaults to
+    Brain.from_env(), and None leaves the brain tools out."""
     mcp = FastMCP("agent-board")
     if brain is _FROM_ENV:
         brain = Brain.from_env()
     current = actor if callable(actor) else (lambda: actor)
+    current_kind = kind if callable(kind) else (lambda: kind)
 
     def who() -> dict:
-        return {"actor": current(), "actor_kind": "agent"}
+        return {"actor": current(), "actor_kind": current_kind()}
 
     def run(op, *args, **kwargs) -> CallToolResult:
         # One catch-all, like cli.main(): a list of database and driver
