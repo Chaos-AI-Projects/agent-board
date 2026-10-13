@@ -14,7 +14,7 @@
     <label>State <select name="state"><option>backlog</option><option>ready</option></select></label>
     <label>Labels <input name="labels" placeholder="comma, separated"></label>
     <label>Files <input type="file" name="files" multiple></label>
-    <button>Create</button>
+    <button>Create</button> <button type="reset" class="cancel">Cancel</button>
   </form>
 </details>
 {% if view.templates %}
@@ -305,6 +305,13 @@
       box.querySelectorAll("input").forEach(function (i) { i.required = on; });
     }
     select.addEventListener("change", sync);
+    // AB-45: Cancel is a reset button, so it clears the form without sending
+    // it; here it also closes the form. The reset event fires before the
+    // fields are cleared, so the fieldset is synced on the next tick.
+    form.addEventListener("reset", function () {
+      form.closest("details").open = false;
+      setTimeout(sync);
+    });
     sync();
   });
 </script>

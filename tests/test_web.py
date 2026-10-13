@@ -3889,3 +3889,19 @@ def test_ab44_a_link_href_is_escaped(board, client):
     arts = artifact_list(client.get(f"/issues/{issue_id}").text)
     assert 'onmouseover="x' not in arts
     assert re.search(r'<a href="https://example.com/&#34;onmouseover=&#34;x"', arts)
+
+
+def test_ab45_the_new_issue_form_has_a_cancel_beside_create(board, client):
+    """Cancel resets the form rather than submitting it, and sits after Create."""
+    form = client.get("/").text.split('action="/issues"', 1)[1].split("</form>", 1)[0]
+    assert '<button type="reset" class="cancel">Cancel</button>' in form
+    assert form.index("<button>Create</button>") < form.index('class="cancel"')
+
+
+def test_ab45_cancel_closes_the_form_and_hides_the_new_project_fields(board, client):
+    """The script closes the details on Cancel and re-syncs the AB-28 fieldset after the reset."""
+    html = client.get("/").text
+    script = html.split("// AB-45", 1)[1].split("</script>", 1)[0]
+    assert 'addEventListener("reset"' in script
+    assert ".open = false" in script
+    assert "setTimeout(sync" in script
