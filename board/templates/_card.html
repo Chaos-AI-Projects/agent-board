@@ -6,6 +6,6 @@
          data-href="/issues/{{ issue.id }}" data-moves="{{ moves(issue)|join(' ') }}">
   <a href="/issues/{{ issue.id }}">{{ issue.id }}</a> {{ issue.title }}
   {% if issue.labels %}<div class="labels">{% for l in issue.labels %}<span>{{ l }}</span> {% endfor %}</div>{% endif %}
-  {% if m %}<div class="card-meta"><span class="age" title="in {{ issue.state }} since {{ m.entered_at|localtime(tz) if tz is defined else m.entered_at }}">{{ lane_age(m.entered_at, now) }}</span>{% if m.pr and m.pr.startswith(("https://", "http://")) %} <a class="pr" href="{{ m.pr }}" target="_blank" rel="noopener" title="Pull request {{ m.pr }}">PR</a>{% endif %}</div>{% endif %}
+  {% if m %}<div class="card-meta"><span class="age" title="in {{ issue.state }} since {{ m.entered_at|localtime(tz) if tz is defined else m.entered_at }}">{{ lane_age(m.entered_at, now) }}</span>{% if m.pr and m.pr.startswith(("https://", "http://")) %} <a class="pr" href="{{ m.pr }}" target="_blank" rel="noopener" title="Pull request {{ m.pr }}">PR</a>{% endif %}{% for u in m.urls if u.startswith(("https://", "http://")) %} <a class="url" href="{{ u }}" target="_blank" rel="noopener" title="{{ u }}">{{ u|url_host }}</a>{% endfor %}</div>{% endif %}
   {% include "_lease.html" %}
 </article>

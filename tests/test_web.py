@@ -3652,3 +3652,54 @@ def test_ab39_every_page_has_a_glider_favicon(board, client):
         cells = {(int(float(x)), int(float(y)))
                  for x, y in re.findall(r"<rect class='cell' x='([\d.]+)' y='([\d.]+)'", svg)}
         assert cells == glider, path
+
+
+def test_ab40_a_card_shows_each_url_artifact_as_a_link_named_by_its_host(board, client):
+    issue_id = ready(board)
+    first, second = "https://docs.google.com/document/d/x", "http://web.chaoseternal.net/doc/y"
+    for url in (first, second):
+        core.link(board, issue_id, url, kind="url", actor=CHAOS, actor_kind=HUMAN)
+    c = card(client.get("/").text, issue_id)
+    links = re.findall(r'<a class="url" href="([^"]+)"[^>]*>([^<]*)</a>', c)
+    assert links == [(first, "docs.google.com"), (second, "web.chaoseternal.net")]
+    bare = ready(board, "bare")
+    assert 'class="url"' not in card(client.get("/").text, bare)
+
+
+def test_ab40_a_card_shows_its_url_links_beside_its_pr_link(board, client):
+    issue_id = ready(board)
+    core.link(board, issue_id, "https://github.com/o/r/pull/7", kind="pr", actor=CHAOS,
+              actor_kind=HUMAN)
+    core.link(board, issue_id, "https://example.com/a", kind="url", actor=CHAOS, actor_kind=HUMAN)
+    c = card(client.get("/").text, issue_id)
+    assert 'class="pr"' in c and 'class="url"' in c
+
+
+def test_ab40_a_url_ref_that_is_not_http_is_not_a_link(board, client):
+    issue_id = ready(board)
+    core.link(board, issue_id, "javascript:alert(1)", kind="url", actor=CHAOS, actor_kind=HUMAN)
+    assert 'class="url"' not in card(client.get("/").text, issue_id)
+
+
+def test_ab40_core_reports_each_issues_url_refs_in_link_order(board):
+    issue_id = ready(board)
+    assert core.lane_meta(board)[issue_id]["urls"] == []
+    for url in ("https://a.example/1", "https://b.example/2"):
+        core.link(board, issue_id, url, kind="url", actor=CHAOS, actor_kind=HUMAN)
+    assert core.lane_meta(board)[issue_id]["urls"] == ["https://a.example/1", "https://b.example/2"]
+
+
+def test_ab40_the_board_stamp_moves_when_a_url_is_linked(board, client):
+    issue_id = ready(board)
+    before = board_stamp(client)
+    core.link(board, issue_id, "https://example.com/a", kind="url", actor=CHAOS, actor_kind=HUMAN)
+    assert board_stamp(client) != before
+
+
+def test_ab40_a_url_python_cannot_parse_still_renders_the_board(board, client):
+    issue_id = ready(board)
+    core.link(board, issue_id, "https://[oops/x", kind="url", actor=CHAOS, actor_kind=HUMAN)
+    r = client.get("/")
+    assert r.status_code == 200
+    assert re.search(r'<a class="url" href="https://\[oops/x"[^>]*>https://\[oops/x</a>',
+                     card(r.text, issue_id))

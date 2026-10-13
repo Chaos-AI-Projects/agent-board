@@ -344,6 +344,18 @@ def lane_age(entered_at: str, now: str) -> str:
     return f"{minutes // 60}h" if minutes < 24 * 60 else f"{minutes // (24 * 60)}d"
 
 
+def url_host(url: str) -> str:
+    """A url artifact's card label: its host, or the whole ref if it has none (AB-40).
+
+    No ref is validated on the way in, and urlsplit raises on one like
+    `https://[oops`, which would take the whole board page down with it.
+    """
+    try:
+        return urlsplit(url).hostname or url
+    except ValueError:
+        return url
+
+
 def project_colour(key: str, bucket: int | None = None) -> dict:
     """A project's card colours: a hue from its bucket, a shade from its key (MS-655).
 
@@ -369,6 +381,7 @@ templates.env.globals["lane_age"] = lane_age
 templates.env.filters["markdown"] = markdown
 templates.env.filters["filesize"] = filesize
 templates.env.filters["localtime"] = localtime
+templates.env.filters["url_host"] = url_host
 
 
 class Unauthenticated(Exception):

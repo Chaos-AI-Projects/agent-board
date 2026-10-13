@@ -198,7 +198,8 @@ def lane_meta(engine) -> dict[str, dict]:
 
     `entered_at` is its latest move into the state it is in now, falling back
     to its `updated_at`, as `done_times` does for done. `pr` is the ref of its
-    newest PR artifact, or None.
+    newest PR artifact, or None. `urls` holds every url artifact's ref in link
+    order (AB-40): unlike a PR, a later link does not replace an earlier one.
     """
     with store.session(engine) as s:
         arrived = (select(Event.issue_id, Event.to_state, func.max(Event.at).label("at"))
@@ -208,10 +209,14 @@ def lane_meta(engine) -> dict[str, dict]:
         rows = s.execute(select(Issue.id, func.coalesce(arrived.c.at, Issue.updated_at))
                          .outerjoin(arrived, (arrived.c.issue_id == Issue.id)
                                     & (arrived.c.to_state == Issue.state)))
-        meta = {i: {"entered_at": _iso(at), "pr": None} for i, at in rows}
-        for issue_id, ref in s.execute(select(Artifact.issue_id, Artifact.ref)
-                                       .where(Artifact.kind == "pr").order_by(Artifact.id)):
-            meta[issue_id]["pr"] = ref
+        meta = {i: {"entered_at": _iso(at), "pr": None, "urls": []} for i, at in rows}
+        for issue_id, kind, ref in s.execute(select(Artifact.issue_id, Artifact.kind, Artifact.ref)
+                                             .where(Artifact.kind.in_(("pr", "url")))
+                                             .order_by(Artifact.id)):
+            if kind == "pr":
+                meta[issue_id]["pr"] = ref
+            else:
+                meta[issue_id]["urls"].append(ref)
         return meta
 
 
