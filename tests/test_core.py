@@ -1929,3 +1929,63 @@ def test_ab29_recent_activity_is_newest_first_with_the_issue_title(board):
 def test_ab29_a_window_under_one_day_is_refused(board):
     with pytest.raises(core.BoardError):
         core.stats(board, days=0)
+
+
+# --- AB-43: a url artifact takes an optional name ---------------------------------
+
+
+def test_ab43_a_url_artifact_keeps_its_name(board):
+    iid = ready(board)
+    core.link(board, iid, "https://example.com/d", kind="url", name="  Design doc ",
+              actor=CHAOS, actor_kind=HUMAN)
+    core.link(board, iid, "https://example.com/e", kind="url", actor=CHAOS, actor_kind=HUMAN)
+    arts = core.show(board, iid)["artifacts"]
+    assert [(a["ref"], a["name"]) for a in arts] == [
+        ("https://example.com/d", "Design doc"), ("https://example.com/e", None)]
+
+
+def test_ab43_a_blank_name_is_no_name(board):
+    iid = ready(board)
+    core.link(board, iid, "https://example.com/d", kind="url", name="   ",
+              actor=CHAOS, actor_kind=HUMAN)
+    assert core.show(board, iid)["artifacts"][0]["name"] is None
+
+
+def test_ab43_only_a_url_artifact_takes_a_name(board):
+    iid = ready(board)
+    with pytest.raises(core.BoardError):
+        core.link(board, iid, "abc123", kind="commit", name="fix", actor=CHAOS, actor_kind=HUMAN)
+    assert core.show(board, iid)["artifacts"] == []
+
+
+def test_ab43_an_overlong_name_is_refused(board):
+    iid = ready(board)
+    with pytest.raises(core.BoardError):
+        core.link(board, iid, "https://example.com/d", kind="url",
+                  name="x" * (core.ARTIFACT_NAME_MAX + 1), actor=CHAOS, actor_kind=HUMAN)
+
+
+def test_ab43_the_link_event_note_carries_the_name(board):
+    iid = ready(board)
+    core.link(board, iid, "https://example.com/d", kind="url", name="Design doc",
+              actor=CHAOS, actor_kind=HUMAN)
+    assert core.show(board, iid)["events"][-1]["note"] == "url https://example.com/d (Design doc)"
+
+
+def test_ab43_a_retry_with_another_name_is_a_different_call(board):
+    iid = ready(board)
+    core.link(board, iid, "https://example.com/d", kind="url", name="A", request_id="r1",
+              actor=CHAOS, actor_kind=HUMAN)
+    with pytest.raises(core.Conflict):
+        core.link(board, iid, "https://example.com/d", kind="url", name="B", request_id="r1",
+                  actor=CHAOS, actor_kind=HUMAN)
+
+
+def test_ab43_lane_meta_gives_each_url_its_name(board):
+    iid = ready(board)
+    core.link(board, iid, "https://a.example/1", kind="url", name="One", actor=CHAOS,
+              actor_kind=HUMAN)
+    core.link(board, iid, "https://b.example/2", kind="url", actor=CHAOS, actor_kind=HUMAN)
+    assert core.lane_meta(board)[iid]["urls"] == [
+        {"ref": "https://a.example/1", "name": "One"},
+        {"ref": "https://b.example/2", "name": None}]

@@ -1408,7 +1408,7 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         me = await run_in_threadpool(actor, request)
         f = await request.form()
         core.link(engine, issue_id, f.get("ref", ""), kind=f.get("kind", ""), actor=me.email,
-                  actor_kind=me.kind, closes=f.get("closes") == "1")
+                  actor_kind=me.kind, closes=f.get("closes") == "1", name=f.get("name"))
         return back(issue_id, request)
 
     @app.post("/issues/{issue_id}/reopen")

@@ -275,6 +275,8 @@ class Artifact(Base):
     issue_id: Mapped[str] = mapped_column(ForeignKey("issue.id"), index=True)
     kind: Mapped[str] = mapped_column(String(16))
     ref: Mapped[str] = mapped_column(String(1000))
+    # A url's label on the card in place of its host (AB-43). Only a url has one.
+    name: Mapped[str | None] = mapped_column(String(200))
     closes: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     added_at: Mapped[datetime] = mapped_column(Timestamp())
     added_by: Mapped[str] = mapped_column(String(200))

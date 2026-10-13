@@ -150,11 +150,12 @@ def build_server(engine, actor: str | Callable[[], str], brain=_FROM_ENV,
         return run(core.annotate, engine, id, note, token=token, request_id=request_id, **who())
 
     @mcp.tool()
-    def link(id: str, artifact: str, kind: str, closes: bool = False,
+    def link(id: str, artifact: str, kind: str, closes: bool = False, name: str | None = None,
              token: str | None = None, request_id: str | None = None) -> CallToolResult:
-        """Attach a commit, pr, path or url. `closes` marks it as finishing the issue."""
-        return run(core.link, engine, id, artifact, kind=kind, closes=closes, token=token,
-                   request_id=request_id, **who())
+        """Attach a commit, pr, path or url. `closes` marks it as finishing the issue.
+        A url may take a `name`, shown on the card in place of its host."""
+        return run(core.link, engine, id, artifact, kind=kind, closes=closes, name=name,
+                   token=token, request_id=request_id, **who())
 
     @mcp.tool()
     def create(project: str, title: str, body: str = "", state: str = "backlog",

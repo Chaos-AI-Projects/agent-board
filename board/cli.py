@@ -115,6 +115,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("id")
     sp.add_argument("--artifact", required=True)
     sp.add_argument("--kind", required=True, choices=sorted(core.ARTIFACT_KINDS))
+    sp.add_argument("--name", help="a url's label on the card in place of its host")
     sp.add_argument("--closes", action="store_true")
     writes(sp)
 
@@ -194,7 +195,7 @@ def _run(engine, a) -> dict | None:
                                  request_id=a.request_id, **who)
         case "link":
             return core.link(engine, a.id, a.artifact, kind=a.kind, closes=a.closes,
-                             token=a.token, request_id=a.request_id, **who)
+                             name=a.name, token=a.token, request_id=a.request_id, **who)
         case "create":
             return core.create(engine, a.project, a.title, body=a.body, state=a.state,
                                rank=a.rank, labels=a.label, workflow_id=a.workflow_id,

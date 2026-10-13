@@ -120,6 +120,14 @@ def test_link_attaches_an_artifact(migrated):
         ("commit", "71207df", True)]
 
 
+def test_link_takes_a_name_for_a_url(migrated):
+    issue_id, token = claimed(board(migrated))
+    out = ok(migrated, "link", id=issue_id, artifact="https://example.com/d", kind="url",
+             name="Design doc", token=token)
+    assert [(a["ref"], a["name"]) for a in out["artifacts"]] == [
+        ("https://example.com/d", "Design doc")]
+
+
 def test_create_makes_an_agent_authored_issue(migrated):
     board(migrated)
     out = ok(migrated, "create", project="MS", title="found a bug", body="details",

@@ -418,3 +418,13 @@ def test_0007_adds_the_oauth_tables_and_downgrade_drops_only_them(engine):
     store.downgrade(engine, "0006")
     names = set(inspect(engine).get_table_names())
     assert not OAUTH_TABLES & names and TABLES - OAUTH_TABLES <= names
+
+
+def test_0009_adds_the_artifact_name_and_downgrade_drops_only_it(engine):
+    store.upgrade(engine, "0009")
+    cols = {c["name"] for c in inspect(engine).get_columns("artifact")}
+    assert "name" in cols
+    store.downgrade(engine, "0008")
+    cols = {c["name"] for c in inspect(engine).get_columns("artifact")}
+    assert "name" not in cols and "ref" in cols
+    assert "colour_bucket" in {c["name"] for c in inspect(engine).get_columns("project")}

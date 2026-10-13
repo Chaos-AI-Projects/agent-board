@@ -3686,7 +3686,8 @@ def test_ab40_core_reports_each_issues_url_refs_in_link_order(board):
     assert core.lane_meta(board)[issue_id]["urls"] == []
     for url in ("https://a.example/1", "https://b.example/2"):
         core.link(board, issue_id, url, kind="url", actor=CHAOS, actor_kind=HUMAN)
-    assert core.lane_meta(board)[issue_id]["urls"] == ["https://a.example/1", "https://b.example/2"]
+    assert [u["ref"] for u in core.lane_meta(board)[issue_id]["urls"]] == [
+        "https://a.example/1", "https://b.example/2"]
 
 
 def test_ab40_the_board_stamp_moves_when_a_url_is_linked(board, client):
@@ -3703,6 +3704,43 @@ def test_ab40_a_url_python_cannot_parse_still_renders_the_board(board, client):
     assert r.status_code == 200
     assert re.search(r'<a class="url" href="https://\[oops/x"[^>]*>https://\[oops/x</a>',
                      card(r.text, issue_id))
+
+
+# --- AB-43: a url artifact's name shows on the card and the issue page ------------
+
+
+def test_ab43_a_named_url_shows_its_name_on_the_card(board, client):
+    issue_id = ready(board)
+    core.link(board, issue_id, "https://docs.google.com/document/d/x", kind="url",
+              name="Design <doc>", actor=CHAOS, actor_kind=HUMAN)
+    core.link(board, issue_id, "https://example.com/y", kind="url", actor=CHAOS,
+              actor_kind=HUMAN)
+    c = card(client.get("/").text, issue_id)
+    links = re.findall(r'<a class="url" href="([^"]+)"[^>]*>([^<]*)</a>', c)
+    assert links == [("https://docs.google.com/document/d/x", "Design &lt;doc&gt;"),
+                     ("https://example.com/y", "example.com")]
+
+
+def test_ab43_the_issue_page_shows_a_url_by_its_name(board, client):
+    issue_id = ready(board)
+    core.link(board, issue_id, "https://example.com/d", kind="url", name="Design doc",
+              actor=CHAOS, actor_kind=HUMAN)
+    html = client.get(f"/issues/{issue_id}").text
+    assert re.search(r'<a href="https://example.com/d"[^>]*>Design doc</a>', html)
+
+
+def test_ab43_the_add_artifact_form_takes_a_name(board, client):
+    issue_id = ready(board)
+    assert 'name="name"' in client.get(f"/issues/{issue_id}").text
+    client.post(f"/issues/{issue_id}/link",
+                data={"kind": "url", "ref": "https://example.com/d", "name": "Design doc"},
+                headers=AS_CHAOS)
+    client.post(f"/issues/{issue_id}/link",
+                data={"kind": "url", "ref": "https://example.com/e", "name": ""},
+                headers=AS_CHAOS)
+    arts = core.show(board, issue_id)["artifacts"]
+    assert [(a["ref"], a["name"]) for a in arts] == [
+        ("https://example.com/d", "Design doc"), ("https://example.com/e", None)]
 
 
 # --- AB-42: a toggle that shows only the cards the viewer created -----------------

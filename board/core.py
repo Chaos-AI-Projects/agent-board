@@ -65,6 +65,7 @@ LANE_HINTS: dict[str, str] = {
 }
 CREATE_STATES = {"backlog", "ready"}
 ARTIFACT_KINDS = {"commit", "pr", "path", "url"}
+ARTIFACT_NAME_MAX = 200
 ACTOR_KINDS = {"agent", "human", "system"}
 # Matches the width of store.Project's columns.
 PROJECT_KEY = re.compile(r"[A-Z][A-Z0-9]{0,15}")
@@ -198,8 +199,9 @@ def lane_meta(engine) -> dict[str, dict]:
 
     `entered_at` is its latest move into the state it is in now, falling back
     to its `updated_at`, as `done_times` does for done. `pr` is the ref of its
-    newest PR artifact, or None. `urls` holds every url artifact's ref in link
-    order (AB-40): unlike a PR, a later link does not replace an earlier one.
+    newest PR artifact, or None. `urls` holds every url artifact's ref and
+    name in link order (AB-40, AB-43): unlike a PR, a later link does not
+    replace an earlier one.
     """
     with store.session(engine) as s:
         arrived = (select(Event.issue_id, Event.to_state, func.max(Event.at).label("at"))
@@ -210,13 +212,13 @@ def lane_meta(engine) -> dict[str, dict]:
                          .outerjoin(arrived, (arrived.c.issue_id == Issue.id)
                                     & (arrived.c.to_state == Issue.state)))
         meta = {i: {"entered_at": _iso(at), "pr": None, "urls": []} for i, at in rows}
-        for issue_id, kind, ref in s.execute(select(Artifact.issue_id, Artifact.kind, Artifact.ref)
-                                             .where(Artifact.kind.in_(("pr", "url")))
-                                             .order_by(Artifact.id)):
+        for issue_id, kind, ref, name in s.execute(
+                select(Artifact.issue_id, Artifact.kind, Artifact.ref, Artifact.name)
+                .where(Artifact.kind.in_(("pr", "url"))).order_by(Artifact.id)):
             if kind == "pr":
                 meta[issue_id]["pr"] = ref
             else:
-                meta[issue_id]["urls"].append(ref)
+                meta[issue_id]["urls"].append({"ref": ref, "name": name})
         return meta
 
 
@@ -548,13 +550,25 @@ def attachment(engine, attachment_id: int) -> dict:
 
 
 def link(engine, issue_id: str, ref: str, *, kind: str, actor: str, actor_kind: str,
-         closes: bool = False, token: str | None = None,
+         closes: bool = False, name: str | None = None, token: str | None = None,
          request_id: str | None = None) -> dict:
-    """Attach a commit, PR, path or URL. `closes` marks it as finishing the issue."""
+    """Attach a commit, PR, path or URL. `closes` marks it as finishing the issue.
+
+    A url may carry a `name`, which the card shows in place of its host (AB-43).
+    A blank name is no name.
+    """
     if kind not in ARTIFACT_KINDS:
         raise BoardError(f"artifact kind {kind!r} is not one of {sorted(ARTIFACT_KINDS)}")
+    name = (name or "").strip() or None
+    if name is not None and kind != "url":
+        raise BoardError(f"only a url artifact takes a name, not a {kind}")
+    if name is not None and len(name) > ARTIFACT_NAME_MAX:
+        raise BoardError(f"an artifact name is at most {ARTIFACT_NAME_MAX} characters")
+    # An unnamed link hashes as it did before AB-43, so a retry spanning the
+    # upgrade still collapses to one event.
+    named = [] if name is None else [name]
     key = (_scoped("link", issue_id, request_id)
-           or _derive(actor, "link", issue_id, token, kind, ref, closes))
+           or _derive(actor, "link", issue_id, token, kind, ref, closes, *named))
 
     def body(s):
         issue = _get(s, issue_id, lock=True)
@@ -562,16 +576,17 @@ def link(engine, issue_id: str, ref: str, *, kind: str, actor: str, actor_kind: 
         if actor_kind == "agent" and issue.lease_holder is None:
             raise LeaseLost(f"{issue.id}: an agent links an artifact only under a lease")
         _guard(s, issue, actor, actor_kind, token, now, False, key)
-        s.add(Artifact(issue_id=issue.id, kind=kind, ref=ref, closes=closes,
+        s.add(Artifact(issue_id=issue.id, kind=kind, ref=ref, name=name, closes=closes,
                        added_at=now, added_by=actor))
         issue.version += 1
         issue.updated_at = now
-        note = f"{kind} {ref}" + (" (closes)" if closes else "")
+        note = (f"{kind} {ref}" + (f" ({name})" if name else "")
+                + (" (closes)" if closes else ""))
         _event(s, issue.id, now, actor, actor_kind, "link", None, None, note, key)
         return _view(s, issue)
 
     return _write(engine, key, body, _replay_view,
-                  [kind, ref, closes, actor, actor_kind, token])
+                  [kind, ref, closes, actor, actor_kind, token, *named])
 
 
 def create(engine, project: str, title: str, *, actor: str, actor_kind: str,
@@ -1403,7 +1418,8 @@ def _view(s, issue):
         "updated_at": _iso(issue.updated_at),
         "closed_by_artifact": any(a.closes for a in issue.artifacts),
         "artifacts": [
-            {"kind": a.kind, "ref": a.ref, "closes": a.closes, "added_by": a.added_by,
+            {"kind": a.kind, "ref": a.ref, "name": a.name, "closes": a.closes,
+             "added_by": a.added_by,
              "added_at": _iso(a.added_at)}
             for a in issue.artifacts
         ],

@@ -153,10 +153,10 @@
 {% endif %}
 
 <h2>Artifacts</h2>
-<ul>{% for a in issue.artifacts %}<li>{{ a.kind }} {{ a.ref }}{% if a.closes %} (closes){% endif %} &middot; {{ a.added_by }}</li>{% endfor %}</ul>
+<ul>{% for a in issue.artifacts %}<li>{{ a.kind }} {% if a.name and a.ref.startswith(("https://", "http://")) %}<a href="{{ a.ref }}" target="_blank" rel="noopener" title="{{ a.ref }}">{{ a.name }}</a>{% elif a.name %}{{ a.name }} {{ a.ref }}{% else %}{{ a.ref }}{% endif %}{% if a.closes %} (closes){% endif %} &middot; {{ a.added_by }}</li>{% endfor %}</ul>
 <form autocomplete="off" method="post" action="/issues/{{ issue.id }}/link{{ embed_q }}">
   <select name="kind"><option>pr</option><option>commit</option><option>path</option><option>url</option></select>
-  <input name="ref" required> <label class="inline"><input type="checkbox" name="closes" value="1"> closes the issue</label>
+  <input name="ref" required> <input name="name" placeholder="name (url only)" maxlength="200"> <label class="inline"><input type="checkbox" name="closes" value="1"> closes the issue</label>
   <button>Link</button>
 </form>
 

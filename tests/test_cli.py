@@ -128,6 +128,15 @@ def test_a_missing_actor_is_a_usage_error(url):
 # --- the operations end to end -------------------------------------------------
 
 
+def test_link_takes_a_name_for_a_url(url):
+    issue_id = ready(url)
+    token = claim(url)["lease_token"]
+    out = ok(board(url, "link", issue_id, "--artifact", "https://example.com/d", "--kind", "url",
+                   "--name", "Design doc", "--token", token))
+    assert [(a["ref"], a["name"]) for a in out["artifacts"]] == [
+        ("https://example.com/d", "Design doc")]
+
+
 def test_an_item_worked_to_done_through_the_cli(url):
     issue_id = ready(url)
     token = claim(url)["lease_token"]
