@@ -430,7 +430,8 @@ def board_stamp(ctx: dict, buckets: dict) -> str:
                               for state, _, _, groups in ctx["columns"]],
                   "projects": view["projects"], "templates": view["templates"],
                   "tracked": ctx["tracked"], "hidden": ctx["hidden"], "buckets": buckets,
-                  "hide_old_done": ctx["hide_old_done"], "old_done": ctx["old_done"]})
+                  "hide_old_done": ctx["hide_old_done"], "old_done": ctx["old_done"],
+                  "mine": ctx["mine"]})
 
 
 def issue_stamp(issue: dict, now: str, buckets: dict) -> str:
@@ -799,13 +800,14 @@ def _form_labels(value):
 
 def read_prefs(raw: str | None) -> dict:
     """The saved view from a `board_prefs` cookie: projects, lanes, timezone,
-    and whether the done lane hides cards finished over two weeks ago (AB-13).
+    whether the done lane hides cards finished over two weeks ago (AB-13), and
+    whether the board shows only the cards the viewer created (AB-42).
 
     The value is JSON, percent-encoded so a browser sends it back unmangled.
     Anything unreadable, and any other key, is ignored. A list key that is
     absent or not a list of strings comes back as [], which means all; a
     timezone that is not a string comes back as "", which means the default.
-    `hide_old_done` is True only when the cookie says exactly true.
+    `hide_old_done` and `mine` are True only when the cookie says exactly true.
     """
     try:
         data = json.loads(unquote(raw or ""))
@@ -820,6 +822,7 @@ def read_prefs(raw: str | None) -> dict:
     tz = data.get("timezone")
     prefs["timezone"] = tz if isinstance(tz, str) else ""
     prefs["hide_old_done"] = data.get("hide_old_done") is True
+    prefs["mine"] = data.get("mine") is True
     return prefs
 
 
@@ -1039,7 +1042,8 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         saved = read_prefs(request.cookies.get(PREFS_COOKIE))
         return {"projects": _chosen(saved["projects"], [p["key"] for p in projects]),
                 "lanes": _chosen(saved["lanes"], list(core.TRANSITIONS)),
-                "timezone": saved["timezone"], "hide_old_done": saved["hide_old_done"]}
+                "timezone": saved["timezone"], "hide_old_done": saved["hide_old_done"],
+                "mine": saved["mine"]}
 
     def board_view(request):
         view = core.overview(engine)
@@ -1064,6 +1068,16 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
                                        "updated_at": wf_updated[wf["id"]]})
         loose = [i for i in view["issues"]
                  if i["workflow_id"] is None and i["project"] in tracked]
+        # AB-42: only what the viewer created, by AB-27's creator rule. A
+        # workflow stays when the viewer created any of its steps. With no
+        # viewer there is nobody to match, so the filter does nothing.
+        me = who(request)
+        mine = prefs["mine"] and me is not None
+        if mine:
+            created = {i["id"] for i in core.search(engine, creator=me.email)}
+            workflows = [w for w in workflows
+                         if any(st["id"] in created for st in w["steps"])]
+            loose = [i for i in loose if i["id"] in created]
         # The workflow is the card: its computed state picks the column, and
         # its steps show on their issue pages rather than as loose cards here.
         old_done = 0
@@ -1093,7 +1107,8 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         return {"view": view, "columns": columns, "now": view["now"],
                 "lane_meta": core.lane_meta(engine), "done_cap": DONE_CAP,
                 "tracked": prefs["projects"], "hidden": hidden,
-                "hide_old_done": prefs["hide_old_done"], "old_done": old_done}
+                "hide_old_done": prefs["hide_old_done"], "old_done": old_done,
+                "mine": mine, "can_mine": me is not None}
 
     @app.get("/", response_class=HTMLResponse)
     def board_page(request: Request):
@@ -1144,7 +1159,8 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         # An unknown zone is saved blank, which means the default.
         tz = (f.get("timezone") or "").strip()
         prefs["timezone"] = tz if zone(tz) else ""
-        prefs["hide_old_done"] = read_prefs(request.cookies.get(PREFS_COOKIE))["hide_old_done"]
+        kept = read_prefs(request.cookies.get(PREFS_COOKIE))
+        prefs["hide_old_done"], prefs["mine"] = kept["hide_old_done"], kept["mine"]
         return saved(prefs)
 
     @app.post("/preferences/projects")
@@ -1190,6 +1206,15 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
             return error(request, 404, "No such done-lane action.")
         prefs = read_prefs(request.cookies.get(PREFS_COOKIE))
         prefs["hide_old_done"] = action == "hide"
+        return saved(prefs)
+
+    @app.post("/preferences/mine/{action}")
+    def save_mine_toggle(request: Request, action: str):
+        """The View panel's toggle: show only the cards the viewer created, or all."""
+        if action not in ("on", "off"):
+            return error(request, 404, "No such mine action.")
+        prefs = read_prefs(request.cookies.get(PREFS_COOKIE))
+        prefs["mine"] = action == "on"
         return saved(prefs)
 
     def saved(prefs):
