@@ -3837,3 +3837,55 @@ def test_ab42_the_board_stamp_moves_when_the_toggle_does(board, client):
     before = client.get("/stamp", headers=AS_CHAOS).json()["stamp"]
     client.post("/preferences/mine/on", headers=AS_CHAOS)
     assert client.get("/stamp", headers=AS_CHAOS).json()["stamp"] != before
+
+
+# --- AB-44: every web artifact on the issue page is a link -----------------------
+
+def artifact_list(html):
+    """The issue page's Artifacts list, as html."""
+    m = re.search(r"<h2>Artifacts</h2>\s*<ul>(.*?)</ul>", html, re.S)
+    assert m, "no artifact list on the issue page"
+    return m.group(1)
+
+
+def test_ab44_pr_and_unnamed_url_artifacts_are_links(board, client):
+    issue_id = ready(board)
+    core.link(board, issue_id, "https://github.com/o/r/pull/7", kind="pr", actor=CHAOS,
+              actor_kind=HUMAN)
+    core.link(board, issue_id, "http://example.com/x", kind="url", actor=CHAOS,
+              actor_kind=HUMAN)
+    arts = artifact_list(client.get(f"/issues/{issue_id}").text)
+    links = re.findall(r'<a href="([^"]+)" target="_blank" rel="noopener"[^>]*>([^<]*)</a>', arts)
+    assert links == [("https://github.com/o/r/pull/7", "https://github.com/o/r/pull/7"),
+                     ("http://example.com/x", "http://example.com/x")]
+
+
+def test_ab44_a_commit_or_path_links_only_when_its_ref_is_a_web_url(board, client):
+    issue_id = ready(board)
+    core.link(board, issue_id, "https://github.com/o/r/commit/abc123", kind="commit",
+              actor=CHAOS, actor_kind=HUMAN)
+    core.link(board, issue_id, "abc123", kind="commit", actor=CHAOS, actor_kind=HUMAN)
+    core.link(board, issue_id, "plans/x.md", kind="path", actor=CHAOS, actor_kind=HUMAN)
+    arts = artifact_list(client.get(f"/issues/{issue_id}").text)
+    assert re.findall(r'<a href="([^"]+)"', arts) == ["https://github.com/o/r/commit/abc123"]
+    assert "commit abc123" in arts and "path plans/x.md" in arts
+
+
+def test_ab44_a_non_web_scheme_never_becomes_a_link(board, client):
+    issue_id = ready(board)
+    core.link(board, issue_id, "javascript:alert(1)", kind="url", actor=CHAOS,
+              actor_kind=HUMAN)
+    core.link(board, issue_id, "javascript:alert(2)", kind="pr", name=None, actor=CHAOS,
+              actor_kind=HUMAN)
+    arts = artifact_list(client.get(f"/issues/{issue_id}").text)
+    assert "<a" not in arts
+    assert "javascript:alert(1)" in arts and "javascript:alert(2)" in arts
+
+
+def test_ab44_a_link_href_is_escaped(board, client):
+    issue_id = ready(board)
+    core.link(board, issue_id, 'https://example.com/"onmouseover="x', kind="pr",
+              actor=CHAOS, actor_kind=HUMAN)
+    arts = artifact_list(client.get(f"/issues/{issue_id}").text)
+    assert 'onmouseover="x' not in arts
+    assert re.search(r'<a href="https://example.com/&#34;onmouseover=&#34;x"', arts)
