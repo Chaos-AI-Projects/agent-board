@@ -22,6 +22,11 @@ from fastapi.testclient import TestClient
 
 from board import auth, core, signin, web
 
+
+def place(view):
+    """A view's stage and queue status, the pair the old single state folded."""
+    return view["stage"], view["queue"]
+
 CHAOS = "owner@example.com"
 SECRET = "s" * 32
 HOST = "board.example"
@@ -185,16 +190,16 @@ def test_google_access_token_is_accepted(board, migrated):
 
 def test_ab41_a_human_token_note_answers_a_need_input_card(board, migrated):
     # Human-only rules apply over MCP too: a human's note releases need-input (AB-10).
-    issue_id = core.create(migrated, "MS", "asks", state="ready", actor="overlord",
+    issue_id = core.create(migrated, "MS", "asks", stage="implement", actor="overlord",
                            actor_kind="agent")["id"]
     lease = core.next(migrated, "overlord")["lease_token"]
-    core.transition(migrated, issue_id, "need-input", token=lease, note="which one?",
-                    actor="overlord", actor_kind="agent")
+    core.queue(migrated, issue_id, None, token=lease, note="which one?",
+               actor="overlord", actor_kind="agent")
     r = rpc(board, "google-token", "tools/call", {"name": "annotate", "arguments": {
         "id": issue_id, "note": "the second"}}, id=2)
     assert r.status_code == 200, r.text
     assert not body(r)["result"].get("isError"), r.text
-    assert core.show(migrated, issue_id)["state"] == "ready"
+    assert place(core.show(migrated, issue_id)) == ("implement", "ready")
 
 
 def test_token_of_an_email_since_removed_is_refused(board, migrated, monkeypatch):

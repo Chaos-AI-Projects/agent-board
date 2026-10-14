@@ -4,9 +4,9 @@
 {% set ls = lease_status(issue, now) %}
 <h1>{{ issue.id }} {{ issue.title }}</h1>
 {% set pc = project_colour(issue.project) %}
-<p><span class="project-key" style="--proj-bg: {{ pc.bg }}; --proj-border: {{ pc.border }}">{{ issue.project }}</span> &middot; State <b title="{{ lane_hints[issue.state] }}">{{ issue.state }}</b>
-{% if issue.workflow %} &middot; step {{ issue.workflow.position }} of <i>{{ issue.workflow.title }}</i> ({{ issue.workflow.state }}){% if issue.workflow.origin_issue_id %}, planned from <a href="/issues/{{ issue.workflow.origin_issue_id }}">{{ issue.workflow.origin_issue_id }}</a>{% endif %}{% endif %}
-{% if issue.plan %} &middot; planned as <i>{{ issue.plan.title }}</i> ({{ issue.plan.state }}){% endif %}</p>
+<p><span class="project-key" style="--proj-bg: {{ pc.bg }}; --proj-border: {{ pc.border }}">{{ issue.project }}</span> &middot; Stage <b title="{{ stage_hints[issue.stage] }}">{{ issue.stage }}</b>{% if issue.queue %}, queued <b title="{{ queue_hint }}">{{ issue.queue }}</b>{% else %}, not queued{% endif %}
+{% if issue.workflow %} &middot; step {{ issue.workflow.position }} of <i>{{ issue.workflow.title }}</i> ({{ issue.workflow.queue or issue.workflow.stage }}){% if issue.workflow.origin_issue_id %}, planned from <a href="/issues/{{ issue.workflow.origin_issue_id }}">{{ issue.workflow.origin_issue_id }}</a>{% endif %}{% endif %}
+{% if issue.plan %} &middot; planned as <i>{{ issue.plan.title }}</i> ({{ issue.plan.queue or issue.plan.stage }}){% endif %}</p>
 <div class="card{% if ls %} lease-{{ ls }}{% endif %}">
   {% include "_lease.html" %}
   {% if not ls %}<div class="lease">Not held</div>{% endif %}
@@ -21,7 +21,7 @@
 <section class="dependencies" data-dep="{{ key }}">
 <h2>{{ heading }}</h2>
 <ul>{% for d in linked %}
-<li><a href="/issues/{{ d.id }}">{{ d.id }}</a> {{ d.title }} &middot; <b class="state state-{{ d.state }}">{{ d.state }}</b></li>
+<li><a href="/issues/{{ d.id }}">{{ d.id }}</a> {{ d.title }} &middot; <b class="state state-{{ d.queue or d.stage }}">{{ d.queue or d.stage }}</b></li>
 {% endfor %}</ul>
 </section>
 {% endfor %}
@@ -29,11 +29,11 @@
 {% if wf %}
 <section class="workflow">
 <h2>{% if issue.plan %}Plan{% else %}Workflow{% endif %}: {{ wf.title }}</h2>
-<p>State <b>{{ wf.state }}</b> &middot; {{ wf.steps|length }} step{{ "" if wf.steps|length == 1 else "s" }}</p>
+<p>Stage <b>{{ wf.stage }}</b>{% if wf.queue %}, {{ wf.queue }}{% endif %} &middot; {{ wf.steps|length }} step{{ "" if wf.steps|length == 1 else "s" }}</p>
 {% macro step_list(run) %}{% set start, run_steps = run %}
 <ol class="workflow-steps" start="{{ start }}">
 {% for st in run_steps %}
-<li{% if st.id == issue.id %} class="this-step"{% endif %} data-step="{{ st.id }}"><a href="/issues/{{ st.id }}">{{ st.id }}</a> {{ st.title }} &middot; <b>{{ st.state }}</b></li>
+<li{% if st.id == issue.id %} class="this-step"{% endif %} data-step="{{ st.id }}"><a href="/issues/{{ st.id }}">{{ st.id }}</a> {{ st.title }} &middot; <b>{{ st.queue or st.stage }}</b></li>
 {% endfor %}
 </ol>
 {% endmacro %}
@@ -79,7 +79,7 @@
 
 {% if issue.body %}<div class="markdown">{{ issue.body|markdown }}</div>{% endif %}
 
-{% if not wf and issue.state not in ("done", "cancelled") %}
+{% if not wf and issue.stage not in ("done", "cancelled") %}
 <details>
 <summary>Plan as workflow</summary>
 <form autocomplete="off" method="post" action="/issues/{{ issue.id }}/plan{{ embed_q }}">
@@ -119,7 +119,7 @@
 </form>
 </details>
 
-{% if issue.state == "done" %}
+{% if issue.stage == "done" %}
 <h2>Reopen</h2>
 <form autocomplete="off" method="post" action="/issues/{{ issue.id }}/reopen{{ embed_q }}">
   <textarea name="note" required placeholder="Why it needs more work"></textarea>
@@ -131,28 +131,32 @@
 <h2>Note</h2>
 <form autocomplete="off" method="post" action="/issues/{{ issue.id }}/note{{ embed_q }}" enctype="multipart/form-data">
   <input type="hidden" name="version" value="{{ issue.version }}">
-  <input type="hidden" name="from_state" value="{{ issue.state }}">
-  <label>State <select name="state" data-current="{{ issue.state }}">{% for s in states %}<option title="{{ lane_hints[s] }}"{% if s == issue.state %} selected{% endif %}>{{ s }}</option>{% endfor %}</select></label>
+  <input type="hidden" name="from_stage" value="{{ issue.stage }}">
+  <input type="hidden" name="from_queue" value="{{ issue.queue or "" }}">
+  <label>Stage <select name="stage" data-current="{{ issue.stage }}">{% for s in stages %}<option title="{{ stage_hints[s] }}"{% if s == issue.stage %} selected{% endif %}>{{ s }}</option>{% endfor %}</select></label>
+  {% if queues %}<label>Queue <select name="queue" data-current="{{ issue.queue or "" }}">{% for q in queues %}<option value="{{ q or "" }}"{% if q == issue.queue %} selected{% endif %}>{{ q or "waiting" }}</option>{% endfor %}</select></label>{% endif %}
   <textarea name="note" required></textarea>
   <label>Files <input type="file" name="files" multiple></label>
   <button class="primary">Save</button>
-  <div>A note never needs the lease. A state change does, and the note becomes its reason; need-input needs one, and so does leaving done.</div>
+  <div>A note never needs the lease. A stage or queue change does, and the note becomes its reason; releasing a claimed card needs one, and so does leaving done.</div>
 </form>
 <script>
   // Without JS the note is always required and the button reads Save. With it,
-  // an unchanged state is a plain note ("Add note"); a changed one may go without,
-  // except leaving done, which is a reopen and needs its reason (AB-24).
+  // an unchanged stage and queue is a plain note ("Add note"); a change may go
+  // without, except leaving done, which is a reopen and needs its reason (AB-24).
   (function () {
-    var select = document.querySelector("select[data-current]");
-    if (!select) return;
-    var form = select.form, note = form.querySelector("textarea[name=note]");
+    var selects = document.querySelectorAll("select[data-current]");
+    if (!selects.length) return;
+    var stage = selects[0], form = stage.form, note = form.querySelector("textarea[name=note]");
     var button = form.querySelector("button");
     function sync() {
-      var moving = select.value !== select.dataset.current;
-      note.required = !moving || select.dataset.current === "done";
+      var moving = Array.prototype.some.call(selects, function (s) {
+        return s.value !== s.dataset.current;
+      });
+      note.required = !moving || stage.dataset.current === "done";
       button.textContent = moving ? "Save" : "Add note";
     }
-    select.addEventListener("change", sync);
+    Array.prototype.forEach.call(selects, function (s) { s.addEventListener("change", sync); });
     sync();
   })();
 </script>
@@ -178,7 +182,7 @@
 
 <h2>History</h2>
 <ul class="events">{% for e in issue.events|reverse %}
-<li>{{ e.at|localtime(tz) }} &middot; {{ e.actor }} ({{ e.actor_kind }}) &middot; {{ e.kind }}{% if e.from_state or e.to_state %} {{ e.from_state or "" }} &rarr; {{ e.to_state or "" }}{% endif %}{% if e.note and e.kind in ("annotate", "transition") %}<div class="markdown">{{ e.note|markdown }}</div>{% elif e.note %}: {{ e.note }}{% endif %}{{ files(e.attachments) }}</li>
+<li>{{ e.at|localtime(tz) }} &middot; {{ e.actor }} ({{ e.actor_kind }}) &middot; {{ e.kind }}{% if e.from_stage or e.to_stage %} {{ [e.from_stage, e.from_queue]|select|join(" ") }} &rarr; {{ [e.to_stage, e.to_queue]|select|join(" ") }}{% endif %}{% if e.note and e.kind in ("annotate", "transition") %}<div class="markdown">{{ e.note|markdown }}</div>{% elif e.note %}: {{ e.note }}{% endif %}{{ files(e.attachments) }}</li>
 {% endfor %}</ul>
 
 <dialog id="write-error" class="error">

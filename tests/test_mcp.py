@@ -15,6 +15,11 @@ from board import core
 from board.brain import BRAIN_DIR_ENV, Brain
 from board.mcp_server import build_server
 
+
+def place(view):
+    """A view's stage and queue status, the pair the old single state folded."""
+    return view["stage"], view["queue"]
+
 WORKER = "worker-1"
 CHAOS = "owner@example.com"
 
@@ -58,7 +63,7 @@ def board(engine):
 
 
 def ready(engine, title="item"):
-    return core.create(engine, "MS", title, state="ready", actor=CHAOS,
+    return core.create(engine, "MS", title, stage="implement", actor=CHAOS,
                        actor_kind="human")["id"]
 
 
@@ -80,7 +85,7 @@ def test_next_claims_as_the_server_actor_and_returns_the_token(migrated):
     issue_id = ready(board(migrated))
     out = ok(migrated, "next")
     assert out["issue"]["id"] == issue_id
-    assert out["issue"]["state"] == "processing"
+    assert place(out["issue"]) == ("implement", "processing")
     assert out["issue"]["lease_holder"] == WORKER
     assert out["lease_token"]
 
@@ -131,7 +136,7 @@ def test_create_makes_an_agent_authored_issue(migrated):
     board(migrated)
     out = ok(migrated, "create", project="MS", title="found a bug", body="details",
              labels=["bug"], rank=3)
-    assert (out["title"], out["body"], out["labels"], out["state"]) == (
+    assert (out["title"], out["body"], out["labels"], out["stage"]) == (
         "found a bug", "details", ["bug"], "backlog")
     assert core.show(migrated, out["id"])["events"][0]["actor_kind"] == "agent"
 
@@ -174,7 +179,7 @@ def test_plan_breaks_the_claimed_issue_into_steps(migrated):
     issue_id, token = claimed(migrated)
     out = ok(migrated, "plan", id=issue_id, token=token,
              steps=[{"title": "design"}, {"title": "build", "body": "the code"}])
-    assert out["state"] == "onhold"
+    assert place(out) == ("implement", "on-hold")
     assert [s["title"] for s in out["plan"]["steps"]] == ["design", "build"]
     step = core.show(migrated, out["plan"]["steps"][1]["id"])
     assert step["body"] == "the code"
@@ -375,7 +380,7 @@ def test_ab24_an_agent_reopens_a_done_card_without_a_token(migrated):
     err = failed(migrated, "move", id=issue_id, stage="implement")
     assert err["error"] == "NoteRequired"
     out = ok(migrated, "move", id=issue_id, stage="implement", note="regressed")
-    assert out["state"] == "ready"
+    assert place(out) == ("implement", "ready")
     assert out["events"][-1]["actor"] == WORKER
 
 
@@ -397,7 +402,7 @@ def test_ab52_move_into_done_without_a_note_is_code_1(migrated):
 def test_ab52_queue_on_hold_and_out_of_the_queue(migrated):
     issue_id, token = claimed(board(migrated))
     out = ok(migrated, "queue", id=issue_id, status=None, token=token, note="a question")
-    assert (out["stage"], out["queue"], out["state"]) == ("implement", None, "need-input")
+    assert (out["stage"], out["queue"]) == ("implement", None)
 
 
 def test_ab52_queue_refuses_processing(migrated):

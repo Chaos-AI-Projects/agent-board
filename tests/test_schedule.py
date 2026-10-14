@@ -34,7 +34,7 @@ def set_next_run(engine, issue_id, at):
 
 def scheduled(engine, expr="0 9 * * *", tz=SYDNEY, **kw):
     return core.create(engine, "MS", "nightly", actor=CHAOS, actor_kind=HUMAN,
-                       state="ready", schedule=expr, timezone=tz, **kw)
+                       stage="implement", schedule=expr, timezone=tz, **kw)
 
 
 def test_next_due_reads_the_fields_in_the_cards_zone():
@@ -100,8 +100,8 @@ def test_a_finished_run_goes_back_to_ready_not_done(board):
     issue = scheduled(board)
     set_next_run(board, issue["id"], datetime.now(timezone.utc) - timedelta(minutes=1))
     token = core.next(board, AGENT)["lease_token"]
-    after = core.transition(board, issue["id"], "done", actor=AGENT, actor_kind=AGENT,
-                            note="ran", token=token)
+    after = core.move(board, issue["id"], "done", actor=AGENT, actor_kind=AGENT,
+                      note="ran", token=token)
     assert (after["stage"], after["queue"]) == ("implement", "ready")
     assert after["lease_holder"] is None
     assert core.next(board, AGENT) is None    # waits for its next due time
@@ -120,7 +120,7 @@ def test_a_scheduled_card_can_still_be_cancelled(board):
 
 
 def test_set_schedule_changes_and_clears_it(board):
-    issue = core.create(board, "MS", "x", actor=CHAOS, actor_kind=HUMAN, state="ready")
+    issue = core.create(board, "MS", "x", actor=CHAOS, actor_kind=HUMAN, stage="implement")
     assert issue["schedule"] is None and issue["next_run_at"] is None
     after = core.set_schedule(board, issue["id"], "30 6 * * 1", timezone=SYDNEY,
                               actor=CHAOS, actor_kind=HUMAN)
@@ -139,7 +139,7 @@ def test_set_schedule_changes_and_clears_it(board):
 
 
 def test_an_agent_sets_a_schedule_only_under_its_lease(board):
-    issue = core.create(board, "MS", "x", actor=CHAOS, actor_kind=HUMAN, state="ready")
+    issue = core.create(board, "MS", "x", actor=CHAOS, actor_kind=HUMAN, stage="implement")
     token = core.next(board, AGENT)["lease_token"]
     with pytest.raises(core.LeaseLost):
         core.set_schedule(board, issue["id"], "0 9 * * *", timezone="UTC",

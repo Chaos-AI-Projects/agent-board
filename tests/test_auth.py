@@ -424,7 +424,7 @@ def verified_client(board, monkeypatch):
 
 def ready(engine):
     return core.create(engine, "MS", "item", actor=CHAOS, actor_kind="human",
-                       state="ready")["id"]
+                       stage="implement")["id"]
 
 
 def test_a_verified_assertion_writes_as_its_email(board, monkeypatch):

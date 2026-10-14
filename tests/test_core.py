@@ -13,6 +13,11 @@ from sqlalchemy import func, select
 
 from board import core, store
 
+
+def place(view):
+    """A view's stage and queue status, the pair the old single state folded."""
+    return view["stage"], view["queue"]
+
 AGENT = "agent"
 HUMAN = "human"
 CHAOS = "owner@example.com"
@@ -26,7 +31,7 @@ def board(migrated):
 
 def ready(engine, title="item", **kw):
     return core.create(engine, "MS", title, actor=CHAOS, actor_kind=HUMAN,
-                       state="ready", **kw)["id"]
+                       stage="implement", **kw)["id"]
 
 
 def events(engine, issue_id):
@@ -40,7 +45,7 @@ def test_create_hands_out_sequential_ids_and_a_create_event(board):
     a = core.create(board, "MS", "first", actor=CHAOS, actor_kind=HUMAN)
     b = core.create(board, "MS", "second", actor=CHAOS, actor_kind=HUMAN)
     assert (a["id"], b["id"]) == ("MS-1", "MS-2")
-    assert a["state"] == "backlog"
+    assert place(a) == ("backlog", None)
     assert [e["kind"] for e in events(board, "MS-1")] == ["create"]
 
 
@@ -54,12 +59,12 @@ def test_next_claims_the_lowest_rank_and_writes_a_claim_event(board):
     first = ready(board, "first", rank=10)
     claim = core.next(board, "w1")
     assert claim["issue"]["id"] == first
-    assert claim["issue"]["state"] == "processing"
+    assert place(claim["issue"]) == ("implement", "processing")
     assert claim["issue"]["lease_holder"] == "w1"
     assert claim["lease_token"]
     last = events(board, first)[-1]
-    assert (last["kind"], last["actor"], last["from_state"], last["to_state"]) == (
-        "claim", "w1", "ready", "processing")
+    assert (last["kind"], last["actor"], (last["from_stage"], last["from_queue"]), (last["to_stage"], last["to_queue"])) == (
+        "claim", "w1", ("implement", "ready"), ("implement", "processing"))
 
 
 def test_a_live_lease_is_not_handed_out_twice(board):
@@ -70,7 +75,7 @@ def test_a_live_lease_is_not_handed_out_twice(board):
 
 def test_onhold_is_not_selectable(board):
     iid = ready(board)
-    core.transition(board, iid, "onhold", actor=CHAOS, actor_kind=HUMAN)
+    core.queue(board, iid, "on-hold", actor=CHAOS, actor_kind=HUMAN)
     assert core.next(board, "w1") is None
 
 
@@ -118,8 +123,8 @@ def test_the_old_token_is_refused_after_a_reclaim(board):
     first = core.next(board, "run-1", ttl=timedelta(seconds=-5))
     core.next(board, "run-2")
     with pytest.raises(core.LeaseLost):
-        core.transition(board, iid, "need-input", note="finished", actor="run-1",
-                        actor_kind=AGENT, token=first["lease_token"])
+        core.queue(board, iid, None, note="finished", actor="run-1",
+                   actor_kind=AGENT, token=first["lease_token"])
 
 
 def test_heartbeat_extends_the_lease_without_an_event(board):
@@ -138,18 +143,18 @@ def test_heartbeat_with_a_stale_token_is_lease_lost(board):
         core.heartbeat(board, iid, "w1", "not-the-token")
 
 
-# --- transitions --------------------------------------------------------------
+# --- moves and the queue ------------------------------------------------------
 
 
 def test_need_input_requires_a_note_and_clears_the_lease(board):
     iid = ready(board)
     claim = core.next(board, "w1")
     with pytest.raises(core.NoteRequired):
-        core.transition(board, iid, "need-input", actor="w1", actor_kind=AGENT,
-                        token=claim["lease_token"])
-    issue = core.transition(board, iid, "need-input", note="shipped", actor="w1",
-                            actor_kind=AGENT, token=claim["lease_token"])
-    assert issue["state"] == "need-input"
+        core.queue(board, iid, None, actor="w1", actor_kind=AGENT,
+                   token=claim["lease_token"])
+    issue = core.queue(board, iid, None, note="shipped", actor="w1",
+                       actor_kind=AGENT, token=claim["lease_token"])
+    assert place(issue) == ("implement", None)
     assert issue["lease_holder"] is None
     assert issue["events"][-1]["note"] == "shipped"
 
@@ -157,39 +162,38 @@ def test_need_input_requires_a_note_and_clears_the_lease(board):
 def test_an_undeclared_transition_is_refused(board):
     iid = core.create(board, "MS", "x", actor=CHAOS, actor_kind=HUMAN)["id"]
     with pytest.raises(core.InvalidTransition):
-        core.transition(board, iid, "done", note="n", actor=CHAOS, actor_kind=HUMAN)
+        core.move(board, iid, "done", note="n", actor=CHAOS, actor_kind=HUMAN)
 
 
 def test_a_human_closes_a_need_input_card_as_done(board):
     """AB-8: an answer can finish the card, so need-input reaches done directly."""
     iid = ready(board)
     tok = core.next(board, "w1")["lease_token"]
-    core.transition(board, iid, "need-input", note="merged, please review", actor="w1",
-                    actor_kind=AGENT, token=tok)
-    issue = core.transition(board, iid, "done", note="reviewed", actor=CHAOS,
-                            actor_kind=HUMAN)
+    core.queue(board, iid, None, note="merged, please review", actor="w1",
+               actor_kind=AGENT, token=tok)
+    issue = core.move(board, iid, "done", note="reviewed", actor=CHAOS, actor_kind=HUMAN)
     last = issue["events"][-1]
-    assert (issue["state"], last["from_state"], last["to_state"]) == (
-        "done", "need-input", "done")
+    assert (place(issue), (last["from_stage"], last["from_queue"]), (last["to_stage"], last["to_queue"])) == (
+        ("done", None), ("implement", None), ("done", None))
 
 
 def asking(engine):
     """A card an agent has parked at need-input with a question."""
     iid = ready(engine)
     tok = core.next(engine, "w1")["lease_token"]
-    core.transition(engine, iid, "need-input", note="which option?", actor="w1",
-                    actor_kind=AGENT, token=tok)
+    core.queue(engine, iid, None, note="which option?", actor="w1",
+               actor_kind=AGENT, token=tok)
     return iid, tok
 
 
 def test_ab10_a_human_note_on_need_input_moves_it_to_ready(board):
     iid, _ = asking(board)
     issue = core.annotate(board, iid, "option B", actor=CHAOS, actor_kind=HUMAN)
-    assert issue["state"] == "ready"
+    assert place(issue) == ("implement", "ready")
     note, move = issue["events"][-2:]
     assert (note["kind"], note["note"]) == ("annotate", "option B")
-    assert (move["kind"], move["actor"], move["actor_kind"], move["from_state"],
-            move["to_state"]) == ("transition", CHAOS, HUMAN, "need-input", "ready")
+    assert (move["kind"], move["actor"], move["actor_kind"], move["from_queue"],
+            move["to_queue"]) == ("transition", CHAOS, HUMAN, None, "ready")
     assert core.next(board, "w2")["issue"]["id"] == iid
 
 
@@ -198,35 +202,39 @@ def test_ab10_a_human_edit_save_on_need_input_moves_it_to_ready(board):
     issue = core.edit(board, iid, actor=CHAOS, actor_kind=HUMAN,
                       expected_version=core.show(board, iid)["version"],
                       body="use option B")
-    assert issue["state"] == "ready"
+    assert place(issue) == ("implement", "ready")
     last = issue["events"][-1]
-    assert (last["kind"], last["actor"], last["from_state"], last["to_state"]) == (
-        "transition", CHAOS, "need-input", "ready")
+    assert (last["kind"], last["actor"], (last["from_stage"], last["from_queue"]), (last["to_stage"], last["to_queue"])) == (
+        "transition", CHAOS, ("implement", None), ("implement", "ready"))
 
 
-def test_ab10_an_explicit_state_with_the_note_wins(board):
+def test_ab56_edit_takes_no_state_or_note(board):
+    """The state shim is gone: a place change goes through move or queue."""
     iid, _ = asking(board)
-    issue = core.edit(board, iid, actor=CHAOS, actor_kind=HUMAN,
-                      expected_version=core.show(board, iid)["version"],
-                      state="done", note="reviewed")
-    assert issue["state"] == "done"
-    assert [e["to_state"] for e in issue["events"] if e["kind"] == "transition"][-1] == "done"
+    version = core.show(board, iid)["version"]
+    with pytest.raises(TypeError):
+        core.edit(board, iid, actor=CHAOS, actor_kind=HUMAN, expected_version=version,
+                  state="done")
+    with pytest.raises(TypeError):
+        core.edit(board, iid, actor=CHAOS, actor_kind=HUMAN, expected_version=version,
+                  note="reviewed")
+    assert not hasattr(core, "_apply_state")
 
 
 def test_ab10_an_agent_note_does_not_release_its_own_need_input_card(board):
     iid, _ = asking(board)
     # need-input cleared the lease, so the agent notes without a token.
     issue = core.annotate(board, iid, "emailed Chaos", actor="w1", actor_kind=AGENT)
-    assert issue["state"] == "need-input"
+    assert place(issue) == ("implement", None)
 
 
 def test_ab10_a_human_note_on_another_state_moves_nothing(board):
     iid = core.create(board, "MS", "idea", actor=CHAOS, actor_kind=HUMAN)["id"]
     assert core.annotate(board, iid, "thought", actor=CHAOS,
-                         actor_kind=HUMAN)["state"] == "backlog"
+                         actor_kind=HUMAN)["stage"] == "backlog"
     edited = core.edit(board, iid, actor=CHAOS, actor_kind=HUMAN,
                        expected_version=core.show(board, iid)["version"], title="idea 2")
-    assert edited["state"] == "backlog"
+    assert place(edited) == ("backlog", None)
 
 
 def test_ab10_a_human_note_replayed_moves_once(board):
@@ -234,8 +242,8 @@ def test_ab10_a_human_note_replayed_moves_once(board):
     core.annotate(board, iid, "option B", actor=CHAOS, actor_kind=HUMAN, request_id="r1")
     issue = core.annotate(board, iid, "option B", actor=CHAOS, actor_kind=HUMAN,
                           request_id="r1")
-    assert issue["state"] == "ready"
-    assert sum(e["to_state"] == "ready" for e in issue["events"]) == 2, \
+    assert place(issue) == ("implement", "ready")
+    assert sum(e["to_queue"] == "ready" for e in issue["events"]) == 2, \
         "the create and one release, not two releases"
 
 
@@ -243,18 +251,18 @@ def test_an_agent_closes_its_own_card(board):
     """AB-23, superseding AB-9: an agent closes a standalone card under its lease."""
     iid = ready(board)
     tok = core.next(board, "w1")["lease_token"]
-    issue = core.transition(board, iid, "done", note="PR #1 merged", actor="w1",
-                            actor_kind=AGENT, token=tok)
-    assert (issue["state"], issue["lease_holder"]) == ("done", None)
+    issue = core.move(board, iid, "done", note="PR #1 merged", actor="w1",
+                      actor_kind=AGENT, token=tok)
+    assert (place(issue), issue["lease_holder"]) == (("done", None), None)
 
 
 def test_an_agent_closes_a_workflow_step_itself(board):
     core.create_template(board, "solo", "Solo", ["only"])
     step = core.instantiate(board, "solo", "MS", actor=CHAOS, actor_kind=HUMAN)["steps"][0]
     claim = core.next(board, "w1")
-    issue = core.transition(board, step["id"], "done", note="did it", actor="w1",
-                            actor_kind=AGENT, token=claim["lease_token"])
-    assert issue["state"] == "done"
+    issue = core.move(board, step["id"], "done", note="did it", actor="w1",
+                      actor_kind=AGENT, token=claim["lease_token"])
+    assert place(issue) == ("done", None)
 
 
 def test_an_agent_closes_a_plan_origin(board):
@@ -263,23 +271,23 @@ def test_an_agent_closes_a_plan_origin(board):
     tok = core.next(board, "w1")["lease_token"]
     core.plan(board, iid, [{"title": "a"}], actor="w1", actor_kind=AGENT, token=tok)
     step = core.next(board, "w2")
-    core.transition(board, step["issue"]["id"], "done", note="did a", actor="w2",
-                    actor_kind=AGENT, token=step["lease_token"])
+    core.move(board, step["issue"]["id"], "done", note="did a", actor="w2",
+              actor_kind=AGENT, token=step["lease_token"])
     claim = core.next(board, "w3")
     assert claim["issue"]["id"] == iid
-    resumed = [e for e in claim["issue"]["events"] if e["to_state"] == "ready"][-1]
+    resumed = [e for e in claim["issue"]["events"] if e["to_queue"] == "ready"][-1]
     assert "for a human to close" not in resumed["note"]
-    issue = core.transition(board, iid, "done", note="all steps done", actor="w3",
-                            actor_kind=AGENT, token=claim["lease_token"])
-    assert issue["state"] == "done"
+    issue = core.move(board, iid, "done", note="all steps done", actor="w3",
+                      actor_kind=AGENT, token=claim["lease_token"])
+    assert place(issue) == ("done", None)
 
 
 def parked(engine, worker="w1"):
     """A card an agent worked and left at need-input, which drops its lease."""
     iid = ready(engine)
     tok = core.next(engine, worker)["lease_token"]
-    core.transition(engine, iid, "need-input", note="PR #1 merged", actor=worker,
-                    actor_kind=AGENT, token=tok)
+    core.queue(engine, iid, None, note="PR #1 merged", actor=worker,
+               actor_kind=AGENT, token=tok)
     return iid
 
 
@@ -287,38 +295,37 @@ def parked(engine, worker="w1"):
 def test_an_agent_closes_a_card_it_left_at_need_input(board, state):
     """AB-23: the cards AB-9 parked for a human close need no lease to finish."""
     iid = parked(board)
-    issue = core.transition(board, iid, state, note="finished", actor="w1", actor_kind=AGENT)
-    assert issue["state"] == state
+    issue = core.move(board, iid, state, note="finished", actor="w1", actor_kind=AGENT)
+    assert place(issue) == (state, None)
     assert issue["events"][-1]["actor"] == "w1"
 
 
 def test_an_agent_cannot_close_a_card_another_agent_left_at_need_input(board):
     iid = parked(board, "w1")
     with pytest.raises(core.LeaseLost):
-        core.transition(board, iid, "done", note="finished", actor="w2", actor_kind=AGENT)
-    assert core.show(board, iid)["state"] == "need-input"
+        core.move(board, iid, "done", note="finished", actor="w2", actor_kind=AGENT)
+    assert place(core.show(board, iid)) == ("implement", None)
 
 
 def test_only_the_agent_that_last_left_a_card_at_need_input_closes_it(board):
     iid = parked(board, "w1")
-    core.transition(board, iid, "ready", actor=CHAOS, actor_kind=HUMAN)
-    core.transition(board, iid, "onhold", actor=CHAOS, actor_kind=HUMAN)
-    core.transition(board, iid, "backlog", actor=CHAOS, actor_kind=HUMAN)
-    core.transition(board, iid, "ready", actor=CHAOS, actor_kind=HUMAN)
+    core.queue(board, iid, "ready", actor=CHAOS, actor_kind=HUMAN)
+    core.queue(board, iid, "on-hold", actor=CHAOS, actor_kind=HUMAN)
+    core.move(board, iid, "backlog", actor=CHAOS, actor_kind=HUMAN)
+    core.move(board, iid, "implement", actor=CHAOS, actor_kind=HUMAN)
     tok = core.next(board, "w2")["lease_token"]
-    core.transition(board, iid, "need-input", note="question", actor="w2", actor_kind=AGENT,
-                    token=tok)
+    core.queue(board, iid, None, note="question", actor="w2", actor_kind=AGENT, token=tok)
     with pytest.raises(core.LeaseLost):
-        core.transition(board, iid, "done", note="finished", actor="w1", actor_kind=AGENT)
+        core.move(board, iid, "done", note="finished", actor="w1", actor_kind=AGENT)
 
 
 def test_an_agent_without_a_lease_only_finishes_its_need_input_card(board):
     """No lease reopens, holds or otherwise moves the card; only done and cancelled."""
     iid = parked(board)
-    for state in ("ready", "onhold"):
+    for status in ("ready", "on-hold"):
         with pytest.raises(core.LeaseLost):
-            core.transition(board, iid, state, note="x", actor="w1", actor_kind=AGENT)
-    assert core.show(board, iid)["state"] == "need-input"
+            core.queue(board, iid, status, note="x", actor="w1", actor_kind=AGENT)
+    assert place(core.show(board, iid)) == ("implement", None)
 
 
 def test_an_agent_cannot_close_a_need_input_card_nobody_parked(board):
@@ -327,15 +334,15 @@ def test_an_agent_cannot_close_a_need_input_card_nobody_parked(board):
     with store.session(board) as s, s.begin():
         s.get(store.Issue, iid).state = "need-input"
     with pytest.raises(core.LeaseLost):
-        core.transition(board, iid, "done", note="finished", actor=CHAOS, actor_kind=AGENT)
+        core.move(board, iid, "done", note="finished", actor=CHAOS, actor_kind=AGENT)
 
 
 def test_a_lifted_hold_returns_to_backlog_not_ready(board):
     iid = ready(board)
-    core.transition(board, iid, "onhold", actor=CHAOS, actor_kind=HUMAN)
+    core.queue(board, iid, "on-hold", actor=CHAOS, actor_kind=HUMAN)
     with pytest.raises(core.InvalidTransition):
-        core.transition(board, iid, "ready", actor=CHAOS, actor_kind=HUMAN)
-    core.transition(board, iid, "backlog", actor=CHAOS, actor_kind=HUMAN)
+        core.queue(board, iid, "ready", actor=CHAOS, actor_kind=HUMAN)
+    core.move(board, iid, "backlog", actor=CHAOS, actor_kind=HUMAN)
 
 
 def test_an_agent_write_needs_the_token(board):
@@ -355,8 +362,8 @@ def test_row3_workflow_steps_are_handed_out_in_order(board):
     claim = core.next(board, "w1")
     assert claim["issue"]["id"] == step1
     assert core.next(board, "w2") is None
-    core.transition(board, step1, "done", note="built", actor="w1",
-                    actor_kind=AGENT, token=claim["lease_token"])
+    core.move(board, step1, "done", note="built", actor="w1",
+              actor_kind=AGENT, token=claim["lease_token"])
     assert core.next(board, "w2")["issue"]["id"] == step2
 
 
@@ -372,9 +379,11 @@ def test_workflow_state_is_computed(board):
     wf = core.instantiate(board, "pair", "MS", actor=CHAOS, actor_kind=HUMAN)
     a, b = [s["id"] for s in wf["steps"]]
     claim = core.next(board, "w1")
-    core.transition(board, a, "need-input", note="stuck", actor="w1", actor_kind=AGENT,
-                    token=claim["lease_token"])
-    assert core.show(board, b)["workflow"]["state"] == "need-input"
+    core.queue(board, a, None, note="stuck", actor="w1", actor_kind=AGENT,
+               token=claim["lease_token"])
+    wf_view = core.show(board, b)["workflow"]
+    assert (wf_view["stage"], wf_view["queue"]) == ("implement", None)
+    assert "state" not in wf_view
 
 
 # --- row 4: a closing artifact ------------------------------------------------
@@ -427,10 +436,10 @@ def test_a_repeated_transition_is_a_no_op_that_still_records(board):
     iid = ready(board)
     claim = core.next(board, "w1")
     tok = claim["lease_token"]
-    core.transition(board, iid, "need-input", note="a", actor="w1", actor_kind=AGENT, token=tok)
-    core.transition(board, iid, "need-input", note="b", actor=CHAOS, actor_kind=HUMAN)
+    core.queue(board, iid, None, note="a", actor="w1", actor_kind=AGENT, token=tok)
+    core.queue(board, iid, None, note="b", actor=CHAOS, actor_kind=HUMAN)
     last = events(board, iid)[-1]
-    assert (last["from_state"], last["to_state"], last["note"]) == ("need-input", "need-input", "b")
+    assert ((last["from_stage"], last["from_queue"]), (last["to_stage"], last["to_queue"]), last["note"]) == (("implement", None), ("implement", None), "b")
 
 
 # --- row 8: a human edit under a live lease ------------------------------------
@@ -448,15 +457,15 @@ def test_row8_edit_under_a_live_lease_needs_preempt(board):
     issue = core.edit(board, iid, actor=CHAOS, expected_version=version, body="new",
                       preempt=True)
     assert issue["body"] == "new"
-    assert issue["state"] == "processing"
+    assert place(issue) == ("implement", "processing")
     assert issue["lease_holder"] == CHAOS
     assert issue["lease_expires_at"] is None
     assert [e["kind"] for e in issue["events"]][-2:] == ["preempt", "edit"]
     assert "run-2" in issue["events"][-2]["note"]
 
     with pytest.raises(core.LeaseLost) as lost:
-        core.transition(board, iid, "done", note="old work", actor="run-2",
-                        actor_kind=AGENT, token=claim["lease_token"])
+        core.move(board, iid, "done", note="old work", actor="run-2",
+                  actor_kind=AGENT, token=claim["lease_token"])
     assert CHAOS in str(lost.value)
 
 
@@ -466,7 +475,7 @@ def test_a_human_held_card_is_never_reclaimed_until_released(board):
     version = core.show(board, iid)["version"]
     core.edit(board, iid, actor=CHAOS, expected_version=version, title="t", preempt=True)
     assert core.next(board, "run-3") is None
-    core.transition(board, iid, "ready", actor=CHAOS, actor_kind=HUMAN)
+    core.queue(board, iid, "ready", actor=CHAOS, actor_kind=HUMAN)
     assert core.next(board, "run-3")["issue"]["id"] == iid
 
 
@@ -492,8 +501,7 @@ def test_every_operation_writes_an_event(board):
     tok = claim["lease_token"]
     core.annotate(board, iid, "n", actor="w1", actor_kind=AGENT, token=tok)
     core.link(board, iid, "pr/1", kind="pr", actor="w1", actor_kind=AGENT, token=tok)
-    core.transition(board, iid, "need-input", note="d", actor="w1", actor_kind=AGENT,
-                    token=tok)
+    core.queue(board, iid, None, note="d", actor="w1", actor_kind=AGENT, token=tok)
     assert [e["kind"] for e in events(board, iid)] == [
         "create", "claim", "annotate", "link", "transition"]
 
@@ -504,8 +512,8 @@ def test_every_operation_writes_an_event(board):
 def test_an_agent_moves_an_issue_only_under_a_lease(board):
     iid = ready(board)
     with pytest.raises(core.LeaseLost):
-        core.transition(board, iid, "cancelled", actor="rogue", actor_kind=AGENT)
-    assert core.show(board, iid)["state"] == "ready"
+        core.move(board, iid, "cancelled", actor="rogue", actor_kind=AGENT)
+    assert place(core.show(board, iid)) == ("implement", "ready")
 
 
 def test_a_preempt_only_edit_replays_its_request_id(board):
@@ -530,8 +538,8 @@ def test_a_stale_token_write_waits_for_a_concurrent_reclaim(board):
 
     def stale_write():
         try:
-            core.transition(board, iid, "need-input", note="old", actor="run-1",
-                            actor_kind=AGENT, token=first["lease_token"])
+            core.queue(board, iid, None, note="old", actor="run-1",
+                       actor_kind=AGENT, token=first["lease_token"])
             outcome["result"] = "written"
         except core.LeaseLost:
             outcome["result"] = "lease lost"
@@ -555,11 +563,10 @@ def test_a_stale_token_write_waits_for_a_concurrent_reclaim(board):
 def test_a_reused_request_id_on_another_call_is_not_a_replay(board):
     one, two = ready(board, "one"), ready(board, "two")
     core.annotate(board, one, "n", actor=CHAOS, actor_kind=HUMAN, request_id="run-42")
-    core.transition(board, one, "onhold", actor=CHAOS, actor_kind=HUMAN, request_id="run-42")
-    core.transition(board, two, "cancelled", actor=CHAOS, actor_kind=HUMAN,
-                    request_id="run-42")
-    assert core.show(board, one)["state"] == "onhold"
-    assert core.show(board, two)["state"] == "cancelled"
+    core.queue(board, one, "on-hold", actor=CHAOS, actor_kind=HUMAN, request_id="run-42")
+    core.move(board, two, "cancelled", actor=CHAOS, actor_kind=HUMAN, request_id="run-42")
+    assert place(core.show(board, one)) == ("implement", "on-hold")
+    assert place(core.show(board, two)) == ("cancelled", None)
 
 
 def test_an_agent_links_only_under_a_lease(board):
@@ -623,9 +630,9 @@ def test_an_agent_cannot_edit(board):
     version = core.show(board, "MS-1")["version"]
     with pytest.raises(core.BoardError):
         core.edit(board, "MS-1", actor="rogue", actor_kind=AGENT,
-                  expected_version=version, state="ready", title="rewritten")
+                  expected_version=version, title="rewritten")
     issue = core.show(board, "MS-1")
-    assert (issue["state"], issue["title"]) == ("backlog", "open item")
+    assert (place(issue), issue["title"]) == (("backlog", None), "open item")
 
 
 def test_a_concurrent_retry_replays_after_the_first_commits(board):
@@ -638,9 +645,9 @@ def test_a_concurrent_retry_replays_after_the_first_commits(board):
 
     def retry():
         try:
-            outcome["state"] = core.transition(
-                board, iid, "need-input", note="d", actor="w1", actor_kind=AGENT,
-                token=tok, request_id="fin")["state"]
+            outcome["state"] = core.queue(
+                board, iid, None, note="d", actor="w1", actor_kind=AGENT,
+                token=tok, request_id="fin")["queue"]
         except core.BoardError as e:
             outcome["state"] = type(e).__name__
 
@@ -651,8 +658,8 @@ def test_a_concurrent_retry_replays_after_the_first_commits(board):
         t.start()
         t.join(0.5)
         tx.rollback()
-    core.transition(board, iid, "need-input", note="d", actor="w1", actor_kind=AGENT,
-                    token=tok, request_id="fin")
+    core.queue(board, iid, None, note="d", actor="w1", actor_kind=AGENT,
+               token=tok, request_id="fin")
     t.join(10)
     assert outcome == {"state": "need-input"}
 
@@ -862,7 +869,8 @@ def test_workflow_lists_its_steps_in_position_order_with_leases(board):
     wf = core.instantiate(board, "rel", "MS", actor=CHAOS, actor_kind=HUMAN)
     core.next(board, "w1")
     view = core.workflow(board, wf["id"])
-    assert view["title"] == "Release" and view["state"] == "processing"
+    assert view["title"] == "Release"
+    assert (view["stage"], view["queue"]) == ("implement", "processing")
     assert [st["id"] for st in view["steps"]] == [st["id"] for st in wf["steps"]]
     assert [st["position"] for st in view["steps"]] == sorted(st["position"] for st in view["steps"])
     assert view["steps"][0]["lease_holder"] == "w1"
@@ -880,46 +888,41 @@ def test_an_unknown_workflow_is_not_found(board):
 # --- lanes (MS-632) -------------------------------------------------------------
 
 
-def test_the_lanes_are_the_seven_in_board_order():
-    assert list(core.TRANSITIONS) == ["backlog", "ready", "need-input", "processing",
-                                      "onhold", "done", "cancelled"]
-
-
-def test_every_lane_has_a_one_line_hint_in_board_order():
-    """MS-660: a new state cannot ship without a hint for its lane."""
-    assert list(core.LANE_HINTS) == list(core.TRANSITIONS)
-    for state, hint in core.LANE_HINTS.items():
-        assert hint.strip() and "\n" not in hint, state
-
-
 def test_a_new_issue_lands_in_backlog(board):
-    assert core.create(board, "MS", "x", actor=CHAOS, actor_kind=HUMAN)["state"] == "backlog"
+    issue = core.create(board, "MS", "x", actor=CHAOS, actor_kind=HUMAN)
+    assert (issue["stage"], issue["queue"]) == ("backlog", None)
+
+
+def test_create_takes_no_old_state_name(board):
+    """AB-56: `state=` went with the seven-lane table."""
+    with pytest.raises(TypeError):
+        core.create(board, "MS", "x", actor=CHAOS, actor_kind=HUMAN, state="ready")
 
 
 @pytest.mark.parametrize("old", ["open", "blocked", "in-progress", "frozen"])
 def test_a_retired_state_name_is_refused(board, old):
     iid = core.create(board, "MS", "x", actor=CHAOS, actor_kind=HUMAN)["id"]
-    with pytest.raises(core.InvalidTransition, match="unknown state"):
-        core.transition(board, iid, old, note="n", actor=CHAOS, actor_kind=HUMAN)
-    with pytest.raises(core.InvalidTransition):
-        core.create(board, "MS", "y", actor=CHAOS, actor_kind=HUMAN, state=old)
+    with pytest.raises(core.InvalidTransition, match="unknown stage"):
+        core.move(board, iid, old, note="n", actor=CHAOS, actor_kind=HUMAN)
 
 
 def test_a_workflow_of_ready_steps_sits_in_ready(board):
     core.create_template(board, "pair", "Pair", ["a", "b"])
     wf = core.instantiate(board, "pair", "MS", actor=CHAOS, actor_kind=HUMAN)
-    assert wf["state"] == "ready"
-    core.transition(board, wf["steps"][0]["id"], "onhold", actor=CHAOS, actor_kind=HUMAN)
-    core.transition(board, wf["steps"][1]["id"], "onhold", actor=CHAOS, actor_kind=HUMAN)
-    assert core.show(board, wf["steps"][0]["id"])["workflow"]["state"] == "backlog"
+    assert (wf["stage"], wf["queue"]) == ("implement", "ready")
+    core.queue(board, wf["steps"][0]["id"], "on-hold", actor=CHAOS, actor_kind=HUMAN)
+    core.queue(board, wf["steps"][1]["id"], "on-hold", actor=CHAOS, actor_kind=HUMAN)
+    wf_view = core.show(board, wf["steps"][0]["id"])["workflow"]
+    assert (wf_view["stage"], wf_view["queue"]) == ("backlog", None)
 
 
 def test_a_workflow_whose_first_open_step_is_held_is_not_ready(board):
     core.create_template(board, "pair", "Pair", ["a", "b"])
     wf = core.instantiate(board, "pair", "MS", actor=CHAOS, actor_kind=HUMAN)
-    core.transition(board, wf["steps"][0]["id"], "onhold", actor=CHAOS, actor_kind=HUMAN)
+    core.queue(board, wf["steps"][0]["id"], "on-hold", actor=CHAOS, actor_kind=HUMAN)
     assert core.next(board, "w1") is None
-    assert core.show(board, wf["steps"][1]["id"])["workflow"]["state"] == "backlog"
+    wf_view = core.show(board, wf["steps"][1]["id"])["workflow"]
+    assert (wf_view["stage"], wf_view["queue"]) == ("backlog", None)
 
 
 # --- attachments (MS-643) -------------------------------------------------------
@@ -961,16 +964,34 @@ def test_an_edit_that_only_attaches_is_a_change(board):
     assert [a["event_id"] for a in after["attachments"]] == [None]
 
 
-def test_an_edit_that_moves_state_attaches_to_the_transition(board):
+def test_a_move_attaches_its_files_to_the_transition(board):
     iid = ready(board)
-    before = core.show(board, iid)
-    after = core.edit(board, iid, actor=CHAOS, expected_version=before["version"],
-                      state="onhold", note="parked", attachments=[blob()])
-    assert after["version"] == before["version"] + 1
+    after = core.move(board, iid, "backlog", actor=CHAOS, actor_kind=HUMAN,
+                      note="later", attachments=[blob()])
     last = after["events"][-1]
-    assert (last["kind"], last["to_state"]) == ("transition", "onhold")
+    assert (last["kind"], last["to_stage"]) == ("transition", "backlog")
     assert [a["filename"] for a in last["attachments"]] == ["a.txt"]
-    assert [e["kind"] for e in after["events"]].count("edit") == 0
+
+
+def test_a_queue_change_attaches_its_files_to_the_transition(board):
+    iid = ready(board)
+    after = core.queue(board, iid, "on-hold", actor=CHAOS, actor_kind=HUMAN,
+                       note="parked", attachments=[blob()])
+    last = after["events"][-1]
+    assert (last["kind"], last["to_queue"]) == ("transition", "on-hold")
+    assert [a["filename"] for a in last["attachments"]] == ["a.txt"]
+
+
+def test_a_retried_move_with_other_files_is_a_new_request(board):
+    """The files are part of the request's identity, as they are for annotate."""
+    iid = ready(board)
+    core.queue(board, iid, "on-hold", actor=CHAOS, actor_kind=HUMAN, note="p",
+               attachments=[blob()])
+    core.queue(board, iid, None, actor=CHAOS, actor_kind=HUMAN)
+    again = core.queue(board, iid, "on-hold", actor=CHAOS, actor_kind=HUMAN, note="p",
+                       attachments=[blob(data=b"other")])
+    assert again["queue"] == "on-hold"
+    assert [a["filename"] for a in again["events"][-1]["attachments"]] == ["a.txt"]
 
 
 def test_an_unknown_attachment_is_not_found(board):
@@ -1020,19 +1041,21 @@ def test_plan_creates_ordered_ready_steps_and_holds_the_origin(board):
     iid, token = claimed(board)
     view = plan(board, iid, token)
     assert view["id"] == iid
-    assert view["state"] == "onhold"
+    assert place(view) == ("implement", "on-hold")
     assert view["lease_holder"] is None
     wf = view["plan"]
     assert wf["title"] == "big job"
-    assert [(s["position"], s["title"], s["state"]) for s in wf["steps"]] == [
-        (1, "design", "ready"), (2, "build", "ready"), (3, "test", "ready")]
+    assert [(s["position"], s["title"], s["stage"], s["queue"]) for s in wf["steps"]] == [
+        (1, "design", "implement", "ready"), (2, "build", "implement", "ready"),
+        (3, "test", "implement", "ready")]
+    assert all("state" not in s for s in wf["steps"])
     step = core.show(board, wf["steps"][0]["id"])
     assert step["project"] == "MS"
     # The steps keep the origin's place in the queue rather than going to the back.
     assert {core.show(board, s["id"])["rank"] for s in wf["steps"]} == {view["rank"]}
     assert step["workflow"]["origin_issue_id"] == iid
     last = events(board, iid)[-1]
-    assert (last["from_state"], last["to_state"], last["actor"]) == ("processing", "onhold", "w1")
+    assert ((last["from_stage"], last["from_queue"]), (last["to_stage"], last["to_queue"]), last["actor"]) == (("implement", "processing"), ("implement", "on-hold"), "w1")
     assert "3 steps" in last["note"]
 
 
@@ -1067,7 +1090,7 @@ def test_plan_without_steps_is_refused_and_writes_nothing(board):
         plan(board, iid, token, steps=("ok", "  "))
     with store.session(board) as s:
         assert s.scalars(select(store.Workflow)).all() == []
-    assert core.show(board, iid)["state"] == "processing"
+    assert place(core.show(board, iid)) == ("implement", "processing")
 
 
 def test_a_second_plan_on_one_issue_is_refused(board):
@@ -1092,7 +1115,7 @@ def test_plan_replays_one_request_id_without_duplicates(board):
 def test_a_human_plans_a_backlog_issue_without_a_lease(board):
     iid = core.create(board, "MS", "idea", actor=CHAOS, actor_kind=HUMAN)["id"]
     view = core.plan(board, iid, [{"title": "a"}], actor=CHAOS, actor_kind=HUMAN)
-    assert view["state"] == "onhold"
+    assert place(view) == ("implement", "on-hold")
     assert len(view["plan"]["steps"]) == 1
 
 
@@ -1102,12 +1125,12 @@ def test_a_human_plan_under_an_agents_lease_needs_preempt(board):
         core.plan(board, iid, [{"title": "a"}], actor=CHAOS, actor_kind=HUMAN)
     view = core.plan(board, iid, [{"title": "a"}], actor=CHAOS, actor_kind=HUMAN,
                      preempt=True)
-    assert (view["state"], view["lease_holder"]) == ("onhold", None)
+    assert (place(view), view["lease_holder"]) == (("implement", "on-hold"), None)
 
 
 def test_a_finished_issue_cannot_be_planned(board):
     iid = ready(board)
-    core.transition(board, iid, "cancelled", actor=CHAOS, actor_kind=HUMAN)
+    core.move(board, iid, "cancelled", actor=CHAOS, actor_kind=HUMAN)
     with pytest.raises(core.InvalidTransition):
         core.plan(board, iid, [{"title": "a"}], actor=CHAOS, actor_kind=HUMAN)
 
@@ -1126,26 +1149,26 @@ def test_the_last_step_done_returns_the_origin_to_ready(board):
     iid, token = claimed(board)
     plan(board, iid, token, steps=("a", "b"))
     for note in ("did a", "did b"):
-        assert core.show(board, iid)["state"] == "onhold"
+        assert place(core.show(board, iid)) == ("implement", "on-hold")
         claim = core.next(board, "w2")
-        core.transition(board, claim["issue"]["id"], "done", note=note, actor="w2",
-                        actor_kind=AGENT, token=claim["lease_token"])
+        core.move(board, claim["issue"]["id"], "done", note=note, actor="w2",
+                  actor_kind=AGENT, token=claim["lease_token"])
     origin = core.show(board, iid)
-    assert origin["state"] == "ready"
+    assert place(origin) == ("implement", "ready")
     last = origin["events"][-1]
-    assert (last["from_state"], last["to_state"], last["actor_kind"]) == (
-        "onhold", "ready", "system")
+    assert ((last["from_stage"], last["from_queue"]), (last["to_stage"], last["to_queue"]), last["actor_kind"]) == (
+        ("implement", "on-hold"), ("implement", "ready"), "system")
     assert core.next(board, "w3")["issue"]["id"] == iid
 
 
 def test_an_origin_moved_off_hold_by_a_human_is_left_alone(board):
     iid, token = claimed(board)
     plan(board, iid, token, steps=("a",))
-    core.transition(board, iid, "backlog", actor=CHAOS, actor_kind=HUMAN)
+    core.move(board, iid, "backlog", actor=CHAOS, actor_kind=HUMAN)
     claim = core.next(board, "w2")
-    core.transition(board, claim["issue"]["id"], "done", note="did a", actor="w2",
-                    actor_kind=AGENT, token=claim["lease_token"])
-    assert core.show(board, iid)["state"] == "backlog"
+    core.move(board, claim["issue"]["id"], "done", note="did a", actor="w2",
+              actor_kind=AGENT, token=claim["lease_token"])
+    assert place(core.show(board, iid)) == ("backlog", None)
 
 
 # --- MS-646: dependencies between issues ------------------------------------------
@@ -1157,11 +1180,11 @@ def depend(engine, iid, on, **kw):
 
 def finish(engine, claim, note="did it"):
     """An agent hands a card to review and a human closes it, a path AB-8 keeps open."""
-    core.transition(engine, claim["issue"]["id"], "need-input", note=note,
-                    actor=claim["issue"]["lease_holder"], actor_kind=AGENT,
-                    token=claim["lease_token"])
-    core.transition(engine, claim["issue"]["id"], "done", note="reviewed", actor=CHAOS,
-                    actor_kind=HUMAN)
+    core.queue(engine, claim["issue"]["id"], None, note=note,
+               actor=claim["issue"]["lease_holder"], actor_kind=AGENT,
+               token=claim["lease_token"])
+    core.move(engine, claim["issue"]["id"], "done", note="reviewed", actor=CHAOS,
+              actor_kind=HUMAN)
 
 
 def test_next_skips_an_issue_until_what_it_depends_on_is_done(board):
@@ -1179,7 +1202,7 @@ def test_depend_is_listed_both_ways_and_logged(board):
     a, b = ready(board, "a"), ready(board, "b")
     view = depend(board, b, a)
     assert [d["id"] for d in view["depends_on"]] == [a]
-    assert view["depends_on"][0]["state"] == "ready"
+    assert place(view["depends_on"][0]) == ("implement", "ready")
     assert [d["id"] for d in core.show(board, a)["blocks"]] == [b]
     ev = events(board, b)[-1]
     assert (ev["kind"], ev["actor"]) == ("depend", CHAOS)
@@ -1300,7 +1323,7 @@ def test_a_parallel_workflow_is_done_only_when_every_step_is(board):
     claim = core.next(board, "w1")
     assert claim["issue"]["id"] == second
     finish(board, claim)
-    assert core.show(board, second)["workflow"]["state"] != "done"
+    assert core.show(board, second)["workflow"]["stage"] != "done"
 
 
 def test_depend_replays_on_the_same_request_id(board):
@@ -1380,7 +1403,7 @@ def test_parallel_last_steps_finishing_together_still_resume_the_origin(board):
         tx.commit()
     t.join(10)
     assert outcome == {"done": True}
-    assert core.show(board, iid)["state"] == "ready"
+    assert place(core.show(board, iid)) == ("implement", "ready")
 
 
 # --- MS-647: create a batch of issues in one call -----------------------------
@@ -1400,7 +1423,7 @@ def test_batch_creates_ready_issues_in_list_order(board):
                                                             "body": "why", "labels": ["x"]}])
     a, b = out["ids"]
     assert out["workflow_id"] is None
-    assert core.show(board, a)["state"] == "ready"
+    assert place(core.show(board, a)) == ("implement", "ready")
     view = core.show(board, b)
     assert (view["title"], view["body"], view["labels"]) == ("b", "why", ["x"])
     assert core.next(board, "w1")["issue"]["id"] == a
@@ -1619,7 +1642,7 @@ def test_ab12_an_event_inside_the_window_counts_however_old_the_issue(board):
     age_events(board, old, 13)
     assert core.recent_projects(board, CHAOS) == ["HC"]
     age_events(board, old, 30)
-    core.transition(board, old, "ready", actor=CHAOS, actor_kind=HUMAN)
+    core.move(board, old, "implement", actor=CHAOS, actor_kind=HUMAN)
     assert core.recent_projects(board, CHAOS) == ["HC"]
 
 
@@ -1644,11 +1667,11 @@ def finished(engine, issue_id):
 
 def close(engine, title="x"):
     """A loose card worked by an agent and closed by a human, as AB-9 runs it."""
-    i = core.create(engine, "MS", title, actor=CHAOS, actor_kind=HUMAN, state="ready")["id"]
+    i = core.create(engine, "MS", title, actor=CHAOS, actor_kind=HUMAN, stage="implement")["id"]
     claim = core.next(engine, "w1")
-    core.transition(engine, i, "need-input", note="review", actor="w1", actor_kind="agent",
-                    token=claim["lease_token"])
-    core.transition(engine, i, "done", note="ok", actor=CHAOS, actor_kind=HUMAN)
+    core.queue(engine, i, None, note="review", actor="w1", actor_kind="agent",
+               token=claim["lease_token"])
+    core.move(engine, i, "done", note="ok", actor=CHAOS, actor_kind=HUMAN)
     return i
 
 
@@ -1664,7 +1687,7 @@ def test_ab13_a_repeated_move_to_done_does_not_restart_the_clock(board):
     i = close(board)
     age_done(board, i, 30)
     old = core.done_times(board)[i]
-    core.transition(board, i, "done", note="again", actor=CHAOS, actor_kind=HUMAN)
+    core.move(board, i, "done", note="again", actor=CHAOS, actor_kind=HUMAN)
     assert core.done_times(board)[i] == old
 
 
@@ -1696,22 +1719,22 @@ def done_card(engine, title="x", worker="w1", **kw):
     i = ready(engine, title, **kw)
     claim = core.next(engine, worker)
     assert claim["issue"]["id"] == i
-    core.transition(engine, i, "done", note="merged", actor=worker, actor_kind=AGENT,
-                    token=claim["lease_token"])
+    core.move(engine, i, "done", note="merged", actor=worker, actor_kind=AGENT,
+              token=claim["lease_token"])
     return i
 
 
 def reopen(engine, i, note="the fix regressed", actor=CHAOS, actor_kind=HUMAN):
-    return core.transition(engine, i, "ready", note=note, actor=actor, actor_kind=actor_kind)
+    return core.move(engine, i, "implement", note=note, actor=actor, actor_kind=actor_kind)
 
 
 def test_ab24_a_human_reopens_a_done_card_with_a_reason(board):
     i = done_card(board)
     issue = reopen(board, i)
-    assert issue["state"] == "ready"
+    assert place(issue) == ("implement", "ready")
     last = issue["events"][-1]
-    assert (last["kind"], last["from_state"], last["to_state"], last["note"]) == (
-        "transition", "done", "ready", "the fix regressed")
+    assert (last["kind"], (last["from_stage"], last["from_queue"]), (last["to_stage"], last["to_queue"]), last["note"]) == (
+        "transition", ("done", None), ("implement", "ready"), "the fix regressed")
     assert core.next(board, "w2")["issue"]["id"] == i
 
 
@@ -1720,27 +1743,30 @@ def test_ab24_reopening_needs_a_note(board):
     for note in (None, ""):
         with pytest.raises(core.NoteRequired):
             reopen(board, i, note=note)
-    assert core.show(board, i)["state"] == "done"
+    assert place(core.show(board, i)) == ("done", None)
 
 
 def test_ab24_an_agent_reopens_a_done_card_without_a_lease(board):
     i = done_card(board, worker="w1")
     issue = reopen(board, i, actor="w2", actor_kind=AGENT)
-    assert issue["state"] == "ready"
+    assert place(issue) == ("implement", "ready")
     assert (issue["events"][-1]["actor"], issue["events"][-1]["actor_kind"]) == ("w2", AGENT)
 
 
-def test_ab24_done_reopens_only_to_ready(board):
+def test_ab24_done_reopens_only_to_implement(board):
     i = done_card(board)
-    for state in ("backlog", "onhold", "need-input", "processing", "cancelled"):
-        with pytest.raises((core.InvalidTransition, core.LeaseLost)):
-            core.transition(board, i, state, note="x", actor=CHAOS, actor_kind=HUMAN)
-    assert core.show(board, i)["state"] == "done"
+    for stage in ("backlog", "planning", "cancelled"):
+        with pytest.raises(core.InvalidTransition):
+            core.move(board, i, stage, note="x", actor=CHAOS, actor_kind=HUMAN)
+    for status in ("ready", "on-hold", "processing"):
+        with pytest.raises(core.InvalidTransition):
+            core.queue(board, i, status, note="x", actor=CHAOS, actor_kind=HUMAN)
+    assert place(core.show(board, i)) == ("done", None)
 
 
 def test_ab24_cancelled_stays_final(board):
     i = ready(board)
-    core.transition(board, i, "cancelled", actor=CHAOS, actor_kind=HUMAN)
+    core.move(board, i, "cancelled", actor=CHAOS, actor_kind=HUMAN)
     with pytest.raises(core.InvalidTransition):
         reopen(board, i)
     with pytest.raises(core.LeaseLost):
@@ -1752,8 +1778,8 @@ def test_ab24_reopening_lifts_a_closing_artifact_so_next_hands_it_out(board):
     claim = core.next(board, "w1")
     core.link(board, i, "https://example.com/pr/1", kind="pr", closes=True, actor="w1",
               actor_kind=AGENT, token=claim["lease_token"])
-    core.transition(board, i, "done", note="merged", actor="w1", actor_kind=AGENT,
-                    token=claim["lease_token"])
+    core.move(board, i, "done", note="merged", actor="w1", actor_kind=AGENT,
+              token=claim["lease_token"])
     issue = reopen(board, i)
     assert issue["closed_by_artifact"] is False
     assert [a["ref"] for a in issue["artifacts"]] == ["https://example.com/pr/1"]
@@ -1767,8 +1793,8 @@ def test_ab24_done_times_report_the_latest_close_after_a_reopen(board):
     reopen(board, i)
     assert i not in core.done_times(board)
     claim = core.next(board, "w2")
-    core.transition(board, i, "done", note="fixed again", actor="w2", actor_kind=AGENT,
-                    token=claim["lease_token"])
+    core.move(board, i, "done", note="fixed again", actor="w2", actor_kind=AGENT,
+              token=claim["lease_token"])
     with store.session(board) as s:
         latest = s.scalar(select(func.max(store.Event.at))
                           .where(store.Event.issue_id == i, store.Event.to_state == "done"))
@@ -1793,8 +1819,8 @@ def test_ab24_a_reopened_card_does_not_block_a_dependent_already_started(board):
     claim = core.next(board, "w2")
     assert claim["issue"]["id"] == started
     # A checkpoint hands the started card back to the queue.
-    core.transition(board, started, "ready", note="checkpoint", actor="w2", actor_kind=AGENT,
-                    token=claim["lease_token"])
+    core.queue(board, started, "ready", note="checkpoint", actor="w2", actor_kind=AGENT,
+               token=claim["lease_token"])
     reopen(board, blocker)
     assert core.next(board, "w3")["issue"]["id"] == started
 
@@ -1812,8 +1838,8 @@ def test_ab24_a_reopened_step_blocks_later_steps_not_yet_started(board):
     core.create_template(board, "pair", "Pair", ["first", "second"])
     steps = core.instantiate(board, "pair", "MS", actor=CHAOS, actor_kind=HUMAN)["steps"]
     claim = core.next(board, "w1")
-    core.transition(board, steps[0]["id"], "done", note="did it", actor="w1",
-                    actor_kind=AGENT, token=claim["lease_token"])
+    core.move(board, steps[0]["id"], "done", note="did it", actor="w1",
+              actor_kind=AGENT, token=claim["lease_token"])
     reopen(board, steps[0]["id"])
     assert core.next(board, "w2")["issue"]["id"] == steps[0]["id"]
     assert core.next(board, "w3") is None
@@ -1824,9 +1850,9 @@ def planned_origin(engine):
     iid, token = claimed(engine)
     step = plan(engine, iid, token, steps=("a",))["plan"]["steps"][0]["id"]
     claim = core.next(engine, "w2")
-    core.transition(engine, step, "done", note="did a", actor="w2", actor_kind=AGENT,
-                    token=claim["lease_token"])
-    assert core.show(engine, iid)["state"] == "ready"
+    core.move(engine, step, "done", note="did a", actor="w2", actor_kind=AGENT,
+              token=claim["lease_token"])
+    assert place(core.show(engine, iid)) == ("implement", "ready")
     return iid, step
 
 
@@ -1834,17 +1860,17 @@ def test_ab24_a_reopened_step_sends_a_resumed_origin_back_to_waiting(board):
     iid, step = planned_origin(board)
     reopen(board, step)
     origin = core.show(board, iid)
-    assert origin["state"] == "onhold"
+    assert place(origin) == ("implement", "on-hold")
     last = origin["events"][-1]
-    assert (last["from_state"], last["to_state"], last["actor_kind"]) == (
-        "ready", "onhold", "system")
+    assert ((last["from_stage"], last["from_queue"]), (last["to_stage"], last["to_queue"]), last["actor_kind"]) == (
+        ("implement", "ready"), ("implement", "on-hold"), "system")
     assert step in last["note"]
     # The step done again resumes the origin as before.
     claim = core.next(board, "w3")
     assert claim["issue"]["id"] == step
-    core.transition(board, step, "done", note="did a again", actor="w3", actor_kind=AGENT,
-                    token=claim["lease_token"])
-    assert core.show(board, iid)["state"] == "ready"
+    core.move(board, step, "done", note="did a again", actor="w3", actor_kind=AGENT,
+              token=claim["lease_token"])
+    assert place(core.show(board, iid)) == ("implement", "ready")
 
 
 @pytest.mark.parametrize("close_origin", [False, True])
@@ -1853,12 +1879,12 @@ def test_ab24_a_reopened_step_leaves_a_started_origin_where_it_is(board, close_o
     claim = core.next(board, "w3")
     assert claim["issue"]["id"] == iid
     if close_origin:
-        core.transition(board, iid, "done", note="checked", actor="w3", actor_kind=AGENT,
-                        token=claim["lease_token"])
+        core.move(board, iid, "done", note="checked", actor="w3", actor_kind=AGENT,
+                  token=claim["lease_token"])
     before = core.show(board, iid)
     reopen(board, step)
     origin = core.show(board, iid)
-    assert origin["state"] == before["state"]
+    assert place(origin) == place(before)
     assert origin["lease_holder"] == before["lease_holder"]
     last = origin["events"][-1]
     assert (last["kind"], last["actor_kind"]) == ("annotate", "system")
@@ -1877,8 +1903,8 @@ def test_ab29_stats_count_each_actors_created_moved_done_and_noted(board):
     core.create(board, "MS", "b", actor=CHAOS, actor_kind=HUMAN)
     claim = core.next(board, "w1")
     core.annotate(board, a, "halfway", actor="w1", actor_kind=AGENT, token=claim["lease_token"])
-    core.transition(board, a, "done", actor="w1", actor_kind=AGENT, note="PR 1",
-                    token=claim["lease_token"])
+    core.move(board, a, "done", actor="w1", actor_kind=AGENT, note="PR 1",
+              token=claim["lease_token"])
     core.annotate(board, a, "thanks", actor=CHAOS, actor_kind=HUMAN)
     rows = by_actor(core.stats(board))
     assert {k: rows[CHAOS][k] for k in ("created", "moved", "done", "noted")} == \
@@ -1892,7 +1918,7 @@ def test_ab29_stats_count_each_actors_created_moved_done_and_noted(board):
 
 def test_ab29_a_repeated_state_is_not_a_move(board):
     a = ready(board, "a")
-    core.transition(board, a, "ready", actor=CHAOS, actor_kind=HUMAN)
+    core.queue(board, a, "ready", actor=CHAOS, actor_kind=HUMAN)
     assert by_actor(core.stats(board))[CHAOS]["moved"] == 0
 
 
@@ -1920,7 +1946,8 @@ def test_ab29_recent_activity_is_newest_first_with_the_issue_title(board):
     assert len(recent) == 1
     assert recent[0] | {"at": None} == {
         "issue_id": a, "title": "first card", "actor": CHAOS, "actor_kind": HUMAN,
-        "kind": "annotate", "from_state": None, "to_state": None, "note": "a note",
+        "kind": "annotate", "from_stage": None, "to_stage": None, "from_queue": None,
+        "to_queue": None, "note": "a note",
         "at": None}
 
 
@@ -1994,7 +2021,7 @@ def test_ab43_lane_meta_gives_each_url_its_name(board):
 
 def test_ab48_stats_count_a_human_emails_agent_events_as_human(board):
     """Before AB-41 a call on a human's token was stamped agent; it counts as human."""
-    a = core.create(board, "MS", "a", actor=CHAOS, actor_kind=AGENT, state="ready")["id"]
+    a = core.create(board, "MS", "a", actor=CHAOS, actor_kind=AGENT, stage="implement")["id"]
     core.annotate(board, a, "n", actor=CHAOS, actor_kind=HUMAN)
     sa = "bot@proj.iam.gserviceaccount.com"
     core.create(board, "MS", "b", actor=sa, actor_kind=AGENT)
@@ -2012,31 +2039,30 @@ def test_ab48_stats_count_a_human_emails_agent_events_as_human(board):
 def test_ab49_a_human_closes_a_card_without_a_note(board):
     iid = ready(board)
     tok = core.next(board, "w1")["lease_token"]
-    core.transition(board, iid, "need-input", note="merged", actor="w1", actor_kind=AGENT,
-                    token=tok)
+    core.queue(board, iid, None, note="merged", actor="w1", actor_kind=AGENT, token=tok)
     for note in (None, ""):
-        issue = core.transition(board, iid, "done", note=note, actor=CHAOS, actor_kind=HUMAN)
-        assert issue["state"] == "done"
+        issue = core.move(board, iid, "done", note=note, actor=CHAOS, actor_kind=HUMAN)
+        assert place(issue) == ("done", None)
         if note is None:
-            core.transition(board, iid, "ready", note="again", actor=CHAOS, actor_kind=HUMAN)
+            core.move(board, iid, "implement", note="again", actor=CHAOS, actor_kind=HUMAN)
             tok = core.next(board, "w1")["lease_token"]
-            core.transition(board, iid, "need-input", note="m", actor="w1", actor_kind=AGENT,
-                            token=tok)
+            core.queue(board, iid, None, note="m", actor="w1", actor_kind=AGENT, token=tok)
 
 
 def test_ab49_an_agent_still_needs_a_note_for_done_and_need_input(board):
     iid = ready(board)
     tok = core.next(board, "w1")["lease_token"]
-    for state in ("done", "need-input"):
-        with pytest.raises(core.NoteRequired):
-            core.transition(board, iid, state, actor="w1", actor_kind=AGENT, token=tok)
+    with pytest.raises(core.NoteRequired):
+        core.move(board, iid, "done", actor="w1", actor_kind=AGENT, token=tok)
+    with pytest.raises(core.NoteRequired):
+        core.queue(board, iid, None, actor="w1", actor_kind=AGENT, token=tok)
 
 
 def test_ab49_a_human_still_needs_a_note_for_need_input_and_a_reopen(board):
     iid = ready(board)
     tok = core.next(board, "w1")["lease_token"]
     with pytest.raises(core.NoteRequired):
-        core.transition(board, iid, "need-input", actor=CHAOS, actor_kind=HUMAN, preempt=True)
-    core.transition(board, iid, "done", actor="w1", actor_kind=AGENT, note="PR", token=tok)
+        core.queue(board, iid, None, actor=CHAOS, actor_kind=HUMAN, preempt=True)
+    core.move(board, iid, "done", actor="w1", actor_kind=AGENT, note="PR", token=tok)
     with pytest.raises(core.NoteRequired):
-        core.transition(board, iid, "ready", actor=CHAOS, actor_kind=HUMAN)
+        core.move(board, iid, "implement", actor=CHAOS, actor_kind=HUMAN)

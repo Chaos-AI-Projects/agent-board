@@ -14,6 +14,11 @@ import pytest
 
 from board import core, store
 
+
+def place(view):
+    """A view's stage and queue status, the pair the old single state folded."""
+    return view["stage"], view["queue"]
+
 CHAOS = "owner@example.com"
 
 
@@ -68,7 +73,7 @@ def test_next_claims_and_prints_issue_and_token(url):
     issue_id = ready(url)
     out = claim(url)
     assert out["issue"]["id"] == issue_id
-    assert out["issue"]["state"] == "processing"
+    assert place(out["issue"]) == ("implement", "processing")
     assert out["issue"]["lease_holder"] == "worker-1"
     assert out["lease_token"]
 
@@ -147,7 +152,7 @@ def test_an_item_worked_to_done_through_the_cli(url):
              "--closes", "--token", token))
     done = ok(board(url, "move", issue_id, "done", "--note", "shipped",
                     "--token", token))
-    assert done["state"] == "done"
+    assert place(done) == ("done", None)
     assert done["closed_by_artifact"] is True
     kinds = [e["kind"] for e in done["events"]]
     assert kinds[-3:] == ["annotate", "link", "transition"]
@@ -165,7 +170,7 @@ def test_create_takes_labels_body_and_rank(url):
     out = ok(board(url, "--actor-kind", "human", "create", "--project", "MS",
                    "--title", "t", "--body", "b", "--rank", "7", "--label", "x",
                    "--label", "y", actor=CHAOS))
-    assert (out["body"], out["rank"], out["labels"], out["state"]) == ("b", 7, ["x", "y"], "backlog")
+    assert (out["body"], out["rank"], out["labels"], out["stage"]) == ("b", 7, ["x", "y"], "backlog")
 
 
 def test_instantiate_creates_the_workflow(url):
@@ -334,7 +339,7 @@ def test_plan_turns_the_claimed_issue_into_ordered_steps(url):
     token = claim(url)["lease_token"]
     out = ok(board(url, "plan", issue_id, "--step", "design", "--step", "build",
                    "--token", token))
-    assert out["state"] == "onhold"
+    assert place(out) == ("implement", "on-hold")
     assert [(s["position"], s["title"]) for s in out["plan"]["steps"]] == [
         (1, "design"), (2, "build")]
 
@@ -441,7 +446,7 @@ def test_ab24_an_agent_reopens_a_done_card_without_a_token(url):
     assert refused.returncode != 0
     assert json.loads(refused.stderr)["error"] == "NoteRequired"
     out = ok(board(url, "move", issue_id, "implement", "--note", "regressed"))
-    assert out["state"] == "ready"
+    assert place(out) == ("implement", "ready")
     assert claim(url, actor="worker-2")["issue"]["id"] == issue_id
 
 
@@ -450,7 +455,7 @@ def test_ab24_an_agent_reopens_a_done_card_without_a_token(url):
 
 def test_ab52_create_takes_a_stage_and_queues_a_work_stage(url):
     out = ok(board(url, "create", "--project", "MS", "--title", "p", "--stage", "planning"))
-    assert (out["stage"], out["queue"], out["state"]) == ("planning", "ready", "ready")
+    assert (out["stage"], out["queue"]) == ("planning", "ready")
     out = ok(board(url, "create", "--project", "MS", "--title", "b", "--stage", "backlog"))
     assert (out["stage"], out["queue"]) == ("backlog", None)
 
@@ -479,7 +484,7 @@ def test_ab52_move_into_done_needs_a_note(url):
     assert proc.returncode == 1
     assert json.loads(proc.stderr)["error"] == "NoteRequired"
     out = ok(board(url, "move", issue_id, "done", "--token", token, "--note", "abc123"))
-    assert (out["stage"], out["queue"], out["state"]) == ("done", None, "done")
+    assert (out["stage"], out["queue"]) == ("done", None)
 
 
 def test_ab52_queue_holds_and_releases_a_claimed_card(url):
@@ -487,7 +492,7 @@ def test_ab52_queue_holds_and_releases_a_claimed_card(url):
     out = claim(url)
     issue_id, token = out["issue"]["id"], out["lease_token"]
     out = ok(board(url, "queue", issue_id, "on-hold", "--token", token, "--note", "wait"))
-    assert (out["stage"], out["queue"], out["state"]) == ("implement", "on-hold", "onhold")
+    assert (out["stage"], out["queue"]) == ("implement", "on-hold")
 
 
 def test_ab52_queue_empty_takes_a_claimed_card_out_of_the_queue(url):
@@ -495,7 +500,7 @@ def test_ab52_queue_empty_takes_a_claimed_card_out_of_the_queue(url):
     out = claim(url)
     issue_id, token = out["issue"]["id"], out["lease_token"]
     out = ok(board(url, "queue", issue_id, "none", "--token", token, "--note", "a question"))
-    assert (out["stage"], out["queue"], out["state"]) == ("implement", None, "need-input")
+    assert (out["stage"], out["queue"]) == ("implement", None)
 
 
 def test_ab52_queue_refuses_processing_as_a_usage_error(url):

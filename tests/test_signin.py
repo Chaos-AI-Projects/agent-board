@@ -156,7 +156,7 @@ def test_happy_path_sets_a_session_and_returns_to_next(client, google):
 def test_a_signed_in_write_is_a_human_event(client, google, board):
     session = cookies(sign_in(client, google))[signin.SESSION_COOKIE].value
     iid = core.create(board, "MS", "item", actor=CHAOS, actor_kind="human",
-                      state="ready")["id"]
+                      stage="implement")["id"]
     r = client.post(f"/issues/{iid}/note", data={"note": "hello"},
                     headers=cookie_header(**{signin.SESSION_COOKIE: session}))
     assert r.status_code == 303

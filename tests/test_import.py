@@ -148,7 +148,8 @@ def test_import_maps_files_items_rank_and_notes(tmp_path):
 
     first = json.loads(board(url, "show", "MS-7").stdout)
     second = json.loads(board(url, "show", "MS-9").stdout)
-    assert (first["project"], first["state"], second["state"]) == ("MS", "done", "need-input")
+    assert ((first["project"], first["stage"], first["queue"], second["stage"], second["queue"])
+            == ("MS", "done", None, "implement", None))
     assert first["rank"] < second["rank"]
     assert "thread 42" in second["body"]
     notes = [e["note"] for e in second["events"] if e["kind"] == "annotate"]
@@ -194,13 +195,15 @@ def test_a_file_with_two_id_prefixes_is_refused(tmp_path):
 
 
 def test_import_maps_each_backlog_state_to_its_lane(tmp_path):
-    lanes = {"open": "backlog", "ready": "ready", "in-progress": "processing",
-             "blocked": "need-input", "frozen": "onhold", "done": "done"}
+    lanes = {"open": ("backlog", None), "ready": ("implement", "ready"),
+             "in-progress": ("implement", "processing"), "blocked": ("implement", None),
+             "frozen": ("implement", "on-hold"), "done": ("done", None)}
     root = write_backlog(tmp_path / "backlog", memory_solution=[
         item(f"MS-{n}", state, state) for n, state in enumerate(lanes, 1)])
     url = imported(tmp_path, root)
     for n, (state, lane) in enumerate(lanes.items(), 1):
-        assert json.loads(board(url, "show", f"MS-{n}").stdout)["state"] == lane, state
+        shown = json.loads(board(url, "show", f"MS-{n}").stdout)
+        assert (shown["stage"], shown["queue"]) == lane, state
 
 
 def test_imported_projects_each_take_an_empty_colour_bucket(tmp_path):

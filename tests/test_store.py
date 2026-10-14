@@ -362,7 +362,7 @@ def test_two_engines_on_one_file_wait_for_each_other(tmp_path):
     web_side, agent_side = _sqlite(tmp_path), _sqlite(tmp_path)
     store.upgrade(web_side)
     core.create_project(web_side, "MS", "memory-solution")
-    core.create(web_side, "MS", "t", actor="chaos", actor_kind="human", state="ready")
+    core.create(web_side, "MS", "t", actor="chaos", actor_kind="human", stage="implement")
 
     held = threading.Event()
 

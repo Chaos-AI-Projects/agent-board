@@ -55,6 +55,7 @@ token, the session cookie. Local mode is off, and every path but `/login` and
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import json
 import logging
@@ -405,7 +406,7 @@ def stamp(data) -> str:
     return hashlib.sha256(raw).hexdigest()[:16]
 
 
-_CARD_FIELDS = ("id", "title", "labels", "version", "project", "state", "stage", "queue",
+_CARD_FIELDS = ("id", "title", "labels", "version", "project", "stage", "queue",
                 "lease_holder", "lease_expires_at", "schedule", "schedule_tz", "next_run_at")
 
 
@@ -460,10 +461,16 @@ def lease_status(issue: dict, now: str) -> str | None:
 
 
 # One fill per lane, so a step's colour on the workflow diagram names its state.
+# A chart node's fill, by its step's queue status, else its stage.
 _STATE_FILLS = {
-    "backlog": "#dfe1e6", "ready": "#deebff", "need-input": "#fffae6",
-    "processing": "#b3d4ff", "onhold": "#eae6ff", "done": "#e3fcef", "cancelled": "#f4f5f7",
+    "backlog": "#dfe1e6", "ready": "#deebff", "planning": "#fffae6", "implement": "#fffae6",
+    "processing": "#b3d4ff", "on-hold": "#eae6ff", "done": "#e3fcef", "cancelled": "#f4f5f7",
 }
+
+
+def place(card: dict) -> str:
+    """Where a card or workflow sits: its queue status when queued, else its stage."""
+    return card["queue"] or card["stage"]
 
 
 def _mermaid_text(text: str) -> str:
@@ -497,7 +504,7 @@ def _state_class(state: str) -> str:
 def workflow_target(wf: dict) -> str | None:
     """The step a workflow's link opens: the first not yet done, else the first step."""
     steps = wf["steps"]
-    open_steps = [st for st in steps if st["state"] != "done"]
+    open_steps = [st for st in steps if st["stage"] != "done"]
     return (open_steps or steps or [{"id": None}])[0]["id"]
 
 
@@ -609,7 +616,7 @@ def workflow_diagram(wf: dict, here: str | None) -> str:
         step = steps[n]
         lines.append(f'  click s{n} "/issues/{quote(step["id"], safe="")}"')
         # One class per line: Mermaid reads `a,b` as a single class name.
-        lines.append(f"  class s{n} {_state_class(step['state'])}")
+        lines.append(f"  class s{n} {_state_class(place(step))}")
         if step["id"] == here:
             lines.append(f"  class s{n} here")
     for node in more:
@@ -623,7 +630,7 @@ def workflow_diagram(wf: dict, here: str | None) -> str:
 def _task(lines: list[str], steps: list[dict], n: int) -> None:
     step = steps[n]
     label = "<br/>".join(_mermaid_text(part)
-                         for part in (step["id"], step["title"], step["state"]))
+                         for part in (step["id"], step["title"], place(step)))
     lines.append(f'  s{n}("{label}")')
 
 
@@ -905,7 +912,7 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
                 "tz": zone(saved_tz) or default_tz, "inline_types": INLINE_TYPES,
                 "sign_in": google is not None,
                 "moves": lambda issue: sorted(core.STAGE_MOVES[issue["stage"]]),
-                "lane_hints": core.LANE_HINTS, "stage_hints": core.STAGE_HINTS,
+                "stage_hints": core.STAGE_HINTS,
                 "queue_hint": core.QUEUE_HINT, "scheduled_hint": core.SCHEDULED_HINT,
                 "work_stages": core.WORK_STAGES, "fetch_header": FETCH_HEADER, "stamp_poll_ms": STAMP_POLL_SECONDS * 1000, "embed_q": "?embed=1" if embedded(request) else ""}
         r = templates.TemplateResponse(request, name, ctx, status_code=status)
@@ -1082,7 +1089,7 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         workflows = []
         for wf in view["workflows"]:
             if wf_projects.get(wf["id"], set()) & tracked:
-                current = next((st for st in wf["steps"] if st["state"] != "done"), None)
+                current = next((st for st in wf["steps"] if st["stage"] != "done"), None)
                 projects = wf_projects[wf["id"]]
                 workflows.append(wf | {"current": current, "target": workflow_target(wf),
                                        "project": next(iter(projects)) if len(projects) == 1 else None,
@@ -1115,16 +1122,14 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
                 return max((finished.get(i, cutoff) for i in ids), default=cutoff) < cutoff
 
             kept_wf = [w for w in workflows
-                       if w["state"] != "done" or not old(st["id"] for st in w["steps"])]
-            kept = [i for i in loose if i["state"] != "done" or not old([i["id"]])]
+                       if w["stage"] != "done" or not old(st["id"] for st in w["steps"])]
+            kept = [i for i in loose if i["stage"] != "done" or not old([i["id"]])]
             old_done = len(workflows) - len(kept_wf) + len(loose) - len(kept)
             workflows, loose = kept_wf, kept
         tz = zone(prefs["timezone"]) or default_tz
         # AB-53: a queued card sits in the top strip under its queue status,
         # any other in its stage's lane. A workflow is placed by its computed
-        # state, split as the old state names split.
-        for w in workflows:
-            w["stage"], w["queue"] = core.LEGACY_SPLIT[w["state"]]
+        # stage and queue.
         # AB-54: a ready scheduled card waits in the scheduled lane until it
         # is due within SCHEDULE_LEAD. The lane is a view; the card stays ready.
         horizon = datetime.fromisoformat(view["now"]) + core.SCHEDULE_LEAD
@@ -1301,11 +1306,16 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         # A step shows the workflow it belongs to; an origin shows its plan (MS-644).
         wf = issue["workflow"] or issue["plan"]
         # The note form offers where the issue is now plus the moves allowed from there.
-        here = issue["state"]
-        states = [s for s in core.TRANSITIONS if s == here or s in core.TRANSITIONS[here]]
+        stage, here = issue["stage"], issue["queue"]
+        stages = [stage, *sorted(core.STAGE_MOVES[stage])]
+        queues = []
+        if stage in core.WORK_STAGES:
+            # Only board next sets processing; a card already there shows it.
+            moves = core.QUEUE_MOVES[here] - {here}
+            queues = [here, *(q for q in (*core.QUEUES, None) if q in moves)]
         now = core.now(engine)
         return page(request, "issue.html", issue=issue, now=now,
-                    states=states, wf=wf, stamp_url=f"/issues/{quote(issue['id'], safe='')}/stamp",
+                    stages=stages, queues=queues, wf=wf, stamp_url=f"/issues/{quote(issue['id'], safe='')}/stamp",
                     stamp=issue_stamp(issue, now, core.colour_buckets(engine)),
                     diagram=workflow_diagram(wf, issue["id"]) if wf else None,
                     steps=workflow_list(wf, issue["id"]) if wf else None)
@@ -1365,13 +1375,18 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
                   actor_kind=me.kind)
         return back(issue_id, request)
 
-    async def edit_or_take_over(request, me, issue_id, form, files, action, **changes):
-        """`core.edit`, answering a live lease with the take-over page for `action`."""
+    async def edit_or_take_over(request, me, issue_id, form, files, action, write=None,
+                                **changes):
+        """`write` (else `core.edit`), answering a live lease with the take-over page.
+
+        The take-over page re-posts the form to `action` with preempt set.
+        """
         current = core.show(engine, issue_id)
         try:
-            core.edit(engine, issue_id, actor=me.email, actor_kind=me.kind,
-                      expected_version=int(form.get("version", -1)),
-                      preempt=form.get("preempt") == "1", attachments=files, **changes)
+            (write or core.edit)(engine, issue_id, actor=me.email, actor_kind=me.kind,
+                                 expected_version=int(form.get("version", -1)),
+                                 preempt=form.get("preempt") == "1", attachments=files,
+                                 **changes)
         except core.LeaseHeld as held:
             # A file input cannot be refilled, so the page names the files to attach again.
             fields = {k: v for k, v in form.items() if k not in ("preempt", "files")}
@@ -1395,20 +1410,15 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
 
     @app.post("/issues/{issue_id}/move")
     async def move(request: Request, issue_id: str):
-        """A drag between stage lanes (AB-53), answered in JSON.
-
-        A page loaded before AB-53 still posts an old state name; it goes
-        through `core.edit`'s shim, as it did then.
-        """
+        """A drag between stage lanes (AB-53), answered in JSON."""
         me = await run_in_threadpool(actor, request)
         f = await request.form()
         version = _form_int(f.get("version"))
+        if f.get("stage") is None:
+            # A page loaded before AB-53 posts an old state name (AB-56).
+            return JSONResponse({"error": "This page is out of date. Reload it and "
+                                 "drag again."}, status_code=422)
         try:
-            if f.get("stage") is None:
-                issue = core.edit(engine, issue_id, actor=me.email, actor_kind=me.kind,
-                                  expected_version=-1 if version is None else version,
-                                  state=f.get("state"), note=f.get("note") or None)
-                return {"id": issue["id"], "state": issue["state"], "version": issue["version"]}
             issue = core.move(engine, issue_id, f.get("stage"), actor=me.email,
                               actor_kind=me.kind, note=f.get("note") or None,
                               expected_version=-1 if version is None else version)
@@ -1459,20 +1469,34 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
 
     @app.post("/issues/{issue_id}/note")
     async def note(request: Request, issue_id: str):
-        """A note, or a state change carrying that note as its reason (MS-661).
+        """A note, or a stage or queue change carrying that note as its reason (MS-661).
 
-        A note alone never needs the lease. A state change goes through
-        `core.edit`, so it is version-checked and a live lease offers a take-over.
-        The select is compared with the state the form showed, not the live one,
-        so a plain note on a card that moved meanwhile stays a note.
+        A note alone never needs the lease. A change goes through `core.move`
+        or `core.queue`, so it is version-checked and a live lease offers a
+        take-over. A stage change sets the queue itself, so it wins over a
+        queue change. Each select is compared with what the form showed, not
+        the live card, so a plain note on a card that moved meanwhile stays a note.
         """
         me = await run_in_threadpool(actor, request)
         f = await request.form()
+        note = f.get("note") or None
+        stage, queue = f.get("stage"), f.get("queue")
+        if stage is None and f.get("state", f.get("from_state")) != f.get("from_state"):
+            # A page loaded before AB-56 posts an old state change. Saved as a
+            # plain note it could release a waiting card Chaos meant to close.
+            return error(request, 409, "This page is out of date. Reload it and make "
+                         f"the change again. Your note was not saved: {note or ''}",
+                         issue_id)
         files = await save_uploads(f)
-        state = f.get("state")
-        if state and state != f.get("from_state"):
+        if stage and stage != f.get("from_stage"):
             return await edit_or_take_over(request, me, issue_id, f, files, "note",
-                                           state=state, note=f.get("note") or None)
+                                           write=functools.partial(core.move, stage=stage),
+                                           note=note)
+        if queue is not None and queue != (f.get("from_queue") or ""):
+            return await edit_or_take_over(request, me, issue_id, f, files, "note",
+                                           write=functools.partial(core.queue,
+                                                                   status=queue or None),
+                                           note=note)
         core.annotate(engine, issue_id, f.get("note", ""), actor=me.email, actor_kind=me.kind,
                       attachments=files)
         return back(issue_id, request)

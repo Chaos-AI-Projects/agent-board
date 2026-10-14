@@ -216,7 +216,7 @@ def build_server(engine, actor: str | Callable[[], str], brain=_FROM_ENV,
         """Break a claimed issue into a workflow of ready steps, in the order given.
 
         Each step is {"title", "body"?, "project"?}; project defaults to the
-        issue's. The issue goes onhold, releasing the lease, and comes back
+        issue's. The issue's queue goes on-hold, releasing the lease, and comes back
         ready when the last step is done, for you to check and close.
         """
         return run(core.plan, engine, id, steps, token=token, request_id=request_id, **who())

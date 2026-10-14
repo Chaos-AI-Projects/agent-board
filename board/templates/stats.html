@@ -12,11 +12,11 @@
   {% for a in stats.actors %}<tr data-actor="{{ a.actor }}"><td>{{ a.actor }}</td><td>{{ a.actor_kind }}</td><td>{{ a.created }}</td><td>{{ a.moved }}</td><td>{{ a.done }}</td><td>{{ a.noted }}</td><td>{{ a.events }}</td></tr>
   {% endfor %}
 </table>
-<p class="meta">Moved counts every change of state, a claim included. Done counts the moves into done. Noted counts notes added on their own.</p>
+<p class="meta">Moved counts every change of stage or queue, a claim included. Done counts the moves into done. Noted counts notes added on their own.</p>
 <h2>Recent activity</h2>
 <ol class="activity">
 {% for e in stats.activity %}
-  <li>{{ e.at|localtime(tz) }} &middot; {{ e.actor }} &middot; {{ e.kind }}{% if e.from_state != e.to_state %} {{ e.from_state or "" }} &rarr; {{ e.to_state or "" }}{% endif %} &middot; <a href="/issues/{{ e.issue_id }}">{{ e.issue_id }}</a> {{ e.title }}{% if e.note %}<div class="meta">{{ e.note|truncate(200) }}</div>{% endif %}</li>
+  <li>{{ e.at|localtime(tz) }} &middot; {{ e.actor }} &middot; {{ e.kind }}{% if (e.from_stage, e.from_queue) != (e.to_stage, e.to_queue) %} {{ [e.from_stage, e.from_queue]|select|join(" ") }} &rarr; {{ [e.to_stage, e.to_queue]|select|join(" ") }}{% endif %} &middot; <a href="/issues/{{ e.issue_id }}">{{ e.issue_id }}</a> {{ e.title }}{% if e.note %}<div class="meta">{{ e.note|truncate(200) }}</div>{% endif %}</li>
 {% endfor %}
 </ol>
 {% else %}

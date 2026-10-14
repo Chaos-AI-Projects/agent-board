@@ -24,6 +24,11 @@ from sqlalchemy import update
 from board import core, store, web
 from board.store import Issue
 
+
+def place(view):
+    """A view's stage and queue status, the pair the old single state folded."""
+    return view["stage"], view["queue"]
+
 AGENT = "agent"
 HUMAN = "human"
 CHAOS = "owner@example.com"
@@ -57,7 +62,7 @@ def local_client(board, base_url=LOCAL):
 
 def ready(engine, title="item", **kw):
     return core.create(engine, "MS", title, actor=CHAOS, actor_kind=HUMAN,
-                       state="ready", **kw)["id"]
+                       stage="implement", **kw)["id"]
 
 
 def idea(engine, title="idea", project="MS", **kw):
@@ -92,8 +97,10 @@ def edit_form(issue, **fields):
 
 
 def note_form(issue, note="", **fields):
-    return {"version": str(issue["version"]), "state": issue["state"],
-            "from_state": issue["state"], "note": note} | fields
+    queue = issue["queue"] or ""
+    return {"version": str(issue["version"]), "stage": issue["stage"],
+            "from_stage": issue["stage"], "queue": queue, "from_queue": queue,
+            "note": note} | fields
 
 
 # --- the board page -------------------------------------------------------------
@@ -131,12 +138,14 @@ def test_ms660_the_issue_page_explains_its_state_and_each_option(board, client):
     iid = ready(board)
     html = unescape(client.get(f"/issues/{iid}").text)
     # AB-36: the hint is the state's tooltip, not a repeated line.
-    assert re.search(r'State <b title="' + re.escape(core.LANE_HINTS["ready"]) + '">ready</b>', html)
-    select = re.search(r'<select name="state".*?</select>', html, re.S).group(0)
+    assert re.search(r'Stage <b title="' + re.escape(core.STAGE_HINTS["implement"])
+                     + r'">implement</b>, queued <b title="' + re.escape(core.QUEUE_HINT)
+                     + r'">ready</b>', html)
+    select = re.search(r'<select name="stage".*?</select>', html, re.S).group(0)
     options = re.findall(r'<option title="([^"]*)"[^>]*>([^<]+)</option>', select)
     # MS-661: the select offers only where the card is and where it may go next.
-    assert options == [(hint, state) for state, hint in core.LANE_HINTS.items()
-                       if state == "ready" or state in core.TRANSITIONS["ready"]]
+    assert options == [(core.STAGE_HINTS[s], s)
+                       for s in ["implement", *sorted(core.STAGE_MOVES["implement"])]]
 
 
 def test_row7_an_expired_lease_renders_differently_from_a_live_one(board, client):
@@ -231,8 +240,8 @@ def test_a_workflow_card_shares_the_list_but_does_not_drag(board, client):
 def finish(engine, step_id, worker="w1"):
     claim = core.next(engine, worker)
     assert claim["issue"]["id"] == step_id
-    core.transition(engine, step_id, "done", note="done", actor=worker, actor_kind=AGENT,
-                    token=claim["lease_token"])
+    core.move(engine, step_id, "done", note="done", actor=worker, actor_kind=AGENT,
+              token=claim["lease_token"])
 
 
 def test_a_workflow_card_opens_its_current_steps_issue_page(board, client):
@@ -330,10 +339,11 @@ def test_the_issue_page_draws_its_workflow_as_a_mermaid_flowchart(board, client)
     ids = [st["id"] for st in wf["steps"]]
     nodes = [l.strip() for l in src if re.match(r"\s*s\d+\(", l)]
     assert len(nodes) == len(ids)
-    # One node per step in position order, labelled id, title and state.
+    # One node per step in position order, labelled id, title and queue or stage.
     for n, (node, st) in enumerate(zip(nodes, wf["steps"])):
         assert node.startswith(f's{n}("')
-        assert core.show(board, st["id"])["state"] in node
+        step = core.show(board, st["id"])
+        assert (step["queue"] or step["stage"]) in node
         assert st["title"] in node
     assert "-->".join(f"s{n}" for n in range(len(ids))) in "".join(
         l.strip().replace(" ", "") for l in src)
@@ -437,7 +447,8 @@ def unescape_label(label):
 
 def fake_wf(n, done=0):
     return {"steps": [{"id": f"MS-{i + 1}", "title": f"step {i + 1}",
-                       "state": "done" if i < done else "ready"} for i in range(n)]}
+                       "stage": "done" if i < done else "implement",
+                       "queue": None if i < done else "ready"} for i in range(n)]}
 
 
 def test_the_chart_opens_with_a_start_event_and_closes_with_an_end_event():
@@ -557,7 +568,7 @@ def test_a_title_cannot_trigger_mermaids_markdown_katex_or_icons():
 
 def test_the_click_target_cannot_carry_a_quote_even_from_an_issue_id():
     # Ids are generated today; the diagram does not rely on that.
-    wf = {"steps": [{"id": 'X-1" x', "title": "t", "state": "ready"}]}
+    wf = {"steps": [{"id": 'X-1" x', "title": "t", "stage": "implement", "queue": "ready"}]}
     clicks = [l.strip() for l in web.workflow_diagram(wf, None).splitlines() if "click" in l]
     assert clicks == ['click s0 "/issues/X-1%22%20x"']
 
@@ -719,7 +730,7 @@ def test_a_board_rule_is_shown_not_raised(board, client):
     core.edit(board, iid, actor=CHAOS, expected_version=core.show(board, iid)["version"],
               title="t", preempt=True)
     issue = core.show(board, iid)
-    r = client.post(f"/issues/{iid}/note", data=note_form(issue, state="need-input"),
+    r = client.post(f"/issues/{iid}/note", data=note_form(issue, queue=""),
                     headers=AS_CHAOS)
     assert r.status_code == 422
     assert "needs a note" in r.text
@@ -750,7 +761,7 @@ def test_take_over_and_release_round_trip(board, client):
     issue = core.show(board, iid)
     assert issue["body"] == "new spec"
     assert issue["lease_holder"] == CHAOS and issue["lease_expires_at"] is None
-    assert issue["state"] == "processing"
+    assert place(issue) == ("implement", "processing")
 
     page = client.get(f"/issues/{iid}", headers=AS_CHAOS).text
     assert f"Held by {CHAOS}" in page
@@ -760,13 +771,13 @@ def test_take_over_and_release_round_trip(board, client):
     assert f"Held by {CHAOS}" in card(client.get("/", headers=AS_CHAOS).text, iid)
 
     with pytest.raises(core.LeaseLost):
-        core.transition(board, iid, "done", note="old work", actor="run-2",
-                        actor_kind=AGENT, token=claim["lease_token"])
+        core.move(board, iid, "done", note="old work", actor="run-2",
+                  actor_kind=AGENT, token=claim["lease_token"])
 
     released = client.post(f"/issues/{iid}/release", headers=AS_CHAOS)
     assert released.status_code == 303
     issue = core.show(board, iid)
-    assert issue["state"] == "ready" and issue["lease_holder"] is None
+    assert place(issue) == ("implement", "ready") and issue["lease_holder"] is None
     assert core.next(board, "run-3")["issue"]["id"] == iid
 
 
@@ -805,16 +816,26 @@ def test_an_unknown_issue_is_404(client):
     assert client.get("/issues/MS-99").status_code == 404
 
 
-def test_a_drag_between_columns_moves_the_state_and_a_refusal_is_json(board, client):
+def test_a_drag_between_columns_moves_the_stage_and_a_refusal_is_json(board, client):
+    iid = core.create(board, "MS", "draggable", actor=CHAOS, actor_kind=HUMAN)["id"]
+    version = core.show(board, iid)["version"]
+    r = client.post(f"/issues/{iid}/move", data={"version": version, "stage": "implement"},
+                    headers=AS_CHAOS)
+    assert r.status_code == 200 and r.json()["stage"] == "implement"
+    r = client.post(f"/issues/{iid}/move", data={"version": version, "stage": "planning"},
+                    headers=AS_CHAOS)
+    assert r.status_code == 409 and "version" in r.json()["error"]
+    assert core.show(board, iid)["stage"] == "implement"
+
+
+def test_ab56_a_drag_posting_an_old_state_name_is_refused(board, client):
+    """A page cached from before AB-53 posts state, not stage; the shim is gone."""
     iid = core.create(board, "MS", "draggable", actor=CHAOS, actor_kind=HUMAN)["id"]
     version = core.show(board, iid)["version"]
     r = client.post(f"/issues/{iid}/move", data={"version": version, "state": "ready"},
                     headers=AS_CHAOS)
-    assert r.status_code == 200 and r.json()["state"] == "ready"
-    r = client.post(f"/issues/{iid}/move", data={"version": version, "state": "onhold"},
-                    headers=AS_CHAOS)
-    assert r.status_code == 409 and "version" in r.json()["error"]
-    assert core.show(board, iid)["state"] == "ready"
+    assert r.status_code == 422 and "reload" in r.json()["error"].lower()
+    assert core.show(board, iid)["stage"] == "backlog"
 
 
 def test_a_cross_site_post_is_refused(board, client):
@@ -934,18 +955,23 @@ def test_ms661_edit_issue_has_no_state_select_and_no_note_box(board, client):
     assert "data-state-note" not in inside
 
 
-def test_ms661_the_note_form_carries_the_state_select(board, client):
+def test_ms661_the_note_form_carries_the_stage_and_queue_selects(board, client):
     """Only the moves allowed from here, plus where the issue is now, selected."""
     iid = ready(board)
     html = client.get(f"/issues/{iid}").text
     form = issue_forms(html)[f"/issues/{iid}/note"]
-    select = re.search(r'<select name="state"[^>]*data-current="ready"[^>]*>(.*?)</select>',
-                       form, re.S)
-    assert select, "the note form has the state select"
-    options = re.findall(r"<option[^>]*>([^<]+)</option>", select.group(1))
-    allowed = [s for s in core.TRANSITIONS if s == "ready" or s in core.TRANSITIONS["ready"]]
-    assert options == allowed
-    assert re.search(r"<option[^>]*selected[^>]*>ready</option>", select.group(1))
+    stage = re.search(r'<select name="stage"[^>]*data-current="implement"[^>]*>(.*?)</select>',
+                      form, re.S)
+    assert stage, "the note form has the stage select"
+    options = re.findall(r"<option[^>]*>([^<]+)</option>", stage.group(1))
+    assert options == ["implement", *sorted(core.STAGE_MOVES["implement"])]
+    assert re.search(r"<option[^>]*selected[^>]*>implement</option>", stage.group(1))
+    queue = re.search(r'<select name="queue"[^>]*data-current="ready"[^>]*>(.*?)</select>',
+                      form, re.S)
+    assert queue, "the note form has the queue select"
+    values = re.findall(r'<option value="([^"]*)"', queue.group(1))
+    assert values == ["ready", "on-hold"], "only board next sets processing"
+    assert 'name="state"' not in form
     assert f'name="version" value="{core.show(board, iid)["version"]}"' in form
     assert len(re.findall(r'name="note"', form)) == 1, "one note box serves both"
     # Without JS the button reads Save; the script relabels it Add note.
@@ -954,47 +980,74 @@ def test_ms661_the_note_form_carries_the_state_select(board, client):
     assert script and "Add note" in script.group(1) and "data-current" in script.group(1)
 
 
-def test_ab8_a_review_note_closes_a_need_input_card_as_done(board, client):
+def test_ab8_a_review_note_closes_a_waiting_card_as_done(board, client):
     iid = ready(board)
     tok = core.next(board, "w1")["lease_token"]
-    core.transition(board, iid, "need-input", note="merged, please review", actor="w1",
-                    actor_kind="agent", token=tok)
+    core.queue(board, iid, None, note="merged, please review", actor="w1",
+               actor_kind="agent", token=tok)
     issue = core.show(board, iid)
     form = issue_forms(client.get(f"/issues/{iid}").text)[f"/issues/{iid}/note"]
     assert re.search(r"<option[^>]*>done</option>", form)
-    r = client.post(f"/issues/{iid}/note", data=note_form(issue, "looks good", state="done"),
+    r = client.post(f"/issues/{iid}/note", data=note_form(issue, "looks good", stage="done"),
                     headers=AS_CHAOS)
     assert r.status_code == 303
     last = core.show(board, iid)["events"][-1]
-    assert (last["from_state"], last["to_state"], last["note"]) == (
-        "need-input", "done", "looks good")
+    assert (last["from_stage"], last["to_stage"], last["from_queue"], last["note"]) == (
+        "implement", "done", None, "looks good")
 
 
 def test_ab10_a_note_on_a_need_input_card_sends_it_back_to_ready(board, client):
     iid = ready(board)
     tok = core.next(board, "w1")["lease_token"]
-    core.transition(board, iid, "need-input", note="which option?", actor="w1",
-                    actor_kind="agent", token=tok)
+    core.queue(board, iid, None, note="which option?", actor="w1",
+               actor_kind="agent", token=tok)
     issue = core.show(board, iid)
     r = client.post(f"/issues/{iid}/note", data=note_form(issue, "option B"),
                     headers=AS_CHAOS)
     assert r.status_code == 303
     after = core.show(board, iid)
-    assert after["state"] == "ready"
-    assert [(e["kind"], e["to_state"]) for e in after["events"][-2:]] == [
+    assert place(after) == ("implement", "ready")
+    assert [(e["kind"], e["to_queue"]) for e in after["events"][-2:]] == [
         ("annotate", None), ("transition", "ready")]
+
+
+def test_ab56_a_note_form_posting_an_old_state_change_is_refused(board, client):
+    """A page loaded before AB-56 posts state, not stage. Saved as a plain note it
+    would release a waiting card to ready when Chaos chose done (PR #698 review)."""
+    iid = ready(board)
+    tok = core.next(board, "w1")["lease_token"]
+    core.queue(board, iid, None, note="which option?", actor="w1",
+               actor_kind="agent", token=tok)
+    before = core.show(board, iid)
+    r = client.post(f"/issues/{iid}/note", headers=AS_CHAOS,
+                    data={"state": "done", "from_state": "need-input",
+                          "note": "looks good, closing", "version": before["version"]})
+    assert r.status_code == 409
+    assert "reload" in r.text.lower() and "looks good, closing" in r.text
+    after = core.show(board, iid)
+    assert place(after) == ("implement", None)
+    assert len(after["events"]) == len(before["events"])
+
+
+def test_ab56_a_plain_note_from_an_old_page_is_still_a_note(board, client):
+    """An unchanged old state select is just a note, so it is not refused."""
+    iid = ready(board)
+    r = client.post(f"/issues/{iid}/note", headers=AS_CHAOS,
+                    data={"state": "ready", "from_state": "ready", "note": "fyi"})
+    assert r.status_code == 303
+    assert core.show(board, iid)["events"][-1]["note"] == "fyi"
 
 
 def test_ab10_an_edit_save_on_a_need_input_card_sends_it_back_to_ready(board, client):
     iid = ready(board)
     tok = core.next(board, "w1")["lease_token"]
-    core.transition(board, iid, "need-input", note="which option?", actor="w1",
-                    actor_kind="agent", token=tok)
+    core.queue(board, iid, None, note="which option?", actor="w1",
+               actor_kind="agent", token=tok)
     issue = core.show(board, iid)
     r = client.post(f"/issues/{iid}/edit", data=edit_form(issue, body="use option B"),
                     headers=AS_CHAOS)
     assert r.status_code == 303
-    assert core.show(board, iid)["state"] == "ready"
+    assert place(core.show(board, iid)) == ("implement", "ready")
 
 
 def test_ms661_a_note_with_the_state_unchanged_annotates(board, client):
@@ -1004,45 +1057,58 @@ def test_ms661_a_note_with_the_state_unchanged_annotates(board, client):
                     headers=AS_CHAOS)
     assert r.status_code == 303
     after = core.show(board, iid)
-    assert after["state"] == "ready"
+    assert place(after) == ("implement", "ready")
     assert [(e["kind"], e["note"]) for e in after["events"]][-1] == ("annotate", "just a note")
 
 
-def test_ms661_a_note_with_a_new_state_moves_the_card_and_keeps_the_note(board, client):
+def test_ms661_a_note_with_a_new_queue_moves_the_card_and_keeps_the_note(board, client):
     iid = ready(board)
     issue = core.show(board, iid)
     r = client.post(f"/issues/{iid}/note",
-                    data=note_form(issue, "parking this for **now**", state="onhold"),
+                    data=note_form(issue, "parking this for **now**", queue="on-hold"),
                     headers=AS_CHAOS)
     assert r.status_code == 303
     after = core.show(board, iid)
-    assert after["state"] == "onhold"
+    assert after["queue"] == "on-hold"
     last = after["events"][-1]
-    assert (last["kind"], last["from_state"], last["to_state"], last["note"]) == \
-        ("transition", "ready", "onhold", "parking this for **now**")
+    assert (last["kind"], last["from_queue"], last["to_queue"], last["note"]) == \
+        ("transition", "ready", "on-hold", "parking this for **now**")
     assert not any(e["kind"] == "annotate" for e in after["events"]), "one event, not two"
     assert "<strong>now</strong>" in client.get(f"/issues/{iid}").text
 
 
-def test_ms661_a_state_change_needs_no_note_unless_core_demands_one(board, client):
+def test_ms661_a_queue_change_needs_no_note_unless_core_demands_one(board, client):
     iid = ready(board)
-    r = client.post(f"/issues/{iid}/note", data=note_form(core.show(board, iid), state="onhold"),
+    r = client.post(f"/issues/{iid}/note",
+                    data=note_form(core.show(board, iid), queue="on-hold"), headers=AS_CHAOS)
+    assert r.status_code == 303
+    assert core.show(board, iid)["queue"] == "on-hold"
+
+
+def test_ab56_a_stage_change_from_the_note_form_moves_the_card(board, client):
+    iid = ready(board)
+    r = client.post(f"/issues/{iid}/note",
+                    data=note_form(core.show(board, iid), "plan it first", stage="planning"),
                     headers=AS_CHAOS)
     assert r.status_code == 303
-    assert core.show(board, iid)["state"] == "onhold"
+    after = core.show(board, iid)
+    assert (after["stage"], after["queue"]) == ("planning", "ready")
+    last = after["events"][-1]
+    assert (last["kind"], last["from_stage"], last["to_stage"], last["note"]) == \
+        ("transition", "implement", "planning", "plan it first")
 
 
-def test_ms661_need_input_without_a_note_is_refused(board, client):
+def test_ms661_a_release_without_a_note_is_refused(board, client):
     iid = ready(board)
     core.next(board, "run-2")
     core.edit(board, iid, actor=CHAOS, expected_version=core.show(board, iid)["version"],
               title="t", preempt=True)
     issue = core.show(board, iid)
-    r = client.post(f"/issues/{iid}/note", data=note_form(issue, state="need-input"),
+    r = client.post(f"/issues/{iid}/note", data=note_form(issue, queue=""),
                     headers=AS_CHAOS)
     assert r.status_code == 422
     assert "needs a note" in r.text
-    assert core.show(board, iid)["state"] == "processing"
+    assert core.show(board, iid)["queue"] == "processing"
 
 
 def test_ms661_a_state_change_under_a_live_lease_offers_a_take_over(board, client):
@@ -1050,27 +1116,27 @@ def test_ms661_a_state_change_under_a_live_lease_offers_a_take_over(board, clien
     core.next(board, "run-2")
     issue = core.show(board, iid)
     refused = client.post(f"/issues/{iid}/note",
-                          data=note_form(issue, "stop, spec changed", state="need-input"),
+                          data=note_form(issue, "stop, spec changed", queue=""),
                           headers=AS_CHAOS)
     assert refused.status_code == 409 and "Take over?" in refused.text
     assert re.search(rf'<form[^>]*action="/issues/{iid}/note"', refused.text)
-    assert core.show(board, iid)["state"] == "processing"
+    assert place(core.show(board, iid)) == ("implement", "processing")
     taken = client.post(f"/issues/{iid}/note",
-                        data=note_form(issue, "stop, spec changed", state="need-input",
-                                       preempt="1"),
+                        data=note_form(issue, "stop, spec changed", queue="", preempt="1"),
                         headers=AS_CHAOS)
     assert taken.status_code == 303
-    assert core.show(board, iid)["state"] == "need-input"
+    after = core.show(board, iid)
+    assert (after["stage"], after["queue"], after["lease_holder"]) == ("implement", None, None)
 
 
 def test_ms661_a_stale_state_change_is_a_conflict(board, client):
     iid = ready(board)
     stale = core.show(board, iid)
     core.edit(board, iid, actor=CHAOS, expected_version=stale["version"], title="one")
-    r = client.post(f"/issues/{iid}/note", data=note_form(stale, state="onhold"),
+    r = client.post(f"/issues/{iid}/note", data=note_form(stale, queue="on-hold"),
                     headers=AS_CHAOS)
     assert r.status_code == 409 and "changed since" in r.text
-    assert core.show(board, iid)["state"] == "ready"
+    assert core.show(board, iid)["queue"] == "ready"
 
 
 def test_ms661_an_edit_post_carrying_a_state_does_not_change_it(board, client):
@@ -1082,7 +1148,7 @@ def test_ms661_an_edit_post_carrying_a_state_does_not_change_it(board, client):
                     headers=AS_CHAOS)
     assert r.status_code == 303
     after = core.show(board, iid)
-    assert (after["title"], after["state"]) == ("renamed", "ready")
+    assert (after["title"], place(after)) == ("renamed", ("implement", "ready"))
 
 
 def test_ms634_an_unopened_body_still_round_trips_through_edit(board, client):
@@ -1269,7 +1335,7 @@ def two_projects(board):
     core.create_project(board, "BR", "brain")
     ms = ready(board, "ms card")
     br = core.create(board, "BR", "br card", actor=CHAOS, actor_kind=HUMAN,
-                     state="ready")["id"]
+                     stage="implement")["id"]
     return ms, br
 
 
@@ -1356,7 +1422,7 @@ def test_ticking_every_project_tracks_projects_created_later(client, board):
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE))["projects"] == []
     core.create_project(board, "XX", "later")
     later = core.create(board, "XX", "new", actor=CHAOS, actor_kind=HUMAN,
-                        state="ready")["id"]
+                        stage="implement")["id"]
     assert f'data-id="{later}"' in client.get("/").text
 
 
@@ -1456,7 +1522,7 @@ def test_a_banner_save_of_every_project_saves_all(client, board):
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE))["projects"] == []
     core.create_project(board, "XX", "later")
     later = core.create(board, "XX", "new", actor=CHAOS, actor_kind=HUMAN,
-                        state="ready")["id"]
+                        stage="implement")["id"]
     assert f'data-id="{later}"' in client.get("/").text
 
 
@@ -1655,8 +1721,8 @@ def test_the_current_step_moves_past_a_done_step(client, board):
     wf = release(board, ["build", "ship"])
     build, ship = [st["id"] for st in wf["steps"]]
     claim = core.next(board, "w1")
-    core.transition(board, build, "done", note="built", actor="w1", actor_kind=AGENT,
-                    token=claim["lease_token"])
+    core.move(board, build, "done", note="built", actor="w1", actor_kind=AGENT,
+              token=claim["lease_token"])
     c = wf_card(client.get("/").text, wf["id"])
     assert "current: ship" in " ".join(re.sub(r"<[^>]+>", " ", c).split())
     assert client.get(f"/workflows/{wf['id']}").headers["location"] == f"/issues/{ship}"
@@ -2027,7 +2093,7 @@ def test_the_plan_form_makes_one_step_per_line(board, client):
                     data={"steps": "design\r\n\r\n  build  \ntest\n"})
     assert r.status_code == 303
     issue = core.show(board, iid)
-    assert issue["state"] == "onhold"
+    assert place(issue) == ("implement", "on-hold")
     assert [s["title"] for s in issue["plan"]["steps"]] == ["design", "build", "test"]
     assert issue["events"][-1]["actor"] == CHAOS
 
@@ -2060,7 +2126,7 @@ def test_a_plan_under_an_agents_lease_is_refused_409(board, client):
     core.next(board, "w1")
     r = client.post(f"/issues/{iid}/plan", headers=AS_CHAOS, data={"steps": "a"})
     assert r.status_code == 409
-    assert core.show(board, iid)["state"] == "processing"
+    assert place(core.show(board, iid)) == ("implement", "processing")
 
 
 # --- MS-646: dependencies on the issue page and in the chart ------------------------
@@ -2098,7 +2164,8 @@ def dag_wf(deps, done=()):
     """A fake workflow of steps MS-1.. whose `deps` maps a step number to what it waits on."""
     n = max([*deps, *(d for ds in deps.values() for d in ds)])
     return {"steps": [{"id": f"MS-{i}", "title": f"step {i}",
-                       "state": "done" if i in done else "ready",
+                       "stage": "done" if i in done else "implement",
+                       "queue": None if i in done else "ready",
                        "depends_on": [f"MS-{d}" for d in deps.get(i, [])]}
                       for i in range(1, n + 1)]}
 
@@ -2156,8 +2223,10 @@ def test_parallel_starts_and_ends_meet_the_events_through_gateways():
 
 
 def test_a_dependency_outside_the_workflow_is_not_drawn_but_frees_the_steps():
-    wf = {"steps": [{"id": "MS-1", "title": "a", "state": "ready", "depends_on": ["MS-99"]},
-                    {"id": "MS-2", "title": "b", "state": "ready", "depends_on": []}]}
+    wf = {"steps": [{"id": "MS-1", "title": "a", "stage": "implement", "queue": "ready",
+                     "depends_on": ["MS-99"]},
+                    {"id": "MS-2", "title": "b", "stage": "implement", "queue": "ready",
+                     "depends_on": []}]}
     src, edges, gws = dag(wf, "MS-1")
     assert not any("MS-99" in l for l in src if "-->" in l)
     (fork,) = succ(edges, "ev_start")
@@ -2256,7 +2325,7 @@ def test_the_board_colours_by_the_stored_bucket_not_the_key_hash(board, client):
     # DR is the second project, so bucket 1; its key hash would say 4.
     core.create_project(board, "DR", "doc-review")
     assert core.colour_buckets(board)["DR"] == 1 != core.key_bucket("DR")
-    issue_id = core.create(board, "DR", "x", actor=CHAOS, actor_kind=HUMAN, state="ready")["id"]
+    issue_id = core.create(board, "DR", "x", actor=CHAOS, actor_kind=HUMAN, stage="implement")["id"]
     c = card(client.get("/").text, issue_id)
     assert web.project_colour("DR", 1)["bg"] in c
     assert web.project_colour("DR", core.key_bucket("DR"))["bg"] not in c
@@ -2265,7 +2334,7 @@ def test_the_board_colours_by_the_stored_bucket_not_the_key_hash(board, client):
 def test_a_card_is_tinted_with_its_projects_colour(board, client):
     core.create_project(board, "DR", "doc-review")
     ms = ready(board)
-    dr = core.create(board, "DR", "other", actor=CHAOS, actor_kind=HUMAN, state="ready")["id"]
+    dr = core.create(board, "DR", "other", actor=CHAOS, actor_kind=HUMAN, stage="implement")["id"]
     html = client.get("/").text
     for key, issue_id in (("MS", ms), ("DR", dr)):
         c = colour(board, key)
@@ -2331,7 +2400,7 @@ def test_ms661_a_note_on_a_card_moved_meanwhile_is_kept(board, client):
                     headers=AS_CHAOS)
     assert r.status_code == 303
     after = core.show(board, iid)
-    assert after["state"] == "processing"
+    assert place(after) == ("implement", "processing")
     assert (after["events"][-1]["kind"], after["events"][-1]["note"]) == ("annotate",
                                                                            "just a note")
 
@@ -2339,7 +2408,7 @@ def test_ms661_a_note_on_a_card_moved_meanwhile_is_kept(board, client):
 def test_ms661_a_state_changes_files_hang_off_the_transition(board, attach_dir, client):
     iid = ready(board)
     issue = core.show(board, iid)
-    r = client.post(f"/issues/{iid}/note", data=note_form(issue, "parked", state="onhold"),
+    r = client.post(f"/issues/{iid}/note", data=note_form(issue, "parked", queue="on-hold"),
                     files=[("files", ("why.txt", b"because", "text/plain"))],
                     headers=AS_CHAOS)
     assert r.status_code == 303
@@ -2646,14 +2715,14 @@ def test_ab4_the_board_stamp_holds_while_nothing_changes(board, client):
     assert board_stamp(client) == first, "the clock alone must not change it"
 
 
-@pytest.mark.parametrize("change", ["create", "transition", "edit", "claim", "project"])
+@pytest.mark.parametrize("change", ["create", "queue", "edit", "claim", "project"])
 def test_ab4_the_board_stamp_moves_when_a_card_or_lane_changes(board, client, change):
     iid = ready(board)
     before = board_stamp(client)
     if change == "create":
         ready(board, "another")
-    elif change == "transition":
-        core.transition(board, iid, "onhold", actor=CHAOS, actor_kind=HUMAN)
+    elif change == "queue":
+        core.queue(board, iid, "on-hold", actor=CHAOS, actor_kind=HUMAN)
     elif change == "edit":
         core.edit(board, iid, actor=CHAOS, expected_version=core.show(board, iid)["version"],
                   title="renamed")
@@ -2756,8 +2825,7 @@ function segment(s) { return decodeURIComponent(s); }
 def test_ab4_the_board_stamp_ignores_what_this_board_does_not_show(board, client):
     """A card in an untracked project or a hidden lane is not on this board."""
     ms, br = two_projects(board)
-    hid = core.create(board, "MS", "in backlog", actor=CHAOS, actor_kind=HUMAN,
-                      state="backlog")["id"]
+    hid = core.create(board, "MS", "in backlog", actor=CHAOS, actor_kind=HUMAN)["id"]
     client.cookies.set(web.PREFS_COOKIE, json.dumps({"projects": ["MS"], "lanes": ["implement"]}))
     before = board_stamp(client)
     core.annotate(board, ms, "a note is not on a card", actor=CHAOS, actor_kind=HUMAN)
@@ -2766,7 +2834,7 @@ def test_ab4_the_board_stamp_ignores_what_this_board_does_not_show(board, client
     core.edit(board, hid, actor=CHAOS, expected_version=core.show(board, hid)["version"],
               title="renamed in a hidden lane")
     assert board_stamp(client) == before
-    core.create(board, "MS", "shown", actor=CHAOS, actor_kind=HUMAN, state="ready")
+    core.create(board, "MS", "shown", actor=CHAOS, actor_kind=HUMAN, stage="implement")
     assert board_stamp(client) != before
 
 
@@ -2975,9 +3043,9 @@ def closed(engine, title="x", days=0):
     """A loose card closed by a human, its every event `days` in the past."""
     i = ready(engine, title)
     claim = core.next(engine, "w1")
-    core.transition(engine, i, "need-input", note="review", actor="w1", actor_kind=AGENT,
-                    token=claim["lease_token"])
-    core.transition(engine, i, "done", note="ok", actor=CHAOS, actor_kind=HUMAN)
+    core.queue(engine, i, None, note="review", actor="w1", actor_kind=AGENT,
+               token=claim["lease_token"])
+    core.move(engine, i, "done", note="ok", actor=CHAOS, actor_kind=HUMAN)
     age(engine, i, days)
     return i
 
@@ -3479,8 +3547,8 @@ def test_ab20_bare_urls_still_link_in_markdown_text(text):
 def finished_card(engine):
     iid = ready(engine)
     claim = core.next(engine, "run-2")
-    core.transition(engine, iid, "done", note="merged", actor="run-2", actor_kind=AGENT,
-                    token=claim["lease_token"])
+    core.move(engine, iid, "done", note="merged", actor="run-2", actor_kind=AGENT,
+              token=claim["lease_token"])
     return iid
 
 
@@ -3493,9 +3561,9 @@ def test_ab24_a_done_card_offers_reopen_and_reopening_sends_it_to_ready(board, c
                     headers=AS_CHAOS)
     assert r.status_code == 303
     issue = core.show(board, iid)
-    assert issue["state"] == "ready"
+    assert place(issue) == ("implement", "ready")
     last = issue["events"][-1]
-    assert (last["actor"], last["from_state"], last["note"]) == (
+    assert (last["actor"], last["from_stage"], last["note"]) == (
         CHAOS, "done", "the fix regressed")
 
 
@@ -3503,7 +3571,7 @@ def test_ab24_reopen_without_a_reason_is_refused(board, client):
     iid = finished_card(board)
     r = client.post(f"/issues/{iid}/reopen", data={"note": "  "}, headers=AS_CHAOS)
     assert r.status_code == 422
-    assert core.show(board, iid)["state"] == "done"
+    assert place(core.show(board, iid)) == ("done", None)
 
 
 def test_ab24_only_a_done_card_offers_reopen(board, client):
@@ -3523,8 +3591,8 @@ def stats_row(html, actor):
 def test_ab29_the_stats_page_counts_each_actors_activity(board, client):
     a = ready(board, "worked card")
     claim = core.next(board, "w1")
-    core.transition(board, a, "done", actor="w1", actor_kind=AGENT, note="PR 1",
-                    token=claim["lease_token"])
+    core.move(board, a, "done", actor="w1", actor_kind=AGENT, note="PR 1",
+              token=claim["lease_token"])
     core.annotate(board, a, "nice", actor=CHAOS, actor_kind=HUMAN)
     r = client.get("/stats")
     assert r.status_code == 200
@@ -3582,8 +3650,8 @@ def done_cards(board, n):
     ids = [ready(board, f"d{k}") for k in range(n)]
     for _ in ids:
         claim = core.next(board, "run-d")
-        core.transition(board, claim["issue"]["id"], "done", actor="run-d", actor_kind=AGENT,
-                        note="shipped", token=claim["lease_token"])
+        core.move(board, claim["issue"]["id"], "done", actor="run-d", actor_kind=AGENT,
+                  note="shipped", token=claim["lease_token"])
     return ids
 
 
@@ -3800,7 +3868,7 @@ def mine_toggle(html):
 
 def by_agent(engine, title="theirs"):
     return core.create(engine, "MS", title, actor="overlord", actor_kind=AGENT,
-                       state="ready")["id"]
+                       stage="implement")["id"]
 
 
 def test_ab42_by_default_every_card_shows_and_the_toggle_offers_mine(board, client):
@@ -4044,14 +4112,14 @@ def test_ab48_the_stats_page_shows_a_human_emails_agent_events_as_human(board, c
 def test_ab49_the_note_form_closes_a_card_without_a_note(board, client):
     iid = ready(board)
     tok = core.next(board, "w1")["lease_token"]
-    core.transition(board, iid, "need-input", note="merged", actor="w1", actor_kind=AGENT,
-                    token=tok)
+    core.queue(board, iid, None, note="merged", actor="w1", actor_kind=AGENT, token=tok)
     version = core.show(board, iid)["version"]
-    r = client.post(f"/issues/{iid}/note", data={"state": "done", "from_state": "need-input",
+    r = client.post(f"/issues/{iid}/note", data={"stage": "done", "from_stage": "implement",
+                                                 "queue": "", "from_queue": "",
                                                  "version": version, "note": ""},
                     headers=AS_CHAOS)
     assert r.status_code == 303
-    assert core.show(board, iid)["state"] == "done"
+    assert place(core.show(board, iid)) == ("done", None)
 
 
 def test_ab50_a_refused_issue_write_links_back_to_the_issue(board, client):
@@ -4300,7 +4368,7 @@ def scheduled_lane(html):
 def scheduled_card(engine, due_in, tz="UTC"):
     """A ready cron card whose next due time is `due_in` from the board's clock."""
     iid = core.create(engine, "MS", "nightly", actor=CHAOS, actor_kind=HUMAN,
-                      state="ready", schedule="0 9 * * *", timezone=tz)["id"]
+                      stage="implement", schedule="0 9 * * *", timezone=tz)["id"]
     at = datetime.fromisoformat(core.now(engine)) + due_in
     with engine.begin() as conn:
         conn.execute(update(Issue).where(Issue.id == iid).values(next_run_at=at))
@@ -4488,22 +4556,3 @@ def test_ab54_a_date_that_never_comes_is_refused_on_the_page(board, client):
                     data=schedule_form(core.show(board, iid), cron="0 9 31 2 *", timezone="UTC"))
     assert r.status_code == 422
     assert core.show(board, iid)["schedule"] is None
-
-
-def test_ab55_reopen_and_release_do_not_use_the_transition_shim(board, client, monkeypatch):
-    def gone(*a, **kw):
-        raise AssertionError("the web calls the obsolete transition shim")
-    done = finished_card(board)
-    monkeypatch.setattr(core, "transition", gone)
-    iid = ready(board)
-    core.next(board, "run-2")
-    issue = core.show(board, iid)
-    client.post(f"/issues/{iid}/edit", data=edit_form(issue, preempt="1"), headers=AS_CHAOS)
-    assert client.post(f"/issues/{iid}/release", headers=AS_CHAOS).status_code == 303
-    issue = core.show(board, iid)
-    assert (issue["stage"], issue["queue"], issue["lease_holder"]) == ("implement", "ready", None)
-    r = client.post(f"/issues/{done}/reopen", data={"note": "regressed"}, headers=AS_CHAOS)
-    assert r.status_code == 303
-    issue = core.show(board, done)
-    assert (issue["stage"], issue["queue"], issue["events"][-1]["note"]) == (
-        "implement", "ready", "regressed")

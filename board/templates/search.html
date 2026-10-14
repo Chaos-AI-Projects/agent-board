@@ -14,7 +14,7 @@
 <ol class="hits">
 {% for issue in results %}
   {% set pc = project_colour(issue.project) %}<li class="hit" data-id="{{ issue.id }}" style="--proj-bg: {{ pc.bg }}; --proj-border: {{ pc.border }}"><a href="/issues/{{ issue.id }}">{{ issue.id }}</a> {{ issue.title }}
-    <span class="meta">{{ issue.state }}{% for l in issue.labels %} &middot; {{ l }}{% endfor %}</span></li>
+    <span class="meta">{{ issue.stage }}{% if issue.queue %}, {{ issue.queue }}{% endif %}{% for l in issue.labels %} &middot; {{ l }}{% endfor %}</span></li>
 {% endfor %}
 </ol>
 {% elif searched %}
