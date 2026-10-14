@@ -73,7 +73,7 @@ def test_the_tools_are_the_cli_operations(migrated, monkeypatch):
     names = {t.name for t in list_tools(migrated)}
     assert names == {"next", "show", "transition", "annotate", "link", "create",
                      "instantiate", "heartbeat", "plan", "depend", "undepend",
-                     "create_batch", "search", "projects", "move", "queue"}
+                     "create_batch", "search", "projects", "move", "queue", "schedule"}
 
 
 def test_next_claims_as_the_server_actor_and_returns_the_token(migrated):
@@ -426,3 +426,28 @@ def test_ab52_create_batch_items_take_a_stage(migrated):
 def test_ab52_transition_is_marked_obsolete(migrated):
     tools = {t.name: t for t in list_tools(board(migrated))}
     assert tools["transition"].description.startswith("OBSOLETE")
+
+
+def test_create_and_schedule_take_a_timezone(migrated, monkeypatch):
+    core.create_project(migrated, "MS", "memory-solution")
+    monkeypatch.delenv("BOARD_TIMEZONE", raising=False)
+    issue = ok(migrated, "create", actor=CHAOS, project="MS", title="nightly",
+               state="ready", schedule="0 9 * * *")
+    assert issue["schedule_tz"] == "UTC"
+    sydney = ok(migrated, "create", actor=CHAOS, project="MS", title="x", state="ready",
+                schedule="0 9 * * *", timezone="Australia/Sydney")
+    assert sydney["schedule_tz"] == "Australia/Sydney"
+    is_error, payload = call(migrated, "create", actor=CHAOS, project="MS", title="y",
+                             schedule="0 9 * * *", timezone="Mars/Olympus")
+    assert is_error and "zone" in payload["message"]
+    assert ok(migrated, "next") == {"issue": None}
+
+
+def test_schedule_sets_and_clears_under_the_lease(migrated, monkeypatch):
+    monkeypatch.setenv("BOARD_TIMEZONE", "Australia/Sydney")
+    issue_id = ready(board(migrated))
+    token = ok(migrated, "next")["lease_token"]
+    got = ok(migrated, "schedule", id=issue_id, schedule="0 9 * * *", token=token)
+    assert (got["schedule"], got["schedule_tz"]) == ("0 9 * * *", "Australia/Sydney")
+    got = ok(migrated, "schedule", id=issue_id, schedule=None, token=token)
+    assert (got["schedule"], got["schedule_tz"], got["next_run_at"]) == (None, None, None)

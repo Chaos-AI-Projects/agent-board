@@ -406,7 +406,7 @@ def stamp(data) -> str:
 
 
 _CARD_FIELDS = ("id", "title", "labels", "version", "project", "state", "stage", "queue",
-                "lease_holder", "lease_expires_at")
+                "lease_holder", "lease_expires_at", "schedule", "schedule_tz", "next_run_at")
 
 
 def board_stamp(ctx: dict, buckets: dict) -> str:
@@ -434,6 +434,7 @@ def board_stamp(ctx: dict, buckets: dict) -> str:
                                                for kind, c in cards])
                                        for name, cards in groups])
                               for state, _, _, groups in ctx["columns"]],
+                  "scheduled": [card(c) for c in ctx["scheduled"]],
                   "projects": view["projects"], "templates": view["templates"],
                   "tracked": ctx["tracked"], "hidden": ctx["hidden"], "buckets": buckets,
                   "hide_old_done": ctx["hide_old_done"], "old_done": ctx["old_done"],
@@ -905,7 +906,7 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
                 "sign_in": google is not None,
                 "moves": lambda issue: sorted(core.STAGE_MOVES[issue["stage"]]),
                 "lane_hints": core.LANE_HINTS, "stage_hints": core.STAGE_HINTS,
-                "queue_hint": core.QUEUE_HINT,
+                "queue_hint": core.QUEUE_HINT, "scheduled_hint": core.SCHEDULED_HINT,
                 "work_stages": core.WORK_STAGES, "fetch_header": FETCH_HEADER, "stamp_poll_ms": STAMP_POLL_SECONDS * 1000, "embed_q": "?embed=1" if embedded(request) else ""}
         r = templates.TemplateResponse(request, name, ctx, status_code=status)
         # The board frames its own issue pages (MS-662); nobody else may.
@@ -1124,8 +1125,15 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         # state, split as the old state names split.
         for w in workflows:
             w["stage"], w["queue"] = core.LEGACY_SPLIT[w["state"]]
+        # AB-54: a ready scheduled card waits in the scheduled lane until it
+        # is due within SCHEDULE_LEAD. The lane is a view; the card stays ready.
+        horizon = datetime.fromisoformat(view["now"]) + core.SCHEDULE_LEAD
+        waiting = sorted((i for i in loose if i["queue"] == "ready" and i["next_run_at"]
+                          and datetime.fromisoformat(i["next_run_at"]) > horizon),
+                         key=lambda i: i["next_run_at"])
+        later = {i["id"] for i in waiting}
         queues = [(q, [("workflow", w) for w in workflows if w["queue"] == q]
-                   + [("issue", i) for i in loose if i["queue"] == q])
+                   + [("issue", i) for i in loose if i["queue"] == q and i["id"] not in later])
                   for q in core.QUEUES]
         columns = []
         for stage in prefs["lanes"]:
@@ -1134,6 +1142,7 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
             columns.append((stage, wfs, issues, lane_groups(wfs, issues, view["now"], tz)))
         hidden = [s for s in core.STAGES if s not in prefs["lanes"]]
         return {"view": view, "queues": queues, "columns": columns, "now": view["now"],
+                "scheduled": waiting,
                 "lane_meta": core.lane_meta(engine), "done_cap": DONE_CAP,
                 "tracked": prefs["projects"], "hidden": hidden,
                 "hide_old_done": prefs["hide_old_done"], "old_done": old_done,
@@ -1422,6 +1431,31 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
             return error(request, 409, f"{issue_id} changed since you loaded it. "
                          "Reload the board to see what changed.", issue_id)
         return back(None, request)
+
+    @app.post("/issues/{issue_id}/schedule")
+    async def schedule(request: Request, issue_id: str):
+        """Set, change or clear a card's cron schedule from its page (AB-54).
+
+        A blank zone is the setter's own: the `board_prefs` zone, else
+        `BOARD_TIMEZONE`, else UTC, the order the board shows times in.
+        """
+        me = await run_in_threadpool(actor, request)
+        f = await request.form()
+        cron = None if f.get("clear") == "1" else (f.get("cron") or "").strip() or None
+        mine = zone(read_prefs(request.cookies.get(PREFS_COOKIE))["timezone"]) or default_tz
+        tz = (f.get("timezone") or "").strip() or mine.key
+        try:
+            core.set_schedule(engine, issue_id, cron, timezone=tz, actor=me.email,
+                              actor_kind=me.kind, preempt=f.get("preempt") == "1",
+                              expected_version=int(f.get("version", -1)))
+        except core.LeaseHeld as held:
+            fields = {k: v for k, v in f.items() if k not in ("preempt", "files")}
+            return page(request, "takeover.html", 409, issue=core.show(engine, issue_id),
+                        held=held, fields=fields, dropped=[], action="schedule")
+        except core.Conflict:
+            return error(request, 409, f"{issue_id} changed since you loaded it. "
+                         "Reload the card to see what changed, then save again.", issue_id)
+        return back(issue_id, request)
 
     @app.post("/issues/{issue_id}/note")
     async def note(request: Request, issue_id: str):

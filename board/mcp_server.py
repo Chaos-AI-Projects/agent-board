@@ -190,16 +190,34 @@ def build_server(engine, actor: str | Callable[[], str], brain=_FROM_ENV,
                rank: int | None = None, labels: list[str] | None = None,
                workflow_id: int | None = None, position: int | None = None,
                request_id: str | None = None, stage: str | None = None,
-               queue: str | None = None) -> CallToolResult:
+               queue: str | None = None, schedule: str | None = None,
+               timezone: str | None = None) -> CallToolResult:
         """A new issue in `stage`: backlog, planning or implement.
 
         Planning and implement start queued as ready. Without a stage, the
         obsolete `state` decides: `backlog`, or `ready` for implement.
+        `schedule` is five cron fields read in `timezone`, which defaults to
+        $BOARD_TIMEZONE, else UTC; `next` skips the card until each due time.
         """
         return run(core.create, engine, project, title, body=body, state=state, stage=stage,
                    queue=queue, rank=rank,
                    labels=labels or [], workflow_id=workflow_id, position=position,
-                   request_id=request_id, **who())
+                   request_id=request_id, schedule=schedule,
+                   timezone=_zone(schedule, timezone), **who())
+
+    @mcp.tool()
+    def schedule(id: str, schedule: str | None, timezone: str | None = None,
+                 token: str | None = None, request_id: str | None = None,
+                 preempt: bool = False) -> CallToolResult:
+        """Set or clear (null) a card's cron schedule: five fields read in `timezone`.
+
+        `timezone` defaults to $BOARD_TIMEZONE, else UTC; an unknown zone is
+        refused. A change recomputes the next due time. A scheduled card's
+        finished run returns to ready rather than done.
+        """
+        return run(core.set_schedule, engine, id, schedule,
+                   timezone=_zone(schedule, timezone), token=token,
+                   request_id=request_id, preempt=preempt, **who())
 
     @mcp.tool()
     def instantiate(template: str, project: str, title: str | None = None,
@@ -286,6 +304,14 @@ def _brain_tools(mcp: FastMCP, brain: Brain, run) -> None:
     def brain_list(scope: str = "all") -> CallToolResult:
         """Every markdown file in the scope (kb, docs or all), with its title."""
         return run(lambda: {"files": brain.list(scope)})
+
+
+
+def _zone(schedule: str | None, zone: str | None) -> str | None:
+    """The zone a schedule is read in: the one given, else the default."""
+    if schedule is None:
+        return None
+    return zone or core.default_timezone()
 
 
 def main() -> int:

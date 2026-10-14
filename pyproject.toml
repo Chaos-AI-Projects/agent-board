@@ -10,6 +10,8 @@ requires-python = ">=3.10"
 license = "Apache-2.0"
 dependencies = [
     "alembic>=1.13",
+    # AB-54: cron due times for scheduled cards. MIT.
+    "croniter>=6",
     "fastapi>=0.141.1",
     "jinja2>=3.1.6",
     "markdown-it-py>=3",

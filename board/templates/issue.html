@@ -90,6 +90,22 @@
 </details>
 {% endif %}
 
+{# AB-54: five cron fields read in the card's own zone. A blank zone is the
+   viewer's, so the field starts with the card's zone or the viewer's. #}
+<section class="schedule-section">
+<details{% if issue.schedule %} open{% endif %}>
+<summary>Schedule{% if issue.schedule %}: &#x23f0; <code>{{ issue.schedule }}</code> in {{ issue.schedule_tz }}{% if issue.next_run_at %}, next due {{ issue.next_run_at|localtime(tz) }}{% endif %}{% else %}: none{% endif %}</summary>
+<form autocomplete="off" method="post" action="/issues/{{ issue.id }}/schedule{{ embed_q }}">
+  <input type="hidden" name="version" value="{{ issue.version }}">
+  <label>Cron <input name="cron" value="{{ issue.schedule or '' }}" size="20" placeholder="0 9 * * 1-5"></label>
+  <label>Time zone <input name="timezone" value="{{ issue.schedule_tz or tz.key }}" size="24"></label>
+  <button class="primary">Save schedule</button>
+  {% if issue.schedule %}<button name="clear" value="1">Clear schedule</button>{% endif %}
+  <div>Five cron fields, read in the zone beside them. A scheduled card waits until it is due, and a finished run goes back to ready for the next one.</div>
+</form>
+</details>
+</section>
+
 <details>
 <summary>Edit issue</summary>
 <form autocomplete="off" method="post" action="/issues/{{ issue.id }}/edit{{ embed_q }}" enctype="multipart/form-data">

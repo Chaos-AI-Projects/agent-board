@@ -150,7 +150,21 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--label", action="append", default=[])
     sp.add_argument("--workflow-id", type=int)
     sp.add_argument("--position", type=int)
+    sp.add_argument("--schedule", help="five cron fields; the card waits until each due time")
+    sp.add_argument("--timezone", help="the IANA zone --schedule is read in; defaults to "
+                                       "$BOARD_TIMEZONE, else UTC")
     writes(sp, token=False)
+
+    sp = op("schedule", help="set or clear a card's cron schedule; changing it recomputes "
+                             "the next due time")
+    sp.add_argument("id")
+    which = sp.add_mutually_exclusive_group(required=True)
+    which.add_argument("--cron", help="five cron fields")
+    which.add_argument("--clear", action="store_true")
+    sp.add_argument("--timezone", help="the IANA zone --cron is read in; defaults to "
+                                       "$BOARD_TIMEZONE, else UTC")
+    sp.add_argument("--preempt", action="store_true")
+    writes(sp)
 
     sp = op("instantiate", help="a workflow and its issues from a template")
     sp.add_argument("template")
@@ -228,7 +242,13 @@ def _run(engine, a) -> dict | None:
         case "create":
             return core.create(engine, a.project, a.title, body=a.body, state=a.state,
                                stage=a.stage, queue=a.queue, rank=a.rank, labels=a.label, workflow_id=a.workflow_id,
-                               position=a.position, request_id=a.request_id, **who)
+                               position=a.position, request_id=a.request_id,
+                               schedule=a.schedule, timezone=_zone(a.schedule, a.timezone),
+                               **who)
+        case "schedule":
+            return core.set_schedule(engine, a.id, a.cron, timezone=_zone(a.cron, a.timezone),
+                                     token=a.token, request_id=a.request_id,
+                                     preempt=a.preempt, **who)
         case "instantiate":
             return core.instantiate(engine, a.template, a.project, title=a.title,
                                     request_id=a.request_id, **who)
@@ -249,6 +269,13 @@ def _run(engine, a) -> dict | None:
             return importer.import_backlog(engine, importer.load_backlog_module(a.backlog_py),
                                            a.root, **who)
     raise AssertionError(a.command)
+
+
+def _zone(schedule: str | None, zone: str | None) -> str | None:
+    """The zone a schedule is read in: the one given, else the default."""
+    if schedule is None:
+        return None
+    return zone or core.default_timezone()
 
 
 def _batch_file(path: str) -> tuple[list, str | None]:

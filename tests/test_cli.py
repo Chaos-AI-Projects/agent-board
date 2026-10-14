@@ -501,3 +501,37 @@ def test_ab52_queue_empty_takes_a_claimed_card_out_of_the_queue(url):
 def test_ab52_queue_refuses_processing_as_a_usage_error(url):
     issue_id = ready(url)
     assert board(url, "queue", issue_id, "processing").returncode == 2
+
+
+def test_create_takes_a_schedule_read_in_board_timezone_by_default(url):
+    env_tz = {"BOARD_TIMEZONE": "Australia/Sydney"}
+    proc = board_env(url, env_tz, "--actor-kind", "human", "create", "--project", "MS",
+                     "--title", "nightly", "--state", "ready", "--schedule", "0 9 * * *",
+                     actor=CHAOS)
+    issue = ok(proc)
+    assert (issue["schedule"], issue["schedule_tz"]) == ("0 9 * * *", "Australia/Sydney")
+    utc = ok(board(url, "--actor-kind", "human", "create", "--project", "MS",
+                   "--title", "x", "--state", "ready", "--schedule", "0 9 * * *",
+                   actor=CHAOS))
+    assert utc["schedule_tz"] == "UTC"
+    assert board(url, "next").returncode == 3
+
+
+def test_schedule_sets_and_clears_and_refuses_an_unknown_zone(url):
+    issue_id = ready(url)
+    got = ok(board(url, "--actor-kind", "human", "schedule", issue_id, "--cron",
+                   "*/15 * * * *", "--timezone", "Europe/London", actor=CHAOS))
+    assert (got["schedule"], got["schedule_tz"]) == ("*/15 * * * *", "Europe/London")
+    bad = board(url, "--actor-kind", "human", "schedule", issue_id, "--cron", "0 9 * * *",
+                "--timezone", "Mars/Olympus", actor=CHAOS)
+    assert bad.returncode == 1 and "zone" in bad.stderr
+    cleared = ok(board(url, "--actor-kind", "human", "schedule", issue_id, "--clear",
+                       actor=CHAOS))
+    assert cleared["schedule"] is None and cleared["next_run_at"] is None
+
+
+def board_env(url, extra, *args, actor="worker-1"):
+    env = {k: v for k, v in os.environ.items() if not k.startswith("BOARD_")}
+    env.update(extra, **{store.DATABASE_URL_ENV: url, "BOARD_ACTOR": actor})
+    return subprocess.run([sys.executable, "-m", "board.cli", *args],
+                          capture_output=True, text=True, env=env, timeout=60)

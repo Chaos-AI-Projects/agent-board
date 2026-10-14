@@ -94,6 +94,14 @@
   {% if capped %}<button type="button" class="show-more" hidden>Show {{ workflows|length + issues|length - done_cap }} more</button>{% endif %}
 </section>
 {% endfor %}
+{# AB-54: a ready cron card waits here until it is due within five minutes,
+   then joins the top strip. A view, not a stage, so nothing drags. #}
+<section class="column scheduled-lane" data-lane="scheduled">
+  <h2 title="{{ scheduled_hint }}">scheduled ({{ scheduled|length }})</h2>
+  <div class="scheduled-cards">
+  {% for issue in scheduled %}{% set queued = true %}{% include "_card.html" %}{% endfor %}
+  </div>
+</section>
 </div>
 <aside id="issue-panel" hidden aria-label="Issue">
   <div class="issue-panel-bar"><a class="issue-panel-full" href="/">Open full page</a><button class="issue-panel-close" title="Close (Esc)" aria-label="Close the issue panel">&times;</button></div>

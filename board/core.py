@@ -15,9 +15,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import secrets
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from croniter import CroniterBadDateError, croniter
 
 from sqlalchemy import and_, case, exists, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
@@ -104,6 +108,13 @@ QUEUE_HINT = ("Queued planning and implement cards: ready waits for board next, 
               "processing is held by an agent, on-hold is frozen. Not draggable; "
               "change a queued card from its page.")
 READY = ("implement", "ready")
+# AB-54, plan section 4: the event a schedule change writes.
+SCHEDULE_EVENT = "schedule"
+# A ready scheduled card joins the top strip this long before it is due.
+SCHEDULE_LEAD = timedelta(minutes=5)
+SCHEDULED_HINT = ("Ready cron cards not due for more than five minutes. Each joins the "
+                  "queue strip as its due time nears. Not draggable.")
+TZ_ENV = "BOARD_TIMEZONE"
 # The old state names, as the `transition` shim and the `state` of a view
 # still read them until phase 4 (AB-55). Migration 0010 holds the same table.
 LEGACY_SPLIT: dict[str, tuple[str, str | None]] = {
@@ -365,12 +376,15 @@ def next(engine, worker: str, *, ttl: timedelta = DEFAULT_TTL, project: str | No
                 return None
             prev_holder, prev_queue = issue.lease_holder, issue.queue
             token = secrets.token_hex(16)
+            # Fires missed while the card waited collapse into this one run.
+            due = ({"next_run_at": next_due(issue.schedule, issue.schedule_tz, now)}
+                   if issue.schedule else {})
             won = s.execute(
                 update(Issue)
                 .where(Issue.id == issue.id, Issue.version == issue.version)
                 .values(queue="processing", lease_holder=worker, lease_token=token,
                         lease_expires_at=now + ttl, version=Issue.version + 1,
-                        updated_at=now)
+                        updated_at=now, **due)
                 .execution_options(synchronize_session=False)
             ).rowcount
             if won != 1:
@@ -579,7 +593,8 @@ def _row(i):
         "rank": i.rank, "labels": [l.name for l in i.labels], "assignee": i.assignee,
         "lease_holder": i.lease_holder, "lease_expires_at": _iso(i.lease_expires_at),
         "version": i.version, "workflow_id": i.workflow_id, "position": i.position,
-        "updated_at": _iso(i.updated_at),
+        "updated_at": _iso(i.updated_at), "schedule": i.schedule,
+        "schedule_tz": i.schedule_tz, "next_run_at": _iso(i.next_run_at),
     }
 
 
@@ -759,9 +774,15 @@ def create(engine, project: str, title: str, *, actor: str, actor_kind: str,
            labels: list[str] = (), workflow_id: int | None = None,
            position: int | None = None, request_id: str | None = None,
            attachments: list[dict] = (), stage: str | None = None,
-           queue: str | None = None) -> dict:
-    """A new issue. `stage` and `queue` win over the old `state` name (AB-52)."""
+           queue: str | None = None, schedule: str | None = None,
+           timezone: str | None = None) -> dict:
+    """A new issue. `stage` and `queue` win over the old `state` name (AB-52).
+
+    `schedule` is five cron fields read in `timezone`, an IANA zone the
+    caller resolves (AB-54); the two go together.
+    """
     where = _create_where("an issue", state, stage, queue)
+    schedule, timezone = _check_schedule(schedule, timezone)
     if (workflow_id is None) != (position is None):
         raise BoardError("workflow_id and position go together")
 
@@ -771,12 +792,67 @@ def create(engine, project: str, title: str, *, actor: str, actor_kind: str,
         now = store.db_now(s)
         issue = _create(s, project, title, actor, actor_kind, body, where, rank,
                         labels, workflow_id, position, now, key)
+        if schedule is not None:
+            _apply_schedule(issue, schedule, timezone, now)
         _attach(s, issue, None, attachments, actor, now)
         return _view(s, issue)
 
     return _write(engine, key, run, _replay_view,
                   [title, body, list(where), rank, sorted(set(labels)), workflow_id, position,
-                   actor, actor_kind, *_digests(attachments)])
+                   actor, actor_kind, schedule, timezone, *_digests(attachments)])
+
+
+def set_schedule(engine, issue_id: str, schedule: str | None, *, timezone: str | None,
+                 actor: str, actor_kind: str, token: str | None = None,
+                 request_id: str | None = None, preempt: bool = False,
+                 expected_version: int | None = None) -> dict:
+    """Set, change or clear an issue's cron schedule and its zone (AB-54).
+
+    Either change recomputes `next_run_at`; a None `schedule` clears all
+    three. An agent changes a schedule only under its lease, as it moves a
+    card. `expected_version` works as in `move`.
+    """
+    schedule, timezone = _check_schedule(schedule or None, timezone or None)
+    key = (_scoped("schedule", issue_id, request_id)
+           or _derive(actor, "schedule", issue_id, token, schedule, timezone))
+
+    def body(s):
+        issue = _get(s, issue_id, lock=True)
+        if expected_version is not None and issue.version != expected_version:
+            raise Conflict(f"{issue.id} is at version {issue.version}, "
+                           f"the page showed {expected_version}")
+        now = store.db_now(s)
+        if actor_kind == "agent" and issue.lease_holder is None:
+            raise LeaseLost(f"{issue.id}: an agent changes a schedule only under a lease")
+        _guard(s, issue, actor, actor_kind, token, now, preempt, None)
+        _apply_schedule(issue, schedule, timezone, now)
+        issue.version += 1
+        issue.updated_at = now
+        note = (f"schedule {schedule} in {timezone}; next due {_iso(issue.next_run_at)}"
+                if schedule else "schedule cleared")
+        _event(s, issue.id, now, actor, actor_kind, SCHEDULE_EVENT, None, None, note, key)
+        return _view(s, issue)
+
+    return _write(engine, key, body, _replay_view,
+                  [schedule, timezone, actor, actor_kind, token, preempt, expected_version])
+
+
+def default_timezone() -> str:
+    """The zone a CLI or MCP schedule is read in without an explicit one.
+
+    An agent has no browser preferences, so it is `BOARD_TIMEZONE`, else UTC.
+    """
+    return os.environ.get(TZ_ENV) or "UTC"
+
+
+def next_due(schedule: str, zone: str, after: datetime) -> datetime:
+    """The first time strictly after `after` that `schedule` fires, in UTC.
+
+    The fields are read as wall-clock times in `zone`, so a Sydney card
+    follows daylight saving.
+    """
+    local = after.astimezone(ZoneInfo(zone))
+    return croniter(schedule, local).get_next(datetime).astimezone(timezone.utc)
 
 
 def instantiate(engine, template: str, project: str, *, actor: str, actor_kind: str,
@@ -1213,7 +1289,8 @@ def _candidates(now, project):
         select(Issue)
         .where(
             or_(
-                Issue.queue == "ready",
+                and_(Issue.queue == "ready",
+                     or_(Issue.next_run_at.is_(None), Issue.next_run_at <= now)),
                 and_(Issue.queue == "processing",
                      Issue.lease_expires_at.is_not(None),
                      Issue.lease_expires_at < now),
@@ -1300,6 +1377,36 @@ def _create(s, project, title, actor, actor_kind, body, where, rank, labels,
     return issue
 
 
+def _check_schedule(schedule, zone):
+    """A valid (schedule, zone) pair, or (None, None) when there is no schedule.
+
+    An unknown zone is refused rather than skipped: a schedule read in the
+    wrong zone fires at the wrong hour.
+    """
+    if schedule is None:
+        return None, None
+    schedule = " ".join(schedule.split())
+    if len(schedule.split()) != 5 or not croniter.is_valid(schedule):
+        raise BoardError(f"a schedule is five cron fields, not {schedule!r}")
+    if not zone:
+        raise BoardError("a schedule needs a time zone")
+    try:
+        ZoneInfo(zone)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise BoardError(f"unknown time zone {zone!r}") from None
+    try:
+        # croniter accepts a date that never comes, such as 31 February.
+        next_due(schedule, zone, datetime.now(timezone.utc))
+    except CroniterBadDateError:
+        raise BoardError(f"the schedule {schedule!r} never comes due") from None
+    return schedule, zone
+
+
+def _apply_schedule(issue, schedule, zone, now):
+    issue.schedule, issue.schedule_tz = schedule, zone
+    issue.next_run_at = next_due(schedule, zone, now) if schedule else None
+
+
 def _apply_state(s, issue, state, note, actor, actor_kind, now, key, key_used):
     """The `transition` shim: an old state name, judged by the old table (AB-52).
 
@@ -1350,6 +1457,9 @@ def _set_place(s, issue, stage, queue, note, actor, actor_kind, now, key, key_us
     origin, and leaving done reopens the card.
     """
     old_stage, old_queue = issue.state, issue.queue
+    if stage == "done" and issue.schedule and old_stage in WORK_STAGES:
+        # Plan question 3: a finished run waits for its next due time.
+        stage, queue = old_stage, "ready"
     if (stage, queue) != (old_stage, old_queue):
         issue.state, issue.queue = stage, queue
         if old_queue == "processing":
@@ -1645,6 +1755,7 @@ def _view(s, issue):
         "stage": issue.state,
         "queue": issue.queue,
         "schedule": issue.schedule,
+        "schedule_tz": issue.schedule_tz,
         "next_run_at": _iso(issue.next_run_at),
         "rank": issue.rank,
         "assignee": issue.assignee,

@@ -19,7 +19,10 @@ from zoneinfo import ZoneInfo
 import pytest
 from fastapi.testclient import TestClient
 
+from sqlalchemy import update
+
 from board import core, store, web
+from board.store import Issue
 
 AGENT = "agent"
 HUMAN = "human"
@@ -4282,3 +4285,206 @@ def test_ab53_a_mixed_old_lane_cookie_still_shows_every_stage(board):
     old = ["backlog", "ready", "need-input", "onhold", "done", "cancelled"]
     c.cookies.set(web.PREFS_COOKIE, quote(json.dumps({"lanes": old})))
     assert lanes(c.get("/").text) == list(core.STAGES)
+
+
+# --- AB-54: the scheduled lane ----------------------------------------------------
+
+
+def scheduled_lane(html):
+    """The sixth bottom lane, where a ready card waits for its due time."""
+    m = re.search(r'<section[^>]*data-lane="scheduled"[^>]*>.*?</section>', html, re.S)
+    assert m, "no scheduled lane"
+    return m.group(0)
+
+
+def scheduled_card(engine, due_in, tz="UTC"):
+    """A ready cron card whose next due time is `due_in` from the board's clock."""
+    iid = core.create(engine, "MS", "nightly", actor=CHAOS, actor_kind=HUMAN,
+                      state="ready", schedule="0 9 * * *", timezone=tz)["id"]
+    at = datetime.fromisoformat(core.now(engine)) + due_in
+    with engine.begin() as conn:
+        conn.execute(update(Issue).where(Issue.id == iid).values(next_run_at=at))
+    return iid
+
+
+def test_ab54_a_card_due_later_waits_in_the_scheduled_lane(board, client):
+    later = scheduled_card(board, timedelta(hours=3))
+    html = client.get("/").text
+    assert f'data-id="{later}"' in scheduled_lane(html)
+    assert f'data-id="{later}"' not in strip(html)
+    # A view, not a stage: the five stage lanes are unchanged.
+    shown = re.findall(r'<section[^>]*data-state="([^"]+)"', html)
+    assert shown == ["backlog", "planning", "implement", "done", "cancelled"]
+
+
+def test_ab54_a_card_due_within_five_minutes_moves_to_the_strip(board, client):
+    soon = scheduled_card(board, timedelta(minutes=4))
+    past = scheduled_card(board, timedelta(minutes=-30))
+    edge = scheduled_card(board, timedelta(minutes=6))
+    html = client.get("/").text
+    assert f'data-id="{soon}"' in strip(html)
+    assert f'data-id="{past}"' in strip(html)
+    assert f'data-id="{edge}"' in scheduled_lane(html)
+
+
+def test_ab54_a_processing_scheduled_card_stays_in_the_strip(board, client):
+    iid = scheduled_card(board, timedelta(minutes=-1))
+    core.next(board, "worker")
+    assert core.show(board, iid)["queue"] == "processing"
+    html = client.get("/").text
+    assert f'data-id="{iid}"' in strip(html)
+    assert f'data-id="{iid}"' not in scheduled_lane(html)
+
+
+def test_ab54_a_scheduled_card_shows_a_clock_and_its_next_due_time(board, client):
+    later = scheduled_card(board, timedelta(hours=3))
+    due = core.show(board, later)["next_run_at"]
+    shown = web.localtime(due, ZoneInfo("Australia/Sydney"))
+    client.post("/preferences", data={"timezone": "Australia/Sydney"})
+    one = unescape(card(scheduled_lane(client.get("/").text), later))
+    assert 'class="schedule"' in one
+    assert "⏰" in one
+    assert shown in one
+    assert "0 9 * * *" in one
+
+
+def test_ab54_the_scheduled_lane_is_not_draggable(board, client):
+    later = scheduled_card(board, timedelta(hours=3))
+    lane = scheduled_lane(client.get("/").text)
+    assert "data-moves" not in card(lane, later)
+    assert 'class="cards"' not in lane
+    assert 'class="queue-form"' not in card(lane, later)
+
+
+# --- AB-54: the schedule form on the card page ----------------------------------------
+
+
+def schedule_form(issue, cron="0 9 * * *", **fields):
+    return {"version": str(issue["version"]), "cron": cron} | fields
+
+
+def test_ab54_the_card_page_shows_the_schedule_zone_and_next_due(board, client):
+    iid = scheduled_card(board, timedelta(hours=3), tz="Australia/Sydney")
+    issue = core.show(board, iid)
+    html = unescape(client.get(f"/issues/{iid}").text)
+    section = re.search(r'<section class="schedule-section".*?</section>', html, re.S).group(0)
+    assert "0 9 * * *" in section and "Australia/Sydney" in section
+    assert web.localtime(issue["next_run_at"], web.UTC) in section
+    assert re.search(rf'<form[^>]*action="/issues/{iid}/schedule"', section)
+    assert 'name="timezone" value="Australia/Sydney"' in section
+
+
+def test_ab54_an_unscheduled_card_offers_the_viewers_zone(board, client):
+    iid = ready(board)
+    client.post("/preferences", data={"timezone": "Europe/London"})
+    html = client.get(f"/issues/{iid}").text
+    assert 'name="timezone" value="Europe/London"' in html
+    assert 'name="cron" value=""' in html
+
+
+def test_ab54_setting_a_schedule_from_the_page(board, client):
+    iid = ready(board)
+    r = client.post(f"/issues/{iid}/schedule", headers=AS_CHAOS,
+                    data=schedule_form(core.show(board, iid), timezone="Australia/Sydney"))
+    assert r.status_code == 303
+    issue = core.show(board, iid)
+    assert (issue["schedule"], issue["schedule_tz"]) == ("0 9 * * *", "Australia/Sydney")
+    due = datetime.fromisoformat(issue["next_run_at"]).astimezone(ZoneInfo("Australia/Sydney"))
+    assert (due.hour, due.minute) == (9, 0)
+    assert any(e["kind"] == core.SCHEDULE_EVENT for e in issue["events"])
+
+
+@pytest.mark.parametrize("cookie, env, expected", [
+    ("Europe/London", "Asia/Tokyo", "Europe/London"),
+    (None, "Asia/Tokyo", "Asia/Tokyo"),
+    (None, None, "UTC"),
+])
+def test_ab54_a_blank_zone_is_the_setters_own(board, monkeypatch, cookie, env, expected):
+    if env:
+        monkeypatch.setenv(web.TZ_ENV, env)
+    client = local_client(board)
+    if cookie:
+        client.post("/preferences", data={"timezone": cookie})
+    iid = ready(board)
+    client.post(f"/issues/{iid}/schedule", headers=AS_CHAOS,
+                data=schedule_form(core.show(board, iid), timezone=""))
+    assert core.show(board, iid)["schedule_tz"] == expected
+
+
+def test_ab54_changing_the_zone_recomputes_the_due_time(board, client):
+    iid = ready(board)
+    client.post(f"/issues/{iid}/schedule", headers=AS_CHAOS,
+                data=schedule_form(core.show(board, iid), timezone="UTC"))
+    before = core.show(board, iid)
+    client.post(f"/issues/{iid}/schedule", headers=AS_CHAOS,
+                data=schedule_form(before, timezone="Asia/Tokyo"))
+    after = core.show(board, iid)
+    assert after["schedule_tz"] == "Asia/Tokyo"
+    due = datetime.fromisoformat(after["next_run_at"]).astimezone(ZoneInfo("Asia/Tokyo"))
+    assert (due.hour, due.minute) == (9, 0)
+    assert after["next_run_at"] != before["next_run_at"]
+
+
+def test_ab54_clearing_the_schedule(board, client):
+    iid = scheduled_card(board, timedelta(hours=3))
+    r = client.post(f"/issues/{iid}/schedule", headers=AS_CHAOS,
+                    data=schedule_form(core.show(board, iid), cron="", clear="1"))
+    assert r.status_code == 303
+    issue = core.show(board, iid)
+    assert (issue["schedule"], issue["schedule_tz"], issue["next_run_at"]) == (None, None, None)
+
+
+def test_ab54_a_bad_cron_or_zone_is_refused_and_nothing_saved(board, client):
+    iid = ready(board)
+    for fields in ({"cron": "every day"}, {"timezone": "Mars/Olympus"}):
+        r = client.post(f"/issues/{iid}/schedule", headers=AS_CHAOS,
+                        data=schedule_form(core.show(board, iid), **fields))
+        assert r.status_code == 422, fields
+    assert core.show(board, iid)["schedule"] is None
+
+
+def test_ab54_a_stale_page_is_refused(board, client):
+    iid = ready(board)
+    stale = core.show(board, iid)
+    client.post(f"/issues/{iid}/schedule", headers=AS_CHAOS,
+                data=schedule_form(stale, timezone="UTC"))
+    r = client.post(f"/issues/{iid}/schedule", headers=AS_CHAOS,
+                    data=schedule_form(stale, cron="0 10 * * *", timezone="UTC"))
+    assert r.status_code == 409
+    assert core.show(board, iid)["schedule"] == "0 9 * * *"
+
+
+def test_ab54_a_schedule_under_a_live_lease_offers_a_take_over(board, client):
+    iid = ready(board)
+    core.next(board, "run-2")
+    issue = core.show(board, iid)
+    refused = client.post(f"/issues/{iid}/schedule", headers=AS_CHAOS,
+                          data=schedule_form(issue, timezone="UTC"))
+    assert refused.status_code == 409 and "Take over?" in refused.text
+    assert f'action="/issues/{iid}/schedule"' in refused.text
+    assert core.show(board, iid)["schedule"] is None
+    taken = client.post(f"/issues/{iid}/schedule", headers=AS_CHAOS,
+                        data=schedule_form(issue, timezone="UTC", preempt="1"))
+    assert taken.status_code == 303
+    assert core.show(board, iid)["schedule"] == "0 9 * * *"
+
+
+def test_ab54_the_board_stamp_moves_when_a_lane_only_card_appears(board, client):
+    first = board_stamp(client)
+    scheduled_card(board, timedelta(hours=3))
+    assert board_stamp(client) != first
+
+
+def test_ab54_the_board_stamp_moves_when_a_waiting_cards_schedule_changes(board, client):
+    iid = scheduled_card(board, timedelta(hours=3))
+    first = board_stamp(client)
+    core.set_schedule(board, iid, "0 10 * * *", timezone="UTC", actor=CHAOS, actor_kind=HUMAN)
+    assert board_stamp(client) != first
+
+
+def test_ab54_a_date_that_never_comes_is_refused_on_the_page(board, client):
+    iid = ready(board)
+    r = client.post(f"/issues/{iid}/schedule", headers=AS_CHAOS,
+                    data=schedule_form(core.show(board, iid), cron="0 9 31 2 *", timezone="UTC"))
+    assert r.status_code == 422
+    assert core.show(board, iid)["schedule"] is None
