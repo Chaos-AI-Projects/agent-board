@@ -97,11 +97,28 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--assignee")
     sp.add_argument("--creator", help="the actor who created the issue")
 
-    sp = op("transition", help="move an issue to another state; an agent closes its "
-                               "own card, and one it left at need-input needs no lease; "
-                               "done reopens to ready with a --note, no lease needed")
+    sp = op("transition", help="OBSOLETE, use move and queue: set an old state name; "
+                               "an agent closes its own card, and one it left at "
+                               "need-input needs no lease; done reopens to ready with a "
+                               "--note, no lease needed")
     sp.add_argument("id")
     sp.add_argument("state")
+    sp.add_argument("--note")
+    sp.add_argument("--preempt", action="store_true")
+    writes(sp)
+
+    sp = op("move", help="set the stage; planning and implement queue the card as ready, "
+                         "done needs a --note, done reopens with a --note and no lease")
+    sp.add_argument("id")
+    sp.add_argument("stage", choices=core.STAGES)
+    sp.add_argument("--note")
+    sp.add_argument("--preempt", action="store_true")
+    writes(sp)
+
+    sp = op("queue", help="set the queue status of a planning or implement card: ready, "
+                          "on-hold, or none to take it out of the queue with a --note")
+    sp.add_argument("id")
+    sp.add_argument("status", choices=[q for q in core.QUEUES if q != "processing"] + ["none"])
     sp.add_argument("--note")
     sp.add_argument("--preempt", action="store_true")
     writes(sp)
@@ -123,7 +140,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--project", required=True)
     sp.add_argument("--title", required=True)
     sp.add_argument("--body", default="")
-    sp.add_argument("--state", default="backlog", choices=sorted(core.CREATE_STATES))
+    sp.add_argument("--state", default="backlog", choices=sorted(core.CREATE_STATES),
+                    help="OBSOLETE, use --stage; ignored when --stage is given")
+    sp.add_argument("--stage", choices=sorted(core.CREATE_STAGES),
+                    help="planning and implement start queued as ready")
+    sp.add_argument("--queue", choices=["ready"],
+                    help="only ready, and only for planning or implement")
     sp.add_argument("--rank", type=int)
     sp.add_argument("--label", action="append", default=[])
     sp.add_argument("--workflow-id", type=int)
@@ -190,6 +212,13 @@ def _run(engine, a) -> dict | None:
         case "transition":
             return core.transition(engine, a.id, a.state, note=a.note, token=a.token,
                                    request_id=a.request_id, preempt=a.preempt, **who)
+        case "move":
+            return core.move(engine, a.id, a.stage, note=a.note, token=a.token,
+                             request_id=a.request_id, preempt=a.preempt, **who)
+        case "queue":
+            status = None if a.status == "none" else a.status
+            return core.queue(engine, a.id, status, note=a.note, token=a.token,
+                              request_id=a.request_id, preempt=a.preempt, **who)
         case "annotate":
             return core.annotate(engine, a.id, a.note, token=a.token,
                                  request_id=a.request_id, **who)
@@ -198,7 +227,7 @@ def _run(engine, a) -> dict | None:
                              name=a.name, token=a.token, request_id=a.request_id, **who)
         case "create":
             return core.create(engine, a.project, a.title, body=a.body, state=a.state,
-                               rank=a.rank, labels=a.label, workflow_id=a.workflow_id,
+                               stage=a.stage, queue=a.queue, rank=a.rank, labels=a.label, workflow_id=a.workflow_id,
                                position=a.position, request_id=a.request_id, **who)
         case "instantiate":
             return core.instantiate(engine, a.template, a.project, title=a.title,

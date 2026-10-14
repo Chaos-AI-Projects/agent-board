@@ -66,6 +66,51 @@ LANE_HINTS: dict[str, str] = {
     "cancelled": "Dropped. Final.",
 }
 CREATE_STATES = {"backlog", "ready"}
+
+# AB-52, brain plans/agent-board-lanes.md section 2. A card's stage is its
+# bottom lane, stored in `issue.state`; its queue status is ready, processing
+# or on-hold, or None when it is not queued. Only a work stage is queued.
+STAGES = ("backlog", "planning", "implement", "done", "cancelled")
+WORK_STAGES = {"planning", "implement"}
+QUEUES = ("ready", "processing", "on-hold")
+STAGE_MOVES: dict[str, set[str]] = {
+    "backlog": {"planning", "implement", "cancelled"},
+    "planning": {"implement", "backlog", "cancelled"},
+    "implement": {"planning", "done", "backlog", "cancelled"},
+    "done": {"implement"},
+    "cancelled": set(),
+}
+# Within a work stage. `processing` is entered only by `next`.
+QUEUE_MOVES: dict[str | None, set[str | None]] = {
+    None: {"ready", "on-hold"},
+    "ready": {"on-hold"},
+    "processing": {None, "ready", "on-hold"},
+    "on-hold": {None},
+}
+CREATE_STAGES = {"backlog", "planning", "implement"}
+READY = ("implement", "ready")
+# The old state names, as the `transition` shim and the `state` of a view
+# still read them until phase 4 (AB-55). Migration 0010 holds the same table.
+LEGACY_SPLIT: dict[str, tuple[str, str | None]] = {
+    "backlog": ("backlog", None),
+    "ready": ("implement", "ready"),
+    "processing": ("implement", "processing"),
+    "need-input": ("implement", None),
+    "onhold": ("implement", "on-hold"),
+    "done": ("done", None),
+    "cancelled": ("cancelled", None),
+}
+_LEGACY_FOLD = {"ready": "ready", "processing": "processing", "on-hold": "onhold",
+                None: "need-input"}
+
+
+def legacy_state(stage: str | None, queue: str | None) -> str | None:
+    """The old single state for a stage and queue status; a work stage folds by queue."""
+    if stage in WORK_STAGES:
+        return _LEGACY_FOLD[queue]
+    return stage
+
+
 ARTIFACT_KINDS = {"commit", "pr", "path", "url"}
 ARTIFACT_NAME_MAX = 200
 ACTOR_KINDS = {"agent", "human", "system"}
@@ -206,13 +251,16 @@ def lane_meta(engine) -> dict[str, dict]:
     replace an earlier one.
     """
     with store.session(engine) as s:
-        arrived = (select(Event.issue_id, Event.to_state, func.max(Event.at).label("at"))
+        arrived = (select(Event.issue_id, Event.to_state, Event.to_queue,
+                          func.max(Event.at).label("at"))
                    .where(Event.to_state.is_not(None),
-                          or_(Event.from_state.is_(None), Event.from_state != Event.to_state))
-                   .group_by(Event.issue_id, Event.to_state).subquery())
+                          or_(Event.from_state.is_(None), Event.from_state != Event.to_state,
+                              Event.from_queue.is_distinct_from(Event.to_queue)))
+                   .group_by(Event.issue_id, Event.to_state, Event.to_queue).subquery())
         rows = s.execute(select(Issue.id, func.coalesce(arrived.c.at, Issue.updated_at))
                          .outerjoin(arrived, (arrived.c.issue_id == Issue.id)
-                                    & (arrived.c.to_state == Issue.state)))
+                                    & (arrived.c.to_state == Issue.state)
+                                    & arrived.c.to_queue.is_not_distinct_from(Issue.queue)))
         meta = {i: {"entered_at": _iso(at), "pr": None, "urls": []} for i, at in rows}
         for issue_id, kind, ref, name in s.execute(
                 select(Artifact.issue_id, Artifact.kind, Artifact.ref, Artifact.name)
@@ -300,12 +348,12 @@ def next(engine, worker: str, *, ttl: timedelta = DEFAULT_TTL, project: str | No
             issue = s.scalars(_candidates(now, project)).first()
             if issue is None:
                 return None
-            prev_holder, prev_state = issue.lease_holder, issue.state
+            prev_holder, prev_queue = issue.lease_holder, issue.queue
             token = secrets.token_hex(16)
             won = s.execute(
                 update(Issue)
                 .where(Issue.id == issue.id, Issue.version == issue.version)
-                .values(state="processing", lease_holder=worker, lease_token=token,
+                .values(queue="processing", lease_holder=worker, lease_token=token,
                         lease_expires_at=now + ttl, version=Issue.version + 1,
                         updated_at=now)
                 .execution_options(synchronize_session=False)
@@ -317,8 +365,8 @@ def next(engine, worker: str, *, ttl: timedelta = DEFAULT_TTL, project: str | No
                 kind, note = "reclaim", f"lease expired; preempted holder {prev_holder}"
             else:
                 kind, note = "claim", None
-            _event(s, issue.id, now, worker, "agent", kind, prev_state, "processing",
-                   note, key)
+            _event(s, issue.id, now, worker, "agent", kind, issue.state, issue.state,
+                   note, key, prev_queue, "processing")
             s.expire(issue)
             return {"issue": _view(s, issue), "lease_token": token}
         raise Conflict("gave up after 100 lost claim races")
@@ -467,7 +515,8 @@ def stats(engine, *, days: int = STATS_DAYS, limit: int = 50, agents=frozenset()
     if not 1 <= days <= STATS_DAYS_MAX:
         raise BoardError(f"the window is 1 to {STATS_DAYS_MAX} days, not {days}")
     moved = and_(Event.from_state.is_not(None), Event.to_state.is_not(None),
-                 Event.from_state != Event.to_state)
+                 or_(Event.from_state != Event.to_state,
+                     Event.from_queue.is_distinct_from(Event.to_queue)))
 
     def count(cond):
         return func.count(case((cond, 1)))
@@ -500,7 +549,8 @@ def stats(engine, *, days: int = STATS_DAYS, limit: int = 50, agents=frozenset()
                           "actor": ev.actor,
                           "actor_kind": counted_kind(ev.actor, ev.actor_kind, agents),
                           "kind": ev.kind,
-                          "from_state": ev.from_state, "to_state": ev.to_state,
+                          "from_state": legacy_state(ev.from_state, ev.from_queue),
+                          "to_state": legacy_state(ev.to_state, ev.to_queue),
                           "note": ev.note}
                          for ev, title in activity],
         }
@@ -509,7 +559,8 @@ def stats(engine, *, days: int = STATS_DAYS, limit: int = 50, agents=frozenset()
 def _row(i):
     """An issue as a board card: no body, events or artifacts."""
     return {
-        "id": i.id, "project": i.project_key, "title": i.title, "state": i.state,
+        "id": i.id, "project": i.project_key, "title": i.title,
+        "state": legacy_state(i.state, i.queue), "stage": i.state, "queue": i.queue,
         "rank": i.rank, "labels": [l.name for l in i.labels], "assignee": i.assignee,
         "lease_holder": i.lease_holder, "lease_expires_at": _iso(i.lease_expires_at),
         "version": i.version, "workflow_id": i.workflow_id, "position": i.position,
@@ -541,6 +592,67 @@ def transition(engine, issue_id: str, state: str, *, actor: str, actor_kind: str
 
     return _write(engine, key, body, _replay_view,
                   [state, note, actor, actor_kind, token, preempt])
+
+
+def move(engine, issue_id: str, stage: str, *, actor: str, actor_kind: str,
+         note: str | None = None, token: str | None = None,
+         request_id: str | None = None, preempt: bool = False) -> dict:
+    """Set an issue's stage (plan section 2, AB-52).
+
+    Entering planning or implement queues the card as ready; any other stage
+    takes it out of the queue. Moving to the stage it is in changes nothing.
+    Reopening a done card needs a reason and no lease, as `transition` does.
+    """
+    if stage not in STAGES:
+        raise InvalidTransition(f"unknown stage {stage!r}")
+
+    def place(issue):
+        if stage == issue.state:
+            return stage, issue.queue
+        return stage, ("ready" if stage in WORK_STAGES else None)
+
+    return _place_op(engine, "move", issue_id, place, [stage], actor, actor_kind, note,
+                     token, request_id, preempt)
+
+
+def queue(engine, issue_id: str, status: str | None, *, actor: str, actor_kind: str,
+          note: str | None = None, token: str | None = None,
+          request_id: str | None = None, preempt: bool = False) -> dict:
+    """Set an issue's queue status: ready, on-hold, or None (plan section 2, AB-52).
+
+    Only `next` sets processing. Releasing a claimed card to None needs a
+    note; the card then waits in its stage's lane, as need-input did.
+    """
+    status = status or None
+    if status is not None and status not in QUEUES:
+        raise InvalidTransition(f"unknown queue status {status!r}")
+    if status == "processing":
+        raise InvalidTransition(f"{issue_id}: only board next sets processing")
+    return _place_op(engine, "queue", issue_id, lambda issue: (issue.state, status),
+                     [status], actor, actor_kind, note, token, request_id, preempt)
+
+
+def _place_op(engine, op, issue_id, place, args, actor, actor_kind, note, token,
+              request_id, preempt):
+    key = (_scoped(op, issue_id, request_id)
+           or _derive(actor, op, issue_id, token, *args, note))
+
+    def body(s):
+        issue = _get(s, issue_id, lock=True)
+        now = store.db_now(s)
+        stage, queue = place(issue)
+        if actor_kind == "agent" and issue.lease_holder is None:
+            reopens = issue.state == "done" and stage != "done"
+            if not (_left_by(s, issue, actor, stage) or reopens):
+                raise LeaseLost(f"{issue.id}: an agent moves an issue only under a lease")
+        else:
+            _guard(s, issue, actor, actor_kind, token, now, preempt, None)
+        _judge(issue, stage, queue, note, actor_kind)
+        _set_place(s, issue, stage, queue, note, actor, actor_kind, now, key, key_used=False)
+        return _view(s, issue)
+
+    return _write(engine, key, body, _replay_view,
+                  [*args, note, actor, actor_kind, token, preempt])
 
 
 def annotate(engine, issue_id: str, note: str, *, actor: str, actor_kind: str,
@@ -622,9 +734,10 @@ def create(engine, project: str, title: str, *, actor: str, actor_kind: str,
            body: str = "", state: str = "backlog", rank: int | None = None,
            labels: list[str] = (), workflow_id: int | None = None,
            position: int | None = None, request_id: str | None = None,
-           attachments: list[dict] = ()) -> dict:
-    if state not in CREATE_STATES:
-        raise InvalidTransition(f"an issue is created {sorted(CREATE_STATES)}, not {state!r}")
+           attachments: list[dict] = (), stage: str | None = None,
+           queue: str | None = None) -> dict:
+    """A new issue. `stage` and `queue` win over the old `state` name (AB-52)."""
+    where = _create_where("an issue", state, stage, queue)
     if (workflow_id is None) != (position is None):
         raise BoardError("workflow_id and position go together")
 
@@ -632,13 +745,13 @@ def create(engine, project: str, title: str, *, actor: str, actor_kind: str,
 
     def run(s):
         now = store.db_now(s)
-        issue = _create(s, project, title, actor, actor_kind, body, state, rank,
+        issue = _create(s, project, title, actor, actor_kind, body, where, rank,
                         labels, workflow_id, position, now, key)
         _attach(s, issue, None, attachments, actor, now)
         return _view(s, issue)
 
     return _write(engine, key, run, _replay_view,
-                  [title, body, state, rank, sorted(set(labels)), workflow_id, position,
+                  [title, body, list(where), rank, sorted(set(labels)), workflow_id, position,
                    actor, actor_kind, *_digests(attachments)])
 
 
@@ -662,7 +775,7 @@ def instantiate(engine, template: str, project: str, *, actor: str, actor_kind: 
         s.add(wf)
         s.flush()
         for i, step in enumerate(tpl.steps):
-            _create(s, project, step.title, actor, actor_kind, step.body, "ready", None,
+            _create(s, project, step.title, actor, actor_kind, step.body, READY, None,
                     (), wf.id, step.position, now, key if i == 0 else None)
         s.flush()
         s.refresh(wf)
@@ -736,7 +849,7 @@ def create_batch(engine, items: list[dict], *, actor: str, actor_kind: str,
         for i, it in enumerate(items):
             item_key = None if key is None else (key if i == 0 else _item_key(key, i))
             issues.append(_create(s, it["project"], it["title"], actor, actor_kind, it["body"],
-                                  it["state"], it["rank"], it["labels"],
+                                  it["where"], it["rank"], it["labels"],
                                   wf and wf.id, wf and i + 1, now, item_key))
         for issue, it in zip(issues, items):
             for on in [issues[j].id for j in it["inside"]] + it["outside"]:
@@ -750,7 +863,7 @@ def create_batch(engine, items: list[dict], *, actor: str, actor_kind: str,
         return result([i.id for i in issues], wf and wf.id)
 
     return _write(engine, key, body, replay,
-                  [[{k: it[k] for k in ("project", "title", "body", "state", "rank",
+                  [[{k: it[k] for k in ("project", "title", "body", "where", "rank",
                                         "labels", "ref", "after")} for it in items],
                    workflow_title, actor, actor_kind])
 
@@ -777,10 +890,8 @@ def _batch_item(i, it):
     if not isinstance(labels, list) or not all(isinstance(l, str) and l.strip()
                                                for l in labels):
         raise BoardError(f"item {i}: labels are a list of non-blank strings")
-    state = it.get("state") or "ready"
-    if state not in CREATE_STATES:
-        raise InvalidTransition(f"item {i}: an issue is created {sorted(CREATE_STATES)}, "
-                                f"not {state!r}")
+    where = list(_create_where(f"item {i}: an issue", it.get("state") or "ready",
+                               it.get("stage"), it.get("queue")))
     ref = it.get("ref")
     if ref is not None and (not isinstance(ref, str) or not ref):
         raise BoardError(f"item {i}: a ref is a non-empty string")
@@ -791,7 +902,7 @@ def _batch_item(i, it):
     if not isinstance(body, str):
         raise BoardError(f"item {i}: a body is a string")
     return {"project": it["project"], "title": title, "body": body,
-            "state": state, "rank": rank, "labels": sorted({l.strip() for l in labels}),
+            "where": where, "rank": rank, "labels": sorted({l.strip() for l in labels}),
             "ref": ref, "after": after}
 
 
@@ -877,16 +988,18 @@ def plan(engine, issue_id: str, steps: list[dict], *, actor: str, actor_kind: st
         for position, st in enumerate(steps, 1):
             # The origin's rank, so planning an urgent issue keeps its steps urgent.
             _create(s, st["project"] or issue.project_key, st["title"], actor, actor_kind,
-                    st["body"], "ready", issue.rank, (), wf.id, position, now, None)
-        old = issue.state
-        issue.state = "onhold"
+                    st["body"], READY, issue.rank, (), wf.id, position, now, None)
+        old_stage, old_queue = issue.state, issue.queue
+        if issue.state not in WORK_STAGES:
+            issue.state = "implement"
+        issue.queue = "on-hold"
         issue.lease_holder = issue.lease_token = issue.lease_expires_at = None
         issue.version += 1
         issue.updated_at = now
         n = len(steps)
-        _event(s, issue.id, now, actor, actor_kind, "transition", old, "onhold",
+        _event(s, issue.id, now, actor, actor_kind, "transition", old_stage, issue.state,
                f"planned as workflow {wf.id}: {n} step{'' if n == 1 else 's'}",
-               None if _has_key(s, key) else key)
+               None if _has_key(s, key) else key, old_queue, "on-hold")
         return _view(s, issue)
 
     return _write(engine, key, body, _replay_view,
@@ -1076,8 +1189,8 @@ def _candidates(now, project):
         select(Issue)
         .where(
             or_(
-                Issue.state == "ready",
-                and_(Issue.state == "processing",
+                Issue.queue == "ready",
+                and_(Issue.queue == "processing",
                      Issue.lease_expires_at.is_not(None),
                      Issue.lease_expires_at < now),
             ),
@@ -1123,8 +1236,27 @@ def _started_after_done(issue, blocker):
         claimed.id > arrived.id).correlate_except(claimed, arrived)
 
 
-def _create(s, project, title, actor, actor_kind, body, state, rank, labels,
+def _create_where(what, state, stage, queue):
+    """The stage and queue status a new issue starts in.
+
+    Without a `stage` the old `state` name decides, backlog or ready. A work
+    stage starts queued as ready; any other stage starts unqueued.
+    """
+    if stage is None:
+        if state not in CREATE_STATES:
+            raise InvalidTransition(f"{what} is created {sorted(CREATE_STATES)}, not {state!r}")
+        return LEGACY_SPLIT[state]
+    if stage not in CREATE_STAGES:
+        raise InvalidTransition(f"{what} is created in {sorted(CREATE_STAGES)}, not {stage!r}")
+    allowed = {None, "ready"} if stage in WORK_STAGES else {None}
+    if queue not in allowed:
+        raise InvalidTransition(f"{what} in {stage} is not created {queue!r}")
+    return stage, ("ready" if stage in WORK_STAGES else None)
+
+
+def _create(s, project, title, actor, actor_kind, body, where, rank, labels,
             workflow_id, position, now, key):
+    stage, queue = where
     number = s.scalar(
         update(Project).where(Project.key == project)
         .values(next_number=Project.next_number + 1)
@@ -1135,37 +1267,76 @@ def _create(s, project, title, actor, actor_kind, body, state, rank, labels,
     if rank is None:
         rank = (s.scalar(select(func.max(Issue.rank))) or 0) + 10
     issue = Issue(id=f"{project}-{number - 1}", project_key=project, title=title,
-                  body=body, state=state, rank=rank, workflow_id=workflow_id,
+                  body=body, state=stage, queue=queue, rank=rank, workflow_id=workflow_id,
                   position=position, created_at=now, updated_at=now,
                   labels=[Label(name=n) for n in sorted(set(labels))])
     s.add(issue)
     s.flush()
-    _event(s, issue.id, now, actor, actor_kind, "create", None, state, None, key)
+    _event(s, issue.id, now, actor, actor_kind, "create", None, stage, None, key, None, queue)
     return issue
 
 
 def _apply_state(s, issue, state, note, actor, actor_kind, now, key, key_used):
+    """The `transition` shim: an old state name, judged by the old table (AB-52).
+
+    The target splits as migration 0010 splits stored states, except that a
+    planning card stays in planning.
+    """
     if state not in TRANSITIONS:
         raise InvalidTransition(f"unknown state {state!r}")
     if (state in NOTE_REQUIRED and not note
             and not (actor_kind == "human" and state in HUMAN_NOTE_OPTIONAL)):
         raise NoteRequired(f"a transition into {state} needs a note")
-    old = issue.state
+    old = legacy_state(issue.state, issue.queue)
     if (old, state) in NOTE_REQUIRED_MOVES and not note:
         raise NoteRequired(f"{issue.id}: a move from {old} to {state} needs a note")
-    if state != old:
-        if state not in TRANSITIONS[old]:
-            raise InvalidTransition(f"{issue.id}: {old} -> {state} is not allowed")
-        issue.state = state
-        if old == "processing":
+    if state != old and state not in TRANSITIONS[old]:
+        raise InvalidTransition(f"{issue.id}: {old} -> {state} is not allowed")
+    stage, queue = LEGACY_SPLIT[state]
+    if stage == "implement" and issue.state in WORK_STAGES:
+        stage = issue.state
+    return _set_place(s, issue, stage, queue, note, actor, actor_kind, now, key, key_used)
+
+
+def _judge(issue, stage, queue, note, actor_kind):
+    """Plan section 2's rules for a `move` or a `queue` call."""
+    old_stage, old_queue = issue.state, issue.queue
+    if stage != old_stage:
+        if stage not in STAGE_MOVES[old_stage]:
+            raise InvalidTransition(f"{issue.id}: {old_stage} -> {stage} is not allowed")
+        if stage == "done" and not note and actor_kind != "human":
+            raise NoteRequired(f"{issue.id}: a move into done needs a note")
+        if old_stage == "done" and not note:
+            raise NoteRequired(f"{issue.id}: reopening a done card needs a reason")
+    elif queue != old_queue:
+        if stage not in WORK_STAGES:
+            raise InvalidTransition(f"{issue.id} is {stage}; only a planning or implement "
+                                    "card is queued")
+        if queue not in QUEUE_MOVES[old_queue]:
+            raise InvalidTransition(f"{issue.id}: queue {old_queue or 'empty'} -> "
+                                    f"{queue or 'empty'} is not allowed")
+        if old_queue == "processing" and queue is None and not note:
+            raise NoteRequired(f"{issue.id}: releasing a card from the queue needs a note")
+
+
+def _set_place(s, issue, stage, queue, note, actor, actor_kind, now, key, key_used):
+    """Write a card's stage and queue status, and one transition event.
+
+    Leaving processing drops the lease. Closing a step may resume its plan's
+    origin, and leaving done reopens the card.
+    """
+    old_stage, old_queue = issue.state, issue.queue
+    if (stage, queue) != (old_stage, old_queue):
+        issue.state, issue.queue = stage, queue
+        if old_queue == "processing":
             issue.lease_holder = issue.lease_token = issue.lease_expires_at = None
         issue.version += 1
         issue.updated_at = now
-    ev = _event(s, issue.id, now, actor, actor_kind, "transition", old, state, note,
-                None if key_used else key)
-    if state == "done" and old != "done":
+    ev = _event(s, issue.id, now, actor, actor_kind, "transition", old_stage, stage, note,
+                None if key_used else key, old_queue, queue)
+    if stage == "done" and old_stage != "done":
         _resume_origin(s, issue, now)
-    if _reopened(old, state):
+    if old_stage == "done" and stage != "done":
         _reopen(s, issue, actor, now)
     return ev
 
@@ -1197,18 +1368,18 @@ def _reopen(s, issue, actor, now):
     note = f"step {issue.id} of workflow {wf.id} was reopened by {actor}"
     entered = s.scalars(select(Event)
                         .where(Event.issue_id == origin.id, Event.kind == "transition",
-                               Event.to_state == "ready")
+                               Event.to_queue == "ready")
                         .order_by(Event.id.desc()).limit(1)).first()
     # Resumed, not since claimed and handed back by a checkpoint.
-    if origin.state == "ready" and entered is not None and entered.from_state == "onhold":
-        origin.state = "onhold"
+    if origin.queue == "ready" and entered is not None and entered.from_queue == "on-hold":
+        origin.queue = "on-hold"
         origin.version += 1
         origin.updated_at = now
-        _event(s, origin.id, now, "board", "system", "transition", "ready", "onhold",
-               f"{note}; this waits for it again", None)
-    elif origin.state != "onhold":
+        _event(s, origin.id, now, "board", "system", "transition", origin.state,
+               origin.state, f"{note}; this waits for it again", None, "ready", "on-hold")
+    elif origin.queue != "on-hold":
         _event(s, origin.id, now, "board", "system", "annotate", None, None,
-               f"{note}; this stays {origin.state}", None)
+               f"{note}; this stays {legacy_state(origin.state, origin.queue)}", None)
 
 
 def _left_by(s, issue, actor, state):
@@ -1218,11 +1389,11 @@ def _left_by(s, issue, actor, state):
     review before AB-23 could never be closed by it. The agent that made the
     latest move into need-input may still close or cancel it; nothing else.
     """
-    if issue.state != "need-input" or state not in {"done", "cancelled"}:
+    if not _waiting(issue) or state not in {"done", "cancelled"}:
         return False
     last = s.scalars(select(Event)
                      .where(Event.issue_id == issue.id, Event.kind == "transition",
-                            Event.to_state == "need-input")
+                            Event.to_state.in_(WORK_STAGES), Event.to_queue.is_(None))
                      .order_by(Event.id.desc()).limit(1)).first()
     return last is not None and last.actor == actor and last.actor_kind == "agent"
 
@@ -1233,8 +1404,14 @@ def _release_answered(s, issue, actor, actor_kind, now):
     Only a human: an agent noting its own question must not release it. The
     caller's event already holds the idempotency key, so this one goes without.
     """
-    if actor_kind == "human" and issue.state == "need-input":
-        _apply_state(s, issue, "ready", None, actor, actor_kind, now, None, key_used=True)
+    if actor_kind == "human" and _waiting(issue):
+        _set_place(s, issue, issue.state, "ready", None, actor, actor_kind, now, None,
+                   key_used=True)
+
+
+def _waiting(issue):
+    """A work-stage card out of the queue: the old need-input."""
+    return issue.state in WORK_STAGES and issue.queue is None
 
 
 def _resume_origin(s, step, now):
@@ -1252,14 +1429,14 @@ def _resume_origin(s, step, now):
     states = list(s.scalars(select(Issue.state).where(Issue.workflow_id == wf.id)))
     if not states or any(st != "done" for st in states):
         return
-    if origin.state != "onhold":
+    if origin.queue != "on-hold":
         return
-    origin.state = "ready"
+    origin.queue = "ready"
     origin.version += 1
     origin.updated_at = now
-    _event(s, origin.id, now, "board", "system", "transition", "onhold", "ready",
+    _event(s, origin.id, now, "board", "system", "transition", origin.state, origin.state,
            f"every step of workflow {wf.id} is done; check the result and close this",
-           None)
+           None, "on-hold", "ready")
 
 
 def _guard(s, issue, actor, actor_kind, token, now, preempt, key):
@@ -1278,7 +1455,8 @@ def _guard(s, issue, actor, actor_kind, token, now, preempt, key):
     issue.version += 1
     issue.updated_at = now
     _event(s, issue.id, now, actor, actor_kind, "preempt", issue.state, issue.state,
-           f"lease taken over from {prev}", None if _has_key(s, key) else key)
+           f"lease taken over from {prev}", None if _has_key(s, key) else key,
+           issue.queue, issue.queue)
 
 
 def _check_token(s, issue, actor, token):
@@ -1302,11 +1480,13 @@ def _lost_message(s, issue):
     return f"{issue.id}: lease lost, {verb} by {issue.lease_holder}{detail}"
 
 
-def _event(s, issue_id, at, actor, actor_kind, kind, from_state, to_state, note, key):
+def _event(s, issue_id, at, actor, actor_kind, kind, from_state, to_state, note, key,
+           from_queue=None, to_queue=None):
     if actor_kind not in ACTOR_KINDS:
         raise BoardError(f"actor kind {actor_kind!r} is not one of {sorted(ACTOR_KINDS)}")
     ev = Event(issue_id=issue_id, at=at, actor=actor, actor_kind=actor_kind, kind=kind,
-               from_state=from_state, to_state=to_state, note=note, idempotency_key=key)
+               from_state=from_state, to_state=to_state, from_queue=from_queue,
+               to_queue=to_queue, note=note, idempotency_key=key)
     s.add(ev)
     s.flush()
     return ev
@@ -1437,7 +1617,11 @@ def _view(s, issue):
         "project": issue.project_key,
         "title": issue.title,
         "body": issue.body,
-        "state": issue.state,
+        "state": legacy_state(issue.state, issue.queue),
+        "stage": issue.state,
+        "queue": issue.queue,
+        "schedule": issue.schedule,
+        "next_run_at": _iso(issue.next_run_at),
         "rank": issue.rank,
         "assignee": issue.assignee,
         "labels": [l.name for l in issue.labels],
@@ -1456,7 +1640,10 @@ def _view(s, issue):
         "attachments": [_attachment_view(a) for a in issue.attachments],
         "events": [
             {"id": e.id, "at": _iso(e.at), "actor": e.actor, "actor_kind": e.actor_kind,
-             "kind": e.kind, "from_state": e.from_state, "to_state": e.to_state,
+             "kind": e.kind, "from_state": legacy_state(e.from_state, e.from_queue),
+             "to_state": legacy_state(e.to_state, e.to_queue),
+             "from_stage": e.from_state, "to_stage": e.to_state,
+             "from_queue": e.from_queue, "to_queue": e.to_queue,
              "note": e.note,
              "attachments": [_attachment_view(a) for a in issue.attachments
                              if a.event_id == e.id]}
@@ -1472,10 +1659,10 @@ def _view(s, issue):
 
 def _linked(s, far, near, issue_id):
     """The issues at the `far` end of this issue's dependency rows, in id order."""
-    rows = s.execute(select(Issue.id, Issue.title, Issue.state)
+    rows = s.execute(select(Issue.id, Issue.title, Issue.state, Issue.queue)
                      .join(Dependency, Issue.id == far).where(near == issue_id)
                      .order_by(Issue.id))
-    return [{"id": i, "title": t, "state": st} for i, t, st in rows]
+    return [{"id": i, "title": t, "state": legacy_state(st, q)} for i, t, st, q in rows]
 
 
 def _workflow_state(steps):
@@ -1487,13 +1674,14 @@ def _workflow_state(steps):
     A workflow nobody has started sits in `ready` when its first step is
     ready, because that is the step `next` would hand out.
     """
+    states = [legacy_state(st.state, st.queue) for st in steps]
     if _all_done(steps):
         return "done"
-    if any(st.state == "need-input" for st in steps):
+    if "need-input" in states:
         return "need-input"
-    if any(st.state in ("processing", "done") for st in steps):
+    if any(st in ("processing", "done") for st in states):
         return "processing"
-    if steps and steps[0].state == "ready":
+    if states and states[0] == "ready":
         return "ready"
     return "backlog"
 
@@ -1517,5 +1705,6 @@ def _workflow_view(s, wf):
         "origin_issue_id": wf.origin_issue_id,
         "state": _workflow_state(wf.steps),
         "steps": [{"id": st.id, "position": st.position, "title": st.title,
-                   "state": st.state, "depends_on": deps[st.id]} for st in wf.steps],
+                   "state": legacy_state(st.state, st.queue), "depends_on": deps[st.id]}
+                  for st in wf.steps],
     }

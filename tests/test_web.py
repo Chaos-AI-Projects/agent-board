@@ -4042,3 +4042,26 @@ def test_ab49_a_drag_to_done_asks_for_an_optional_note(client):
 def test_ab50_a_written_take_over_page_holds_the_auto_reload(board, client):
     html = client.get(f"/issues/{ready(board)}").text
     assert "return dlg.open || replaced;" in html
+
+
+# --- AB-52: the old layout over the new fields ------------------------------
+
+
+def test_ab52_the_old_lanes_hold_cards_by_their_new_stage_and_queue(board, client):
+    planning = core.create(board, "MS", "a plan", actor=CHAOS, actor_kind=HUMAN,
+                           stage="planning")["id"]
+    held = ready(board, "held")
+    core.queue(board, held, "on-hold", actor=CHAOS, actor_kind=HUMAN)
+    asked = ready(board, "asked")
+    core.queue(board, asked, "on-hold", actor=CHAOS, actor_kind=HUMAN)
+    core.queue(board, asked, None, actor=CHAOS, actor_kind=HUMAN, note="a question")
+    html = client.get("/").text
+    assert f'data-id="{planning}"' in column(html, "ready")
+    assert f'data-id="{held}"' in column(html, "onhold")
+    assert f'data-id="{asked}"' in column(html, "need-input")
+
+
+def test_ab52_the_issue_page_renders_a_planning_card(board, client):
+    issue_id = core.create(board, "MS", "a plan", actor=CHAOS, actor_kind=HUMAN,
+                           stage="planning")["id"]
+    assert client.get(f"/issues/{issue_id}").status_code == 200

@@ -134,14 +134,41 @@ def build_server(engine, actor: str | Callable[[], str], brain=_FROM_ENV,
     @mcp.tool()
     def transition(id: str, state: str, token: str | None = None, note: str | None = None,
                    request_id: str | None = None, preempt: bool = False) -> CallToolResult:
-        """Move an issue to another state. `need-input` needs a note, and so does an
-        agent's `done`; a human may close without one.
+        """OBSOLETE: use `move` for the stage and `queue` for the queue status.
+
+        Move an issue to an old state name. `need-input` needs a note, and so
+        does an agent's `done`; a human may close without one.
 
         An agent closes its own card as `done`. A card it left at `need-input`
         it may still move to `done` or `cancelled` without a lease. A `done`
         card reopens to `ready` with a note giving the reason, no lease needed.
         """
         return run(core.transition, engine, id, state, note=note, token=token,
+                   request_id=request_id, preempt=preempt, **who())
+
+    @mcp.tool()
+    def move(id: str, stage: str, token: str | None = None, note: str | None = None,
+             request_id: str | None = None, preempt: bool = False) -> CallToolResult:
+        """Set an issue's stage: backlog, planning, implement, done or cancelled.
+
+        Entering planning or implement queues the card as ready and releases
+        the lease. An agent's `done` needs a note; a human may close without
+        one. A `done` card reopens to implement with a note giving the
+        reason, no lease needed.
+        """
+        return run(core.move, engine, id, stage, note=note, token=token,
+                   request_id=request_id, preempt=preempt, **who())
+
+    @mcp.tool()
+    def queue(id: str, status: str | None, token: str | None = None,
+              note: str | None = None, request_id: str | None = None,
+              preempt: bool = False) -> CallToolResult:
+        """Set a planning or implement card's queue status: ready, on-hold, or null.
+
+        Null takes the card out of the queue and needs a note, as when it
+        waits on a question. Only `next` sets processing.
+        """
+        return run(core.queue, engine, id, status, note=note, token=token,
                    request_id=request_id, preempt=preempt, **who())
 
     @mcp.tool()
@@ -162,9 +189,15 @@ def build_server(engine, actor: str | Callable[[], str], brain=_FROM_ENV,
     def create(project: str, title: str, body: str = "", state: str = "backlog",
                rank: int | None = None, labels: list[str] | None = None,
                workflow_id: int | None = None, position: int | None = None,
-               request_id: str | None = None) -> CallToolResult:
-        """A new issue, `backlog` unless state says `ready`."""
-        return run(core.create, engine, project, title, body=body, state=state, rank=rank,
+               request_id: str | None = None, stage: str | None = None,
+               queue: str | None = None) -> CallToolResult:
+        """A new issue in `stage`: backlog, planning or implement.
+
+        Planning and implement start queued as ready. Without a stage, the
+        obsolete `state` decides: `backlog`, or `ready` for implement.
+        """
+        return run(core.create, engine, project, title, body=body, state=state, stage=stage,
+                   queue=queue, rank=rank,
                    labels=labels or [], workflow_id=workflow_id, position=position,
                    request_id=request_id, **who())
 
@@ -191,7 +224,8 @@ def build_server(engine, actor: str | Callable[[], str], brain=_FROM_ENV,
                      request_id: str | None = None) -> CallToolResult:
         """Create several issues together, all or nothing.
 
-        Each item is {"project", "title", "body"?, "state"? (default ready),
+        Each item is {"project", "title", "body"?, "stage"? (backlog, planning
+        or implement; default implement, queued ready), "state"? (obsolete),
         "rank"?, "labels"?, "ref"?, "after"?}. `after` lists what the item
         waits on: another item by 0-based index or by its `ref`, or an
         existing issue id. With workflow_title the items become a new

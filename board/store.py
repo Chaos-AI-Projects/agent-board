@@ -205,14 +205,23 @@ class Issue(Base):
         # A workflow step is a position; two issues cannot share one.
         UniqueConstraint("workflow_id", "position"),
         Index("ix_issue_state_rank", "state", "rank"),
+        Index("ix_issue_queue_rank", "queue", "rank"),
     )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     project_key: Mapped[str] = mapped_column(ForeignKey("project.key"), index=True)
     title: Mapped[str] = mapped_column(String(500))
     body: Mapped[str] = mapped_column(Text, default="", server_default="")
-    # The state set is configuration (design section 3), so no CHECK here.
+    # The stage: the bottom lane the card belongs to (AB-52). The set is
+    # configuration (design section 3), so no CHECK here.
     state: Mapped[str] = mapped_column(String(32), default="backlog", server_default="backlog")
+    # ready, processing or on-hold; null when the card is not in the queue.
+    queue: Mapped[str | None] = mapped_column(String(32))
+    # A five-field cron expression, and when it is next due.
+    schedule: Mapped[str | None] = mapped_column(String(200))
+    # The IANA zone the schedule is read in (AB-54 owns its behaviour).
+    schedule_tz: Mapped[str | None] = mapped_column(String(64))
+    next_run_at: Mapped[datetime | None] = mapped_column(Timestamp())
     rank: Mapped[int] = mapped_column(Integer)
     assignee: Mapped[str | None] = mapped_column(String(200))
     workflow_id: Mapped[int | None] = mapped_column(ForeignKey("workflow.id"))
@@ -259,6 +268,8 @@ class Event(Base):
     kind: Mapped[str] = mapped_column(String(32))
     from_state: Mapped[str | None] = mapped_column(String(32))
     to_state: Mapped[str | None] = mapped_column(String(32))
+    from_queue: Mapped[str | None] = mapped_column(String(32))
+    to_queue: Mapped[str | None] = mapped_column(String(32))
     note: Mapped[str | None] = mapped_column(Text)
     idempotency_key: Mapped[str | None] = mapped_column(String(200), unique=True)
     # SHA-256 of the call's arguments, beside a caller-supplied key: a request

@@ -33,7 +33,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 from board import store
-from board.core import BoardError, _event, new_bucket
+from board.core import LEGACY_SPLIT, BoardError, _event, new_bucket
 from board.store import Issue, Project
 
 DEFAULT_BACKLOG_PY = "/home/overlord/brain/backlog.py"
@@ -97,17 +97,18 @@ def _add_issue(s, backlog, it, key, rank, lines, now, actor, actor_kind):
     if state not in backlog.STATES or state not in LANES:
         raise BoardError(f"{it['id']} in {it['file']}: state {state!r} is not one of "
                          f"{backlog.STATES}")
+    stage, queue = LEGACY_SPLIT[LANES[state]]
     issue = Issue(id=it["id"], project_key=key, title=it["title"],
                   body=f"origin: {it['origin']}" if it["origin"] else "",
-                  state=LANES[state], rank=rank, created_at=now, updated_at=now)
+                  state=stage, queue=queue, rank=rank, created_at=now, updated_at=now)
     if state == "in-progress":
         issue.lease_holder = actor
         issue.lease_token = secrets.token_hex(16)
         issue.lease_expires_at = now - timedelta(seconds=1)
     s.add(issue)
     s.flush()
-    _event(s, issue.id, now, actor, actor_kind, "create", None, LANES[state],
-           f"imported from backlog/{it['file']}", None)
+    _event(s, issue.id, now, actor, actor_kind, "create", None, stage,
+           f"imported from backlog/{it['file']}", None, None, queue)
     for note in _notes(backlog, lines, it):
         _event(s, issue.id, now, actor, actor_kind, "annotate", None, None, note, None)
 

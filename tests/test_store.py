@@ -125,7 +125,7 @@ def test_0003_renames_stored_states_and_downgrade_restores_them(engine):
             "INSERT INTO event (issue_id, at, actor, actor_kind, kind) "
             "VALUES ('MS-0', :now, 'a', 'human', 'annotate')"), {"now": now()})
 
-    store.upgrade(engine)
+    store.upgrade(engine, "0003")
     assert _stored_states(engine) == (NEW_STATES, [(s, s) for s in NEW_STATES] + [(None, None)])
 
     store.downgrade(engine, "0002")
@@ -428,3 +428,70 @@ def test_0009_adds_the_artifact_name_and_downgrade_drops_only_it(engine):
     cols = {c["name"] for c in inspect(engine).get_columns("artifact")}
     assert "name" not in cols and "ref" in cols
     assert "colour_bucket" in {c["name"] for c in inspect(engine).get_columns("project")}
+
+
+# Plan section 3: each old state becomes a stage and a queue status (AB-52).
+STAGE_QUEUE = {
+    "backlog": ("backlog", None),
+    "ready": ("implement", "ready"),
+    "processing": ("implement", "processing"),
+    "need-input": ("implement", None),
+    "onhold": ("implement", "on-hold"),
+    "done": ("done", None),
+    "cancelled": ("cancelled", None),
+}
+
+
+def _stage_queue_rows(engine):
+    with engine.connect() as conn:
+        issues = conn.execute(text("SELECT state, queue FROM issue ORDER BY rank")).all()
+        events = conn.execute(text(
+            "SELECT from_state, from_queue, to_state, to_queue FROM event ORDER BY id")).all()
+    return [tuple(i) for i in issues], [tuple(e) for e in events]
+
+
+def test_0010_splits_state_into_stage_and_queue_and_downgrade_restores_it(engine):
+    store.upgrade(engine, "0009")
+    old = list(STAGE_QUEUE)
+    with engine.begin() as conn:
+        conn.execute(text("INSERT INTO project (key, name, next_number) VALUES ('MS', 'm', 1)"))
+        for n, state in enumerate(old):
+            conn.execute(text(
+                "INSERT INTO issue (id, project_key, title, body, state, rank, version, "
+                "created_at, updated_at) VALUES (:id, 'MS', 't', '', :state, :rank, 1, "
+                ":now, :now)"), {"id": f"MS-{n}", "state": state, "rank": n, "now": now()})
+            conn.execute(text(
+                "INSERT INTO event (issue_id, at, actor, actor_kind, kind, from_state, to_state) "
+                "VALUES (:id, :now, 'a', 'human', 'transition', :state, :state)"),
+                {"id": f"MS-{n}", "state": state, "now": now()})
+        conn.execute(text(
+            "INSERT INTO event (issue_id, at, actor, actor_kind, kind) "
+            "VALUES ('MS-0', :now, 'a', 'human', 'annotate')"), {"now": now()})
+
+    store.upgrade(engine)
+    issues, events = _stage_queue_rows(engine)
+    assert issues == [STAGE_QUEUE[s] for s in old]
+    assert events == [STAGE_QUEUE[s] * 2 for s in old] + [(None, None, None, None)]
+    cols = {c["name"] for c in inspect(engine).get_columns("issue")}
+    assert {"queue", "schedule", "schedule_tz", "next_run_at"} <= cols
+    assert "ix_issue_queue_rank" in {i["name"] for i in inspect(engine).get_indexes("issue")}
+
+    store.downgrade(engine, "0009")
+    assert _stored_states(engine) == (old, [(s, s) for s in old] + [(None, None)])
+    cols = {c["name"] for c in inspect(engine).get_columns("issue")}
+    assert not {"queue", "schedule", "schedule_tz", "next_run_at"} & cols
+    assert "from_queue" not in {c["name"] for c in inspect(engine).get_columns("event")}
+
+
+def test_0010_downgrade_folds_a_planning_card_by_its_queue(engine):
+    # Planning has no old state, so a downgrade reads it as implement.
+    store.upgrade(engine)
+    with engine.begin() as conn:
+        conn.execute(text("INSERT INTO project (key, name, next_number) VALUES ('MS', 'm', 1)"))
+        for n, queue in enumerate(["ready", "processing", "on-hold", None]):
+            conn.execute(text(
+                "INSERT INTO issue (id, project_key, title, body, state, queue, rank, version, "
+                "created_at, updated_at) VALUES (:id, 'MS', 't', '', 'planning', :q, :rank, 1, "
+                ":now, :now)"), {"id": f"MS-{n}", "q": queue, "rank": n, "now": now()})
+    store.downgrade(engine, "0009")
+    assert _stored_states(engine)[0] == ["ready", "processing", "onhold", "need-input"]

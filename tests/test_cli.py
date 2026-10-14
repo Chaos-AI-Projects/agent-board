@@ -443,3 +443,61 @@ def test_ab24_an_agent_reopens_a_done_card_without_a_token(url):
     out = ok(board(url, "transition", issue_id, "ready", "--note", "regressed"))
     assert out["state"] == "ready"
     assert claim(url, actor="worker-2")["issue"]["id"] == issue_id
+
+
+# --- AB-52: stage and queue -------------------------------------------------
+
+
+def test_ab52_create_takes_a_stage_and_queues_a_work_stage(url):
+    out = ok(board(url, "create", "--project", "MS", "--title", "p", "--stage", "planning"))
+    assert (out["stage"], out["queue"], out["state"]) == ("planning", "ready", "ready")
+    out = ok(board(url, "create", "--project", "MS", "--title", "b", "--stage", "backlog"))
+    assert (out["stage"], out["queue"]) == ("backlog", None)
+
+
+def test_ab52_create_refuses_a_queue_outside_a_work_stage(url):
+    proc = board(url, "create", "--project", "MS", "--title", "b", "--stage", "backlog",
+                 "--queue", "ready")
+    assert proc.returncode == 1
+    assert json.loads(proc.stderr)["error"] == "InvalidTransition"
+
+
+def test_ab52_move_sets_the_stage_under_the_lease(url):
+    ready(url)
+    out = claim(url)
+    issue_id, token = out["issue"]["id"], out["lease_token"]
+    out = ok(board(url, "move", issue_id, "planning", "--token", token))
+    assert (out["stage"], out["queue"]) == ("planning", "ready")
+    assert out["lease_holder"] is None
+
+
+def test_ab52_move_into_done_needs_a_note(url):
+    ready(url)
+    out = claim(url)
+    issue_id, token = out["issue"]["id"], out["lease_token"]
+    proc = board(url, "move", issue_id, "done", "--token", token)
+    assert proc.returncode == 1
+    assert json.loads(proc.stderr)["error"] == "NoteRequired"
+    out = ok(board(url, "move", issue_id, "done", "--token", token, "--note", "abc123"))
+    assert (out["stage"], out["queue"], out["state"]) == ("done", None, "done")
+
+
+def test_ab52_queue_holds_and_releases_a_claimed_card(url):
+    ready(url)
+    out = claim(url)
+    issue_id, token = out["issue"]["id"], out["lease_token"]
+    out = ok(board(url, "queue", issue_id, "on-hold", "--token", token, "--note", "wait"))
+    assert (out["stage"], out["queue"], out["state"]) == ("implement", "on-hold", "onhold")
+
+
+def test_ab52_queue_empty_takes_a_claimed_card_out_of_the_queue(url):
+    ready(url)
+    out = claim(url)
+    issue_id, token = out["issue"]["id"], out["lease_token"]
+    out = ok(board(url, "queue", issue_id, "none", "--token", token, "--note", "a question"))
+    assert (out["stage"], out["queue"], out["state"]) == ("implement", None, "need-input")
+
+
+def test_ab52_queue_refuses_processing_as_a_usage_error(url):
+    issue_id = ready(url)
+    assert board(url, "queue", issue_id, "processing").returncode == 2

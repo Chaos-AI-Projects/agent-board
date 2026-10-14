@@ -73,7 +73,7 @@ def test_the_tools_are_the_cli_operations(migrated, monkeypatch):
     names = {t.name for t in list_tools(migrated)}
     assert names == {"next", "show", "transition", "annotate", "link", "create",
                      "instantiate", "heartbeat", "plan", "depend", "undepend",
-                     "create_batch", "search", "projects"}
+                     "create_batch", "search", "projects", "move", "queue"}
 
 
 def test_next_claims_as_the_server_actor_and_returns_the_token(migrated):
@@ -378,3 +378,51 @@ def test_ab24_an_agent_reopens_a_done_card_without_a_token(migrated):
     out = ok(migrated, "transition", id=issue_id, state="ready", note="regressed")
     assert out["state"] == "ready"
     assert out["events"][-1]["actor"] == WORKER
+
+
+# --- AB-52: stage and queue -------------------------------------------------
+
+
+def test_ab52_move_sets_the_stage_under_the_lease(migrated):
+    issue_id, token = claimed(board(migrated))
+    out = ok(migrated, "move", id=issue_id, stage="planning", token=token)
+    assert (out["stage"], out["queue"]) == ("planning", "ready")
+
+
+def test_ab52_move_into_done_without_a_note_is_code_1(migrated):
+    issue_id, token = claimed(board(migrated))
+    out = failed(migrated, "move", id=issue_id, stage="done", token=token)
+    assert (out["error"], out["code"]) == ("NoteRequired", 1)
+
+
+def test_ab52_queue_on_hold_and_out_of_the_queue(migrated):
+    issue_id, token = claimed(board(migrated))
+    out = ok(migrated, "queue", id=issue_id, status=None, token=token, note="a question")
+    assert (out["stage"], out["queue"], out["state"]) == ("implement", None, "need-input")
+
+
+def test_ab52_queue_refuses_processing(migrated):
+    issue_id, token = claimed(board(migrated))
+    out = failed(migrated, "queue", id=issue_id, status="processing", token=token)
+    assert out["error"] == "InvalidTransition"
+
+
+def test_ab52_create_takes_a_stage(migrated):
+    board(migrated)
+    out = ok(migrated, "create", project="MS", title="p", stage="planning")
+    assert (out["stage"], out["queue"]) == ("planning", "ready")
+
+
+def test_ab52_create_batch_items_take_a_stage(migrated):
+    board(migrated)
+    out = ok(migrated, "create_batch", items=[
+        {"project": "MS", "title": "a", "stage": "backlog"},
+        {"project": "MS", "title": "b", "stage": "planning"}])
+    a, b = (core.show(migrated, i) for i in out["ids"])
+    assert (a["stage"], a["queue"], b["stage"], b["queue"]) == (
+        "backlog", None, "planning", "ready")
+
+
+def test_ab52_transition_is_marked_obsolete(migrated):
+    tools = {t.name: t for t in list_tools(board(migrated))}
+    assert tools["transition"].description.startswith("OBSOLETE")
