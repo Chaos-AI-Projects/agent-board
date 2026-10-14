@@ -44,7 +44,7 @@ def ok(proc):
 
 def ready(url, title="item"):
     return ok(board(url, "--actor-kind", "human", "create", "--project", "MS",
-                    "--title", title, "--state", "ready", actor=CHAOS))["id"]
+                    "--title", title, "--stage", "implement", actor=CHAOS))["id"]
 
 
 def claim(url, actor="worker-1"):
@@ -88,10 +88,10 @@ def test_heartbeat_by_a_non_holder_exits_4(url):
     assert proc.returncode == 4
 
 
-def test_a_human_transition_under_a_live_lease_exits_5(url):
+def test_a_human_queue_change_under_a_live_lease_exits_5(url):
     issue_id = ready(url)
     claim(url)
-    proc = board(url, "--actor-kind", "human", "transition", issue_id, "ready",
+    proc = board(url, "--actor-kind", "human", "queue", issue_id, "on-hold",
                  actor=CHAOS)
     assert proc.returncode == 5
     assert json.loads(proc.stderr)["error"] == "LeaseHeld"
@@ -145,7 +145,7 @@ def test_an_item_worked_to_done_through_the_cli(url):
     ok(board(url, "annotate", issue_id, "--note", "halfway", "--token", token))
     ok(board(url, "link", issue_id, "--artifact", "abc123", "--kind", "commit",
              "--closes", "--token", token))
-    done = ok(board(url, "transition", issue_id, "done", "--note", "shipped",
+    done = ok(board(url, "move", issue_id, "done", "--note", "shipped",
                     "--token", token))
     assert done["state"] == "done"
     assert done["closed_by_artifact"] is True
@@ -156,7 +156,7 @@ def test_an_item_worked_to_done_through_the_cli(url):
 def test_done_without_a_note_is_refused(url):
     issue_id = ready(url)
     token = claim(url)["lease_token"]
-    proc = board(url, "transition", issue_id, "done", "--token", token)
+    proc = board(url, "move", issue_id, "done", "--token", token)
     assert proc.returncode == 1
     assert json.loads(proc.stderr)["error"] == "NoteRequired"
 
@@ -198,7 +198,7 @@ def test_a_request_id_replays_the_first_call(url):
     issue_id = ready(url)
     token = claim(url)["lease_token"]
     for _ in range(2):
-        ok(board(url, "transition", issue_id, "need-input", "--note", "waiting",
+        ok(board(url, "queue", issue_id, "none", "--note", "waiting",
                  "--token", token, "--request-id", "t1"))
     assert [e["kind"] for e in events(url, issue_id)].count("transition") == 1
 
@@ -436,11 +436,11 @@ def test_create_batch_rejects_malformed_json_as_code_1(url):
 def test_ab24_an_agent_reopens_a_done_card_without_a_token(url):
     issue_id = ready(url)
     token = claim(url)["lease_token"]
-    ok(board(url, "transition", issue_id, "done", "--note", "merged", "--token", token))
-    refused = board(url, "transition", issue_id, "ready")
+    ok(board(url, "move", issue_id, "done", "--note", "merged", "--token", token))
+    refused = board(url, "move", issue_id, "implement")
     assert refused.returncode != 0
     assert json.loads(refused.stderr)["error"] == "NoteRequired"
-    out = ok(board(url, "transition", issue_id, "ready", "--note", "regressed"))
+    out = ok(board(url, "move", issue_id, "implement", "--note", "regressed"))
     assert out["state"] == "ready"
     assert claim(url, actor="worker-2")["issue"]["id"] == issue_id
 
@@ -506,12 +506,12 @@ def test_ab52_queue_refuses_processing_as_a_usage_error(url):
 def test_create_takes_a_schedule_read_in_board_timezone_by_default(url):
     env_tz = {"BOARD_TIMEZONE": "Australia/Sydney"}
     proc = board_env(url, env_tz, "--actor-kind", "human", "create", "--project", "MS",
-                     "--title", "nightly", "--state", "ready", "--schedule", "0 9 * * *",
+                     "--title", "nightly", "--stage", "implement", "--schedule", "0 9 * * *",
                      actor=CHAOS)
     issue = ok(proc)
     assert (issue["schedule"], issue["schedule_tz"]) == ("0 9 * * *", "Australia/Sydney")
     utc = ok(board(url, "--actor-kind", "human", "create", "--project", "MS",
-                   "--title", "x", "--state", "ready", "--schedule", "0 9 * * *",
+                   "--title", "x", "--stage", "implement", "--schedule", "0 9 * * *",
                    actor=CHAOS))
     assert utc["schedule_tz"] == "UTC"
     assert board(url, "next").returncode == 3
@@ -535,3 +535,19 @@ def board_env(url, extra, *args, actor="worker-1"):
     env.update(extra, **{store.DATABASE_URL_ENV: url, "BOARD_ACTOR": actor})
     return subprocess.run([sys.executable, "-m", "board.cli", *args],
                           capture_output=True, text=True, env=env, timeout=60)
+
+
+# --- AB-55: the transition shim is gone ------------------------------------------
+
+
+def test_ab55_transition_is_no_longer_a_command(url):
+    proc = board(url, "transition", "MS-1", "ready")
+    assert proc.returncode == 2
+    assert "invalid choice" in proc.stderr
+
+
+def test_ab55_create_takes_no_state(url):
+    proc = board(url, "create", "--project", "MS", "--title", "t", "--state", "ready")
+    assert proc.returncode == 2
+    out = ok(board(url, "create", "--project", "MS", "--title", "t"))
+    assert (out["stage"], out["queue"]) == ("backlog", None)

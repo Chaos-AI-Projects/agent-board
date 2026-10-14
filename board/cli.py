@@ -97,16 +97,6 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--assignee")
     sp.add_argument("--creator", help="the actor who created the issue")
 
-    sp = op("transition", help="OBSOLETE, use move and queue: set an old state name; "
-                               "an agent closes its own card, and one it left at "
-                               "need-input needs no lease; done reopens to ready with a "
-                               "--note, no lease needed")
-    sp.add_argument("id")
-    sp.add_argument("state")
-    sp.add_argument("--note")
-    sp.add_argument("--preempt", action="store_true")
-    writes(sp)
-
     sp = op("move", help="set the stage; planning and implement queue the card as ready, "
                          "done needs a --note, done reopens with a --note and no lease")
     sp.add_argument("id")
@@ -140,9 +130,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--project", required=True)
     sp.add_argument("--title", required=True)
     sp.add_argument("--body", default="")
-    sp.add_argument("--state", default="backlog", choices=sorted(core.CREATE_STATES),
-                    help="OBSOLETE, use --stage; ignored when --stage is given")
-    sp.add_argument("--stage", choices=sorted(core.CREATE_STAGES),
+    sp.add_argument("--stage", default="backlog", choices=sorted(core.CREATE_STAGES),
                     help="planning and implement start queued as ready")
     sp.add_argument("--queue", choices=["ready"],
                     help="only ready, and only for planning or implement")
@@ -223,9 +211,6 @@ def _run(engine, a) -> dict | None:
         case "search":
             return {"issues": core.search(engine, q=a.q, project=a.project, label=a.label,
                                           assignee=a.assignee, creator=a.creator)}
-        case "transition":
-            return core.transition(engine, a.id, a.state, note=a.note, token=a.token,
-                                   request_id=a.request_id, preempt=a.preempt, **who)
         case "move":
             return core.move(engine, a.id, a.stage, note=a.note, token=a.token,
                              request_id=a.request_id, preempt=a.preempt, **who)
@@ -240,7 +225,7 @@ def _run(engine, a) -> dict | None:
             return core.link(engine, a.id, a.artifact, kind=a.kind, closes=a.closes,
                              name=a.name, token=a.token, request_id=a.request_id, **who)
         case "create":
-            return core.create(engine, a.project, a.title, body=a.body, state=a.state,
+            return core.create(engine, a.project, a.title, body=a.body,
                                stage=a.stage, queue=a.queue, rank=a.rank, labels=a.label, workflow_id=a.workflow_id,
                                position=a.position, request_id=a.request_id,
                                schedule=a.schedule, timezone=_zone(a.schedule, a.timezone),

@@ -18,7 +18,7 @@ MCP in `board.oauth` and `board.remote`.
 
 ## Operations
 
-`board.core` holds `next`, `show`, `search`, `transition`, `annotate`, `link`, `create`,
+`board.core` holds `next`, `show`, `search`, `move`, `queue`, `annotate`, `link`, `create`,
 `instantiate`, `create_batch`, `plan`, `depend`, `undepend`, `heartbeat` and `edit`. Each is one transaction, returns a plain dict, and appends at least one event,
 except `heartbeat`, which only moves a lease expiry, and an `edit` whose form changed nothing.
 `plan` breaks an issue into a workflow of `ready` steps the caller lists. The issue goes `onhold`
@@ -33,7 +33,7 @@ reading JSON from FILE or `-` for stdin.
 An issue has at most one plan, and a step cannot be planned.
 `next` returns `None` on an empty queue. Lease failures raise `LeaseLost` (the CLI's exit 4) and
 conflicts raise `Conflict` (exit 5), including `LeaseHeld` when `edit` meets someone else's lease
-without `preempt=True`. Only a human or the system edits; an agent works through `transition`,
+without `preempt=True`. Only a human or the system edits; an agent works through `queue`,
 `annotate` and `link` under its lease.
 
 A `request_id` names one call. Repeating the call replays it and returns the issue as it is now,
@@ -69,7 +69,7 @@ board migrate
 claim=$(board next) || exit        # exit 3 ends the run on an empty queue
 id=$(jq -r .issue.id <<<"$claim"); token=$(jq -r .lease_token <<<"$claim")
 board annotate "$id" --note "checkpoint" --token "$token"
-board transition "$id" need-input --note "PR #600, please review" --token "$token"
+board queue "$id" none --note "PR #600, please review" --token "$token"
 ```
 
 Without `--request-id`, a write under a lease gets the derived key from design section 8, so an
@@ -252,7 +252,7 @@ back to `ready`. A note never needs the lease.
 ## MCP server
 
 `board-mcp` serves the CLI's operations as MCP tools over stdio, for an agent working in a
-conversation. `board-web` serves the same tools remotely, as described under Remote MCP below. The tools are `next`, `show`, `transition`, `annotate`, `link`, `create`, `instantiate`,
+conversation. `board-web` serves the same tools remotely, as described under Remote MCP below. The tools are `next`, `show`, `move`, `queue`, `annotate`, `link`, `create`, `schedule`, `instantiate`,
 `create_batch`, `plan`, `depend`, `undepend`, `heartbeat` and `search`, with the CLI's names and arguments. `migrate`,
 `create-project` and `edit` are left out. `projects` lists every project's key, name and issue count; it has no CLI
 counterpart, and it is how an agent learns the keys `create` needs.

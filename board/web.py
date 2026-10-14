@@ -1336,7 +1336,7 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
             files = await save_uploads(f)
             issue = core.create(engine, project, f.get("title", ""), actor=me.email,
                                 actor_kind=me.kind, body=f.get("body", ""),
-                                state=f.get("state") or "backlog", stage=f.get("stage") or None,
+                                stage=f.get("stage") or "backlog",
                                 rank=_form_int(f.get("rank")),
                                 labels=_form_labels(f.get("labels")) or (), attachments=files)
         except BaseException:
@@ -1505,15 +1505,15 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         """Send a done card back to ready, the note its required reason (AB-24)."""
         me = await run_in_threadpool(actor, request)
         f = await request.form()
-        core.transition(engine, issue_id, "ready", note=(f.get("note") or "").strip() or None,
-                        actor=me.email, actor_kind=me.kind)
+        core.move(engine, issue_id, "implement", note=(f.get("note") or "").strip() or None,
+                  actor=me.email, actor_kind=me.kind)
         return back(issue_id, request)
 
     @app.post("/issues/{issue_id}/release")
     def release(request: Request, issue_id: str):
         """Hand a card back to the queue. Refused under someone else's lease."""
         me = actor(request)
-        core.transition(engine, issue_id, "ready", actor=me.email, actor_kind=me.kind)
+        core.queue(engine, issue_id, "ready", actor=me.email, actor_kind=me.kind)
         return back(issue_id, request)
 
     return app

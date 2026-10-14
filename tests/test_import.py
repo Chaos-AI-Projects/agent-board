@@ -120,7 +120,7 @@ def test_parity_holds_after_an_earlier_open_item_is_made_ready(tmp_path):
     url = imported(tmp_path, root)
     subprocess.run([sys.executable, str(BACKLOG_PY), "set-state", "MS-3", "ready",
                     "--root", str(root)], check=True, capture_output=True, timeout=60)
-    moved = board(url, "--actor-kind", "human", "transition", "MS-3", "ready")
+    moved = board(url, "--actor-kind", "human", "move", "MS-3", "implement")
     assert moved.returncode == 0, moved.stderr
     assert board_next(url) == backlog_next(root) == (0, "MS-3")
 

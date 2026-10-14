@@ -71,7 +71,7 @@ def claimed(engine):
 def test_the_tools_are_the_cli_operations(migrated, monkeypatch):
     monkeypatch.delenv(BRAIN_DIR_ENV, raising=False)
     names = {t.name for t in list_tools(migrated)}
-    assert names == {"next", "show", "transition", "annotate", "link", "create",
+    assert names == {"next", "show", "annotate", "link", "create",
                      "instantiate", "heartbeat", "plan", "depend", "undepend",
                      "create_batch", "search", "projects", "move", "queue", "schedule"}
 
@@ -97,11 +97,10 @@ def test_show_returns_the_issue_and_its_events(migrated):
     assert [e["kind"] for e in out["events"]][0] == "create"
 
 
-def test_transition_under_the_lease_token(migrated):
+def test_queue_under_the_lease_token(migrated):
     issue_id, token = claimed(board(migrated))
-    out = ok(migrated, "transition", id=issue_id, state="need-input", note="PR #600",
-             token=token)
-    assert out["state"] == "need-input"
+    out = ok(migrated, "queue", id=issue_id, status=None, note="PR #600", token=token)
+    assert (out["stage"], out["queue"]) == ("implement", None)
     assert core.show(migrated, issue_id)["events"][-1]["actor"] == WORKER
 
 
@@ -372,10 +371,10 @@ def test_brain_read_outside_the_named_directories_is_code_1(tmp_path):
 
 def test_ab24_an_agent_reopens_a_done_card_without_a_token(migrated):
     issue_id, token = claimed(board(migrated))
-    ok(migrated, "transition", id=issue_id, state="done", note="merged", token=token)
-    err = failed(migrated, "transition", id=issue_id, state="ready")
+    ok(migrated, "move", id=issue_id, stage="done", note="merged", token=token)
+    err = failed(migrated, "move", id=issue_id, stage="implement")
     assert err["error"] == "NoteRequired"
-    out = ok(migrated, "transition", id=issue_id, state="ready", note="regressed")
+    out = ok(migrated, "move", id=issue_id, stage="implement", note="regressed")
     assert out["state"] == "ready"
     assert out["events"][-1]["actor"] == WORKER
 
@@ -423,18 +422,13 @@ def test_ab52_create_batch_items_take_a_stage(migrated):
         "backlog", None, "planning", "ready")
 
 
-def test_ab52_transition_is_marked_obsolete(migrated):
-    tools = {t.name: t for t in list_tools(board(migrated))}
-    assert tools["transition"].description.startswith("OBSOLETE")
-
-
 def test_create_and_schedule_take_a_timezone(migrated, monkeypatch):
     core.create_project(migrated, "MS", "memory-solution")
     monkeypatch.delenv("BOARD_TIMEZONE", raising=False)
     issue = ok(migrated, "create", actor=CHAOS, project="MS", title="nightly",
-               state="ready", schedule="0 9 * * *")
+               stage="implement", schedule="0 9 * * *")
     assert issue["schedule_tz"] == "UTC"
-    sydney = ok(migrated, "create", actor=CHAOS, project="MS", title="x", state="ready",
+    sydney = ok(migrated, "create", actor=CHAOS, project="MS", title="x", stage="implement",
                 schedule="0 9 * * *", timezone="Australia/Sydney")
     assert sydney["schedule_tz"] == "Australia/Sydney"
     is_error, payload = call(migrated, "create", actor=CHAOS, project="MS", title="y",
@@ -451,3 +445,37 @@ def test_schedule_sets_and_clears_under_the_lease(migrated, monkeypatch):
     assert (got["schedule"], got["schedule_tz"]) == ("0 9 * * *", "Australia/Sydney")
     got = ok(migrated, "schedule", id=issue_id, schedule=None, token=token)
     assert (got["schedule"], got["schedule_tz"], got["next_run_at"]) == (None, None, None)
+
+
+def test_ab55_transition_and_create_state_are_gone(migrated):
+    tools = {t.name: t for t in list_tools(board(migrated))}
+    assert "transition" not in tools
+    assert "state" not in tools["create"].inputSchema["properties"]
+    out = ok(migrated, "create", actor=CHAOS, project="MS", title="t")
+    assert (out["stage"], out["queue"]) == ("backlog", None)
+    is_error, payload = call(migrated, "create_batch", items=[
+        {"project": "MS", "title": "a", "state": "ready"}])
+    assert is_error and "stage" in payload["message"]
+
+
+def raw_call(engine, tool, **arguments):
+    """One tool call; returns (is_error, text), for errors that are SDK text."""
+
+    async def run():
+        async with create_connected_server_and_client_session(
+                build_server(engine, WORKER)) as client:
+            result = await client.call_tool(tool, arguments)
+        return result.isError, result.content[0].text
+
+    return anyio.run(run)
+
+
+def test_ab55_every_tool_refuses_an_unknown_argument(migrated):
+    # FastMCP drops an unknown argument by default, so a stale state=ready
+    # made an unqueued backlog card that looked like success.
+    board(migrated)
+    is_error, text = raw_call(migrated, "create", project="MS", title="t", state="ready")
+    assert is_error and "state" in text
+    assert core.search(migrated, project="MS") == []
+    is_error, text = raw_call(migrated, "next", projekt="MS")
+    assert is_error and "projekt" in text

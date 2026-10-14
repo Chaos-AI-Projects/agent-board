@@ -609,10 +609,10 @@ def test_the_actor_on_every_event_comes_from_the_access_header(board, client):
 
 def test_create_goes_through_core(board, client):
     r = client.post("/issues", data={"project": "MS", "title": "new card", "body": "b",
-                                     "state": "ready"}, headers=AS_CHAOS)
+                                     "stage": "implement"}, headers=AS_CHAOS)
     assert r.status_code == 303
     issue = core.show(board, "MS-1")
-    assert (issue["title"], issue["state"]) == ("new card", "ready")
+    assert (issue["title"], issue["stage"], issue["queue"]) == ("new card", "implement", "ready")
 
 
 def new_issue_project_select(html):
@@ -680,7 +680,7 @@ def test_ab28_a_refused_new_project_saves_nothing(board, client, fields, says):
 def test_ab28_a_refused_issue_removes_the_project_it_made(board, client):
     r = client.post("/issues", data={"project": web.NEW_PROJECT, "new_project_key": "NP",
                                      "new_project_name": "x", "title": "orphan",
-                                     "state": "done"}, headers=AS_CHAOS)
+                                     "stage": "done"}, headers=AS_CHAOS)
     assert r.status_code == 422
     assert core.search(board, q="orphan") == []
     assert [p["key"] for p in core.projects(board)] == ["MS"]
@@ -4488,3 +4488,22 @@ def test_ab54_a_date_that_never_comes_is_refused_on_the_page(board, client):
                     data=schedule_form(core.show(board, iid), cron="0 9 31 2 *", timezone="UTC"))
     assert r.status_code == 422
     assert core.show(board, iid)["schedule"] is None
+
+
+def test_ab55_reopen_and_release_do_not_use_the_transition_shim(board, client, monkeypatch):
+    def gone(*a, **kw):
+        raise AssertionError("the web calls the obsolete transition shim")
+    done = finished_card(board)
+    monkeypatch.setattr(core, "transition", gone)
+    iid = ready(board)
+    core.next(board, "run-2")
+    issue = core.show(board, iid)
+    client.post(f"/issues/{iid}/edit", data=edit_form(issue, preempt="1"), headers=AS_CHAOS)
+    assert client.post(f"/issues/{iid}/release", headers=AS_CHAOS).status_code == 303
+    issue = core.show(board, iid)
+    assert (issue["stage"], issue["queue"], issue["lease_holder"]) == ("implement", "ready", None)
+    r = client.post(f"/issues/{done}/reopen", data={"note": "regressed"}, headers=AS_CHAOS)
+    assert r.status_code == 303
+    issue = core.show(board, done)
+    assert (issue["stage"], issue["queue"], issue["events"][-1]["note"]) == (
+        "implement", "ready", "regressed")

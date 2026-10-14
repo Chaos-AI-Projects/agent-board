@@ -990,7 +990,9 @@ def _batch_item(i, it):
     if not isinstance(labels, list) or not all(isinstance(l, str) and l.strip()
                                                for l in labels):
         raise BoardError(f"item {i}: labels are a list of non-blank strings")
-    where = list(_create_where(f"item {i}: an issue", it.get("state") or "ready",
+    if "state" in it:
+        raise BoardError(f"item {i}: state is gone (AB-55); give a stage")
+    where = list(_create_where(f"item {i}: an issue", "ready",
                                it.get("stage"), it.get("queue")))
     ref = it.get("ref")
     if ref is not None and (not isinstance(ref, str) or not ref):
@@ -1224,12 +1226,12 @@ def edit(engine, issue_id: str, *, actor: str, expected_version: int,
     `expected_version` is the version the form was rendered from. Saving a
     form that changes nothing writes nothing and returns the issue. Only a
     human or the system edits; an agent works under its lease through
-    `transition`, `annotate` and `link`. A human save that changes a
+    `queue`, `annotate` and `link`. A human save that changes a
     need-input card with no `state` sends it back to ready (AB-10).
     """
     if actor_kind == "agent":
         raise BoardError(f"{issue_id}: an agent cannot edit; it changes an issue under "
-                         "its lease through transition, annotate or link")
+                         "its lease through queue, annotate or link")
 
     request_id = _scoped("edit", issue_id, request_id)
 

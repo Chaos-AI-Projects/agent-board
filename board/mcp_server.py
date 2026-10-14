@@ -132,21 +132,6 @@ def build_server(engine, actor: str | Callable[[], str], brain=_FROM_ENV,
         return run(lambda: {"projects": core.projects(engine)})
 
     @mcp.tool()
-    def transition(id: str, state: str, token: str | None = None, note: str | None = None,
-                   request_id: str | None = None, preempt: bool = False) -> CallToolResult:
-        """OBSOLETE: use `move` for the stage and `queue` for the queue status.
-
-        Move an issue to an old state name. `need-input` needs a note, and so
-        does an agent's `done`; a human may close without one.
-
-        An agent closes its own card as `done`. A card it left at `need-input`
-        it may still move to `done` or `cancelled` without a lease. A `done`
-        card reopens to `ready` with a note giving the reason, no lease needed.
-        """
-        return run(core.transition, engine, id, state, note=note, token=token,
-                   request_id=request_id, preempt=preempt, **who())
-
-    @mcp.tool()
     def move(id: str, stage: str, token: str | None = None, note: str | None = None,
              request_id: str | None = None, preempt: bool = False) -> CallToolResult:
         """Set an issue's stage: backlog, planning, implement, done or cancelled.
@@ -186,20 +171,19 @@ def build_server(engine, actor: str | Callable[[], str], brain=_FROM_ENV,
                    token=token, request_id=request_id, **who())
 
     @mcp.tool()
-    def create(project: str, title: str, body: str = "", state: str = "backlog",
+    def create(project: str, title: str, body: str = "", stage: str = "backlog",
                rank: int | None = None, labels: list[str] | None = None,
                workflow_id: int | None = None, position: int | None = None,
-               request_id: str | None = None, stage: str | None = None,
+               request_id: str | None = None,
                queue: str | None = None, schedule: str | None = None,
                timezone: str | None = None) -> CallToolResult:
         """A new issue in `stage`: backlog, planning or implement.
 
-        Planning and implement start queued as ready. Without a stage, the
-        obsolete `state` decides: `backlog`, or `ready` for implement.
+        Planning and implement start queued as ready.
         `schedule` is five cron fields read in `timezone`, which defaults to
         $BOARD_TIMEZONE, else UTC; `next` skips the card until each due time.
         """
-        return run(core.create, engine, project, title, body=body, state=state, stage=stage,
+        return run(core.create, engine, project, title, body=body, stage=stage,
                    queue=queue, rank=rank,
                    labels=labels or [], workflow_id=workflow_id, position=position,
                    request_id=request_id, schedule=schedule,
@@ -243,8 +227,7 @@ def build_server(engine, actor: str | Callable[[], str], brain=_FROM_ENV,
         """Create several issues together, all or nothing.
 
         Each item is {"project", "title", "body"?, "stage"? (backlog, planning
-        or implement; default implement, queued ready), "state"? (obsolete),
-        "rank"?, "labels"?, "ref"?, "after"?}. `after` lists what the item
+        or implement; default implement, queued ready), "rank"?, "labels"?, "ref"?, "after"?}. `after` lists what the item
         waits on: another item by 0-based index or by its `ref`, or an
         existing issue id. With workflow_title the items become a new
         workflow in list order. In a workflow, one `after` on any item
@@ -277,7 +260,22 @@ def build_server(engine, actor: str | Callable[[], str], brain=_FROM_ENV,
 
     if brain is not None:
         _brain_tools(mcp, brain, run)
+    _refuse_unknown_arguments(mcp)
     return mcp
+
+
+def _refuse_unknown_arguments(mcp: FastMCP) -> None:
+    """Make every tool's argument model refuse a name it does not declare.
+
+    FastMCP's models ignore extras, so a caller still sending a removed
+    argument, such as create's old `state`, got a success that silently
+    did something else (AB-55). Each tool has its own generated model, so
+    changing its config touches nothing shared.
+    """
+    for tool in mcp._tool_manager.list_tools():
+        model = tool.fn_metadata.arg_model
+        model.model_config["extra"] = "forbid"
+        model.model_rebuild(force=True)
 
 
 def _brain_tools(mcp: FastMCP, brain: Brain, run) -> None:
