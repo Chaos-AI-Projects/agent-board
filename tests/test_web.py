@@ -57,10 +57,22 @@ def ready(engine, title="item", **kw):
                        state="ready", **kw)["id"]
 
 
+def idea(engine, title="idea", project="MS", **kw):
+    """A backlog card: out of the queue, so it sits in a stage lane (AB-53)."""
+    return core.create(engine, project, title, actor=CHAOS, actor_kind=HUMAN, **kw)["id"]
+
+
 def card(html, issue_id):
     """The markup of one card on the board page."""
     m = re.search(rf'<article[^>]*data-id="{issue_id}"[^>]*>.*?</article>', html, re.S)
     assert m, f"no card for {issue_id}"
+    return m.group(0)
+
+
+def strip(html):
+    """The top queue strip's markup."""
+    m = re.search(r'<section class="queue-strip"[^>]*>.*?</section>', html, re.S)
+    assert m, "no queue strip"
     return m.group(0)
 
 
@@ -84,30 +96,32 @@ def note_form(issue, note="", **fields):
 # --- the board page -------------------------------------------------------------
 
 
-def test_the_board_is_kanban_by_lifecycle_state(board, client):
+def test_the_board_is_kanban_by_stage_under_a_queue_strip(board, client):
     a = ready(board, "a ready one")
     b = core.create(board, "MS", "an open one", actor=CHAOS, actor_kind=HUMAN)["id"]
     html = client.get("/").text
-    for state in core.TRANSITIONS:
-        column(html, state)
-    assert f'data-id="{a}"' in column(html, "ready")
+    for stage in core.STAGES:
+        column(html, stage)
+    assert f'data-id="{a}"' in strip(html)
     assert f'data-id="{b}"' in column(html, "backlog")
 
 
-def test_the_columns_are_the_seven_lanes_in_order(board, client):
+def test_the_columns_are_the_five_stage_lanes_in_order(board, client):
     html = client.get("/").text
     shown = re.findall(r'<section[^>]*data-state="([^"]+)"', html)
-    assert shown == ["backlog", "ready", "need-input", "processing", "onhold", "done",
-                     "cancelled"]
+    assert shown == ["backlog", "planning", "implement", "done", "cancelled"]
 
 
 def test_every_column_carries_its_lane_hint_on_hover_only(board, client):
     html = client.get("/").text
-    for state, hint in core.LANE_HINTS.items():
-        col = unescape(column(html, state))
-        assert re.search(rf'<h2 title="{re.escape(hint)}"', col), state
+    for stage, hint in core.STAGE_HINTS.items():
+        col = unescape(column(html, stage))
+        assert re.search(rf'<h2 title="{re.escape(hint)}"', col), stage
         # AB-33: the hint lives only in the header's tooltip now.
-        assert 'class="lane-hint"' not in col, state
+        assert 'class="lane-hint"' not in col, stage
+    top = unescape(strip(html))
+    assert re.search(rf'<h2 title="{re.escape(core.QUEUE_HINT)}"', top)
+    assert 'class="lane-hint"' not in top
 
 
 def test_ms660_the_issue_page_explains_its_state_and_each_option(board, client):
@@ -150,14 +164,37 @@ def wf_card(html, wf_id):
     return m.group(0)
 
 
-def test_a_workflow_is_one_card_in_the_column_its_state_picks(board, client):
+def queue_group(html, q):
+    """One queue status's group in the top strip (AB-53)."""
+    m = re.search(rf'<div class="queue-group" data-queue="{q}".*?(?=<div class="queue-group"|</section>)',
+                  strip(html), re.S)
+    assert m, f"no queue group for {q}"
+    return m.group(0)
+
+
+def park(engine, wf):
+    """Move every step of a workflow to backlog, so the workflow leaves the queue."""
+    for step in wf["steps"]:
+        core.move(engine, step["id"], "backlog", actor=CHAOS, actor_kind=HUMAN)
+    return wf
+
+
+def test_a_workflow_is_one_card_in_the_place_its_state_picks(board, client):
     wf = release(board)
+    marker = f'data-workflow="{wf["id"]}"'
     html = client.get("/").text
-    assert wf_card(column(html, "ready"), wf["id"])
+    assert wf_card(queue_group(html, "ready"), wf["id"])
+    assert html.count(marker) == 1
     core.next(board, "w1")
     html = client.get("/").text
-    assert f'data-workflow="{wf["id"]}"' not in column(html, "ready")
-    assert wf_card(column(html, "processing"), wf["id"])
+    assert marker not in queue_group(html, "ready")
+    assert wf_card(queue_group(html, "processing"), wf["id"])
+    assert html.count(marker) == 1
+    parked = park(board, core.instantiate(board, "release", "MS", actor=CHAOS,
+                                          actor_kind=HUMAN))
+    html = client.get("/").text
+    assert wf_card(column(html, "backlog"), parked["id"])
+    assert f'data-workflow="{parked["id"]}"' not in strip(html)
 
 
 def test_a_workflow_card_shows_its_title_step_count_and_current_step(board, client):
@@ -179,11 +216,11 @@ def test_workflow_steps_are_not_loose_cards_on_the_board(board, client):
 def test_a_workflow_card_shares_the_list_but_does_not_drag(board, client):
     # AB-17 put workflow and loose cards in one sorted list per date group;
     # Sortable's filter keeps the workflow card from being picked up.
-    wf = release(board)
-    loose = ready(board, "a loose one")
+    wf = park(board, release(board))
+    loose = idea(board, "a loose one")
     html = client.get("/").text
     group = re.search(r'<div class="cards"[^>]*>.*?</div>\s*</section>',
-                      column(html, "ready"), re.S).group(0)
+                      column(html, "backlog"), re.S).group(0)
     assert f'data-id="{loose}"' in group and f'data-workflow="{wf["id"]}"' in group
     assert 'filter: ".workflow-card"' in html
 
@@ -1087,7 +1124,7 @@ def test_markdown_from_an_agent_is_sanitised(board, client, hostile):
 def test_each_card_carries_the_columns_it_may_move_to(board, client):
     iid = core.create(board, "MS", "an open one", actor=CHAOS, actor_kind=HUMAN)["id"]
     m = re.search(r'data-moves="([^"]*)"', card(client.get("/").text, iid))
-    assert m and set(m.group(1).split()) == core.TRANSITIONS["backlog"]
+    assert m and set(m.group(1).split()) == core.STAGE_MOVES["backlog"]
 
 
 def test_a_markdown_image_does_not_fetch_a_third_party_url(board, client):
@@ -1236,39 +1273,39 @@ def two_projects(board):
 def test_without_a_cookie_the_board_shows_every_project_and_lane(client, board):
     ms, br = two_projects(board)
     html = client.get("/").text
-    assert lanes(html) == list(core.TRANSITIONS)
+    assert lanes(html) == list(core.STAGES)
     assert f'data-id="{ms}"' in html and f'data-id="{br}"' in html
 
 
 def test_saving_preferences_sets_a_lax_year_long_cookie(client, board):
     two_projects(board)
-    r = client.post("/preferences", data={"project": ["BR"], "lane": ["ready", "done"]})
+    r = client.post("/preferences", data={"project": ["BR"], "lane": ["implement", "done"]})
     assert r.status_code == 303 and r.headers["location"] == "/"
     cookie = r.headers["set-cookie"]
     assert cookie.startswith(f"{web.PREFS_COOKIE}=")
     assert "samesite=lax" in cookie.lower()
     assert "max-age=31536000" in cookie.lower()
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
-        "projects": ["BR"], "lanes": ["ready", "done"], "timezone": "",
+        "projects": ["BR"], "lanes": ["implement", "done"], "timezone": "",
         "hide_old_done": False, "mine": False}
 
 
 def test_the_board_shows_only_the_saved_projects_and_lanes(client, board):
     ms, br = two_projects(board)
-    client.post("/preferences", data={"project": ["BR"], "lane": ["done", "ready"]})
+    client.post("/preferences", data={"project": ["BR"], "lane": ["done", "implement"]})
     html = client.get("/").text
     # Lanes keep board order, whatever order the form sent them in.
-    assert lanes(html) == ["ready", "done"]
+    assert lanes(html) == ["implement", "done"]
     assert f'data-id="{br}"' in html and f'data-id="{ms}"' not in html
 
 
 def test_the_preferences_form_shows_the_saved_choices(client, board):
     two_projects(board)
-    client.post("/preferences", data={"project": ["BR"], "lane": ["ready"]})
+    client.post("/preferences", data={"project": ["BR"], "lane": ["implement"]})
     html = client.get("/preferences").text
     assert re.search(r'<input type="checkbox" name="project" value="BR" checked>', html)
     assert re.search(r'<input type="checkbox" name="project" value="MS">', html)
-    assert re.search(r'<input type="checkbox" name="lane" value="ready" checked>', html)
+    assert re.search(r'<input type="checkbox" name="lane" value="implement" checked>', html)
     assert re.search(r'<input type="checkbox" name="lane" value="done">', html)
 
 
@@ -1277,25 +1314,26 @@ def test_without_a_cookie_the_form_checks_everything(client, board):
     html = client.get("/preferences").text
     boxes = re.findall(r'<input type="checkbox" name="(?:project|lane)" value="[^"]+"( checked)?>',
                        html)
-    assert len(boxes) == 2 + len(core.TRANSITIONS) and all(boxes)
+    assert len(boxes) == 2 + len(core.STAGES) and all(boxes)
 
 
 def test_unknown_keys_projects_and_lanes_in_the_cookie_are_ignored(client, board):
     ms, br = two_projects(board)
     client.cookies.set(web.PREFS_COOKIE, json.dumps(
-        {"lanes": ["ready", "bogus"], "projects": ["MS", "ZZ"], "theme": "dark"}))
+        {"lanes": ["implement", "bogus"], "projects": ["MS", "ZZ"],
+         "theme": "dark"}))
     html = client.get("/").text
-    assert lanes(html) == ["ready"]
+    assert lanes(html) == ["implement"]
     assert f'data-id="{ms}"' in html and f'data-id="{br}"' not in html
 
 
-@pytest.mark.parametrize("value", ["not json", "[1, 2]", '{"lanes": "ready"}',
+@pytest.mark.parametrize("value", ["not json", "[1, 2]", '{"lanes": "implement"}',
                                    '{"lanes": ["bogus"], "projects": []}'])
 def test_a_cookie_that_names_nothing_usable_shows_everything(client, board, value):
     ms, br = two_projects(board)
     client.cookies.set(web.PREFS_COOKIE, value)
     html = client.get("/").text
-    assert lanes(html) == list(core.TRANSITIONS)
+    assert lanes(html) == list(core.STAGES)
     assert f'data-id="{ms}"' in html and f'data-id="{br}"' in html
 
 
@@ -1303,15 +1341,15 @@ def test_a_workflow_card_follows_the_project_of_its_steps(client, board):
     core.create_project(board, "BR", "brain")
     wf = release(board)
     marker = f'data-workflow="{wf["id"]}"'
-    client.post("/preferences", data={"project": ["BR"], "lane": list(core.TRANSITIONS)})
+    client.post("/preferences", data={"project": ["BR"], "lane": list(core.STAGES)})
     assert marker not in client.get("/").text
-    client.post("/preferences", data={"project": ["MS"], "lane": list(core.TRANSITIONS)})
+    client.post("/preferences", data={"project": ["MS"], "lane": list(core.STAGES)})
     assert marker in client.get("/").text
 
 
 def test_ticking_every_project_tracks_projects_created_later(client, board):
     two_projects(board)
-    client.post("/preferences", data={"project": ["BR", "MS"], "lane": ["ready"]})
+    client.post("/preferences", data={"project": ["BR", "MS"], "lane": ["implement"]})
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE))["projects"] == []
     core.create_project(board, "XX", "later")
     later = core.create(board, "XX", "new", actor=CHAOS, actor_kind=HUMAN,
@@ -1322,14 +1360,14 @@ def test_ticking_every_project_tracks_projects_created_later(client, board):
 def test_saving_keeps_only_known_projects_and_lanes(client, board):
     two_projects(board)
     client.post("/preferences", data={"project": ["BR", "ZZ"] * 300,
-                                      "lane": ["done", "bogus", "ready"]})
+                                      "lane": ["done", "bogus", "ready", "implement"]})
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
-        "projects": ["BR"], "lanes": ["ready", "done"], "timezone": "",
+        "projects": ["BR"], "lanes": ["implement", "done"], "timezone": "",
         "hide_old_done": False, "mine": False}
 
 
 def test_preferences_are_a_same_origin_post_only(client, board):
-    r = client.post("/preferences", data={"lane": ["ready"]},
+    r = client.post("/preferences", data={"lane": ["implement"]},
                     headers={"origin": "https://evil.example"})
     assert r.status_code == 403
 
@@ -1399,13 +1437,13 @@ def test_the_banner_writes_the_same_cookie_as_the_preferences_page(client, board
 
 def test_a_banner_save_keeps_the_saved_lanes_and_timezone(client, board):
     two_projects(board)
-    client.post("/preferences", data={"project": ["MS"], "lane": ["done", "ready"],
+    client.post("/preferences", data={"project": ["MS"], "lane": ["done", "implement"],
                                       "timezone": "Asia/Tokyo"})
     client.post("/preferences/projects", data={"project": ["BR"]})
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
-        "projects": ["BR"], "lanes": ["ready", "done"], "timezone": "Asia/Tokyo",
+        "projects": ["BR"], "lanes": ["implement", "done"], "timezone": "Asia/Tokyo",
         "hide_old_done": False, "mine": False}
-    assert lanes(client.get("/").text) == ["ready", "done"]
+    assert lanes(client.get("/").text) == ["implement", "done"]
 
 
 def test_a_banner_save_of_every_project_saves_all(client, board):
@@ -1440,9 +1478,9 @@ def test_the_banner_save_is_a_same_origin_post_only(client, board):
 def test_the_preferences_page_still_saves_every_key(client, board):
     two_projects(board)
     client.post("/preferences/projects", data={"project": ["BR"]})
-    client.post("/preferences", data={"project": ["MS"], "lane": ["ready"]})
+    client.post("/preferences", data={"project": ["MS"], "lane": ["implement"]})
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
-        "projects": ["MS"], "lanes": ["ready"], "timezone": "", "hide_old_done": False, "mine": False}
+        "projects": ["MS"], "lanes": ["implement"], "timezone": "", "hide_old_done": False, "mine": False}
 
 
 # --- the banner is "View", right of the toggles (MS-653) -------------------------
@@ -1486,7 +1524,7 @@ def test_the_view_panel_holds_the_project_form_and_show_buttons(client, board):
 # --- a hide control on each swim lane (MS-651) ---------------------------------
 
 
-ALL_LANES = list(core.TRANSITIONS)
+ALL_LANES = list(core.STAGES)
 
 
 def hide_buttons(html):
@@ -1506,9 +1544,9 @@ def test_every_lane_heading_has_a_hide_control(client, board):
 
 
 def test_hiding_a_lane_removes_exactly_that_lane_in_order(client, board):
-    r = client.post("/preferences/lanes/hide", data={"lane": "processing"})
+    r = client.post("/preferences/lanes/hide", data={"lane": "planning"})
     assert r.status_code == 303 and r.headers["location"] == "/"
-    rest = [s for s in ALL_LANES if s != "processing"]
+    rest = [s for s in ALL_LANES if s != "planning"]
     assert saved_lanes(client) == rest
     assert lanes(client.get("/").text) == rest
     client.post("/preferences/lanes/hide", data={"lane": "backlog"})
@@ -1533,33 +1571,33 @@ def test_no_hidden_lanes_leaves_the_summary_and_show_buttons_out(client, board):
 
 
 def test_showing_a_lane_restores_it_in_board_order(client, board):
-    client.post("/preferences", data={"lane": ["done", "ready"]})
+    client.post("/preferences", data={"lane": ["done", "implement"]})
     r = client.post("/preferences/lanes/show", data={"lane": "backlog"})
     assert r.status_code == 303 and r.headers["location"] == "/"
-    assert lanes(client.get("/").text) == ["backlog", "ready", "done"]
+    assert lanes(client.get("/").text) == ["backlog", "implement", "done"]
 
 
 def test_showing_the_last_hidden_lane_saves_all(client, board):
-    client.post("/preferences/lanes/hide", data={"lane": "onhold"})
-    client.post("/preferences/lanes/show", data={"lane": "onhold"})
+    client.post("/preferences/lanes/hide", data={"lane": "planning"})
+    client.post("/preferences/lanes/show", data={"lane": "planning"})
     assert saved_lanes(client) == []
     assert lanes(client.get("/").text) == ALL_LANES
 
 
 def test_hiding_down_to_one_lane_leaves_no_hide_button(client, board):
-    client.post("/preferences", data={"lane": ["ready", "done"]})
-    assert hide_buttons(client.get("/").text) == ["ready", "done"]
+    client.post("/preferences", data={"lane": ["implement", "done"]})
+    assert hide_buttons(client.get("/").text) == ["implement", "done"]
     client.post("/preferences/lanes/hide", data={"lane": "done"})
     html = client.get("/").text
-    assert lanes(html) == ["ready"]
+    assert lanes(html) == ["implement"]
     assert hide_buttons(html) == []
 
 
 def test_hiding_the_last_visible_lane_is_refused(client, board):
-    client.post("/preferences", data={"lane": ["ready"]})
-    r = client.post("/preferences/lanes/hide", data={"lane": "ready"})
+    client.post("/preferences", data={"lane": ["implement"]})
+    r = client.post("/preferences/lanes/hide", data={"lane": "implement"})
     assert r.status_code == 422 and "set-cookie" not in r.headers
-    assert saved_lanes(client) == ["ready"]
+    assert saved_lanes(client) == ["implement"]
 
 
 def test_a_lane_save_keeps_projects_and_timezone(client, board):
@@ -1576,7 +1614,7 @@ def test_a_lane_save_keeps_projects_and_timezone(client, board):
 
 
 @pytest.mark.parametrize("action", ["hide", "show"])
-@pytest.mark.parametrize("sent", [{}, {"lane": "nonsense"}])
+@pytest.mark.parametrize("sent", [{}, {"lane": "nonsense"}, {"lane": "need-input"}])
 def test_an_unknown_lane_is_refused(client, board, action, sent):
     client.post("/preferences/lanes/hide", data={"lane": "done"})
     r = client.post(f"/preferences/lanes/{action}", data=sent)
@@ -1597,7 +1635,7 @@ def test_the_hide_control_sits_outside_the_drag_lists(client, board):
     for cards in re.findall(r'<div class="cards"[^>]*>.*?</div>', html, re.S):
         assert "/preferences/lanes/hide" not in cards
     # Every remaining lane still carries a drop list after a hide.
-    client.post("/preferences/lanes/hide", data={"lane": "onhold"})
+    assert client.post("/preferences/lanes/hide", data={"lane": "planning"}).status_code == 303
     html = client.get("/").text
     drops = re.findall(r'<div class="cards" data-state="([^"]+)">', html)
     assert drops == lanes(html)
@@ -2717,7 +2755,7 @@ def test_ab4_the_board_stamp_ignores_what_this_board_does_not_show(board, client
     ms, br = two_projects(board)
     hid = core.create(board, "MS", "in backlog", actor=CHAOS, actor_kind=HUMAN,
                       state="backlog")["id"]
-    client.cookies.set(web.PREFS_COOKIE, json.dumps({"projects": ["MS"], "lanes": ["ready"]}))
+    client.cookies.set(web.PREFS_COOKIE, json.dumps({"projects": ["MS"], "lanes": ["implement"]}))
     before = board_stamp(client)
     core.annotate(board, ms, "a note is not on a card", actor=CHAOS, actor_kind=HUMAN)
     core.edit(board, br, actor=CHAOS, expected_version=core.show(board, br)["version"],
@@ -3003,12 +3041,16 @@ def test_ab13_hiding_with_nothing_old_shows_no_count(board, client):
 
 
 def test_ab13_only_the_done_lane_is_touched(board, client):
-    stale = ready(board, "stale ready")
+    stale = idea(board, "stale backlog")
+    queued = ready(board, "stale ready")
     age(board, stale, 60)
+    age(board, queued, 60)
     client.post("/preferences/done/hide")
     html = client.get("/").text
-    assert f'data-id="{stale}"' in column(html, "ready")
-    assert 'class="old-done"' not in column(html, "ready")
+    assert f'data-id="{stale}"' in column(html, "backlog")
+    assert 'class="old-done"' not in column(html, "backlog")
+    assert f'data-id="{queued}"' in strip(html)
+    assert 'class="old-done"' not in strip(html)
 
 
 def test_ab13_a_finished_workflow_is_hidden_by_its_last_steps_finish(board, client):
@@ -3033,8 +3075,8 @@ def test_ab13_other_saves_keep_the_choice(board, client):
     core.create_project(board, "BR", "brain")
     client.post("/preferences/done/hide")
     client.post("/preferences/projects", data={"project": ["MS"]})
-    client.post("/preferences/lanes/hide", data={"lane": "onhold"})
-    client.post("/preferences", data={"project": ["MS", "BR"], "lane": ["ready", "done"]})
+    client.post("/preferences/lanes/hide", data={"lane": "planning"})
+    client.post("/preferences", data={"project": ["MS", "BR"], "lane": ["implement", "done"]})
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE))["hide_old_done"] is True
 
 
@@ -3110,51 +3152,50 @@ def date_groups(html, state):
 
 
 def test_ab17_a_lane_shows_its_cards_under_date_headings_newest_first(board, client):
-    old, week, today = ready(board, "old"), ready(board, "week"), ready(board, "today")
+    old, week, today = idea(board, "old"), idea(board, "week"), idea(board, "today")
     touched(board, old, 20)
     touched(board, week, 5)
-    assert date_groups(client.get("/").text, "ready") == [
+    assert date_groups(client.get("/").text, "backlog") == [
         ("Today (1)", [today]), ("1 week (1)", [week]), ("2 weeks and above (1)", [old])]
 
 
 def test_ab17_inside_a_group_cards_sort_by_project_not_rank(board, client):
     core.create_project(board, "BR", "brain")
     core.create_project(board, "AB", "agent-board")
-    ms = ready(board, "ms", rank=1)
-    br = core.create(board, "BR", "br", actor=CHAOS, actor_kind=HUMAN, state="ready",
-                     rank=2)["id"]
-    ab = core.create(board, "AB", "ab", actor=CHAOS, actor_kind=HUMAN, state="ready",
-                     rank=3)["id"]
-    ms2 = ready(board, "ms again", rank=0)
+    ms = idea(board, "ms", rank=1)
+    br = idea(board, "br", "BR", rank=2)
+    ab = idea(board, "ab", "AB", rank=3)
+    ms2 = idea(board, "ms again", rank=0)
     # Drag order is ignored: inside a project the ids run in number order.
-    assert date_groups(client.get("/").text, "ready") == [("Today (4)", [ab, br, ms, ms2])]
+    assert date_groups(client.get("/").text, "backlog") == [("Today (4)", [ab, br, ms, ms2])]
 
 
 def test_ab17_ids_sort_by_number_not_text(board, client):
-    ids = [ready(board, f"n{n}") for n in range(10)]
-    assert date_groups(client.get("/").text, "ready") == [("Today (10)", ids)]
+    ids = [idea(board, f"n{n}") for n in range(10)]
+    assert date_groups(client.get("/").text, "backlog") == [("Today (10)", ids)]
 
 
 def test_ab17_an_empty_lane_has_no_headings_but_still_takes_a_drop(board, client):
+    idea(board)
     ready(board)
     html = client.get("/").text
-    assert date_groups(html, "onhold") == []
-    assert '<div class="cards" data-state="onhold">' in column(html, "onhold")
+    assert date_groups(html, "planning") == []
+    assert '<div class="cards" data-state="planning">' in column(html, "planning")
 
 
 def test_ab17_a_workflow_card_is_dated_by_its_latest_step(board, client):
-    wf = release(board)
+    wf = park(board, release(board))
     for step in wf["steps"]:
         touched(board, step["id"], 30)
     touched(board, wf["steps"][1]["id"], 2)
-    groups = date_groups(client.get("/").text, "ready")
+    groups = date_groups(client.get("/").text, "backlog")
     assert groups == [("3 days (1)", [str(wf["id"])])]
 
 
 def test_ab17_the_groups_follow_the_saved_timezone(board, client):
     # A card one minute either side of UTC midnight, and a saved zone that puts
     # it on the other side of its own midnight, whatever the hour the test runs.
-    i = ready(board)
+    i = idea(board)
     with store.session(board) as s:
         now = store.db_now(s)
     midnight = now.astimezone(ZoneInfo("UTC")).replace(hour=0, minute=0, second=0,
@@ -3168,19 +3209,19 @@ def test_ab17_the_groups_follow_the_saved_timezone(board, client):
     with store.session(board) as s, s.begin():
         s.execute(store.Issue.__table__.update().where(store.Issue.id == i)
                   .values(updated_at=then))
-    assert date_groups(client.get("/").text, "ready") == [(f"{default} (1)", [i])]
+    assert date_groups(client.get("/").text, "backlog") == [(f"{default} (1)", [i])]
     client.cookies.set(web.PREFS_COOKIE, quote(json.dumps({"timezone": saved}), safe=""))
-    assert date_groups(client.get("/").text, "ready") == [(f"{mine} (1)", [i])]
+    assert date_groups(client.get("/").text, "backlog") == [(f"{mine} (1)", [i])]
 
 
 def test_ab17_workflow_and_loose_cards_sort_together_by_project(board, client):
     core.create_project(board, "AA", "first")
     core.create_project(board, "ZZ", "last")
-    wf = release(board)  # its steps are MS
-    aa = core.create(board, "AA", "aa", actor=CHAOS, actor_kind=HUMAN, state="ready")["id"]
-    zz = core.create(board, "ZZ", "zz", actor=CHAOS, actor_kind=HUMAN, state="ready")["id"]
-    ms = ready(board, "ms")
-    assert date_groups(client.get("/").text, "ready") == [
+    wf = park(board, release(board))  # its steps are MS
+    aa = idea(board, "aa", "AA")
+    zz = idea(board, "zz", "ZZ")
+    ms = idea(board, "ms")
+    assert date_groups(client.get("/").text, "backlog") == [
         ("Today (4)", [aa, str(wf["id"]), ms, zz])]
 
 
@@ -3188,14 +3229,14 @@ def test_ab17_a_workflow_sorts_by_its_tracked_project(board, client):
     core.create_project(board, "AA", "first")
     core.create_project(board, "BR", "brain")
     core.create_template(board, "mixed", "Mixed", ["a", "b"])
-    wf = core.instantiate(board, "mixed", "MS", actor=CHAOS, actor_kind=HUMAN)
+    wf = park(board, core.instantiate(board, "mixed", "MS", actor=CHAOS, actor_kind=HUMAN))
     with store.session(board) as s, s.begin():
         s.execute(store.Issue.__table__.update().where(store.Issue.id == wf["steps"][1]["id"])
                   .values(project_key="AA"))
-    br = core.create(board, "BR", "br", actor=CHAOS, actor_kind=HUMAN, state="ready")["id"]
+    br = idea(board, "br", "BR")
     client.post("/preferences/projects", data={"project": ["MS", "BR"]})
     # Its AA step is filtered out, so it sorts as MS, after BR.
-    assert date_groups(client.get("/").text, "ready") == [("Today (2)", [br, str(wf["id"])])]
+    assert date_groups(client.get("/").text, "backlog") == [("Today (2)", [br, str(wf["id"])])]
 
 
 def test_ab17_hidden_old_done_cards_stay_out_of_the_groups(board, client):
@@ -3811,8 +3852,8 @@ def test_ab42_other_saves_keep_the_choice(board, client):
     client.post("/preferences/mine/on", headers=AS_CHAOS)
     client.post("/preferences/done/hide")
     client.post("/preferences/projects", data={"project": ["MS"]})
-    client.post("/preferences/lanes/hide", data={"lane": "onhold"})
-    client.post("/preferences", data={"project": ["MS", "BR"], "lane": ["ready", "done"]})
+    client.post("/preferences/lanes/hide", data={"lane": "planning"})
+    client.post("/preferences", data={"project": ["MS", "BR"], "lane": ["implement", "done"]})
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE))["mine"] is True
 
 
@@ -4047,21 +4088,197 @@ def test_ab50_a_written_take_over_page_holds_the_auto_reload(board, client):
 # --- AB-52: the old layout over the new fields ------------------------------
 
 
-def test_ab52_the_old_lanes_hold_cards_by_their_new_stage_and_queue(board, client):
-    planning = core.create(board, "MS", "a plan", actor=CHAOS, actor_kind=HUMAN,
-                           stage="planning")["id"]
-    held = ready(board, "held")
-    core.queue(board, held, "on-hold", actor=CHAOS, actor_kind=HUMAN)
-    asked = ready(board, "asked")
-    core.queue(board, asked, "on-hold", actor=CHAOS, actor_kind=HUMAN)
-    core.queue(board, asked, None, actor=CHAOS, actor_kind=HUMAN, note="a question")
-    html = client.get("/").text
-    assert f'data-id="{planning}"' in column(html, "ready")
-    assert f'data-id="{held}"' in column(html, "onhold")
-    assert f'data-id="{asked}"' in column(html, "need-input")
-
-
 def test_ab52_the_issue_page_renders_a_planning_card(board, client):
     issue_id = core.create(board, "MS", "a plan", actor=CHAOS, actor_kind=HUMAN,
                            stage="planning")["id"]
     assert client.get(f"/issues/{issue_id}").status_code == 200
+
+
+# --- AB-53: the queue strip over five stage lanes ----------------------------
+
+
+def queued_and_waiting(board):
+    """One card of each kind the layout tells apart, by role."""
+    cards = {
+        "ready": ready(board, "ready"),
+        "planning": core.create(board, "MS", "a plan", actor=CHAOS, actor_kind=HUMAN,
+                                stage="planning")["id"],
+        "held": ready(board, "held"),
+        "waiting": ready(board, "waiting"),
+        "backlog": core.create(board, "MS", "an idea", actor=CHAOS, actor_kind=HUMAN)["id"],
+    }
+    core.queue(board, cards["held"], "on-hold", actor=CHAOS, actor_kind=HUMAN)
+    core.queue(board, cards["waiting"], "on-hold", actor=CHAOS, actor_kind=HUMAN)
+    core.queue(board, cards["waiting"], None, actor=CHAOS, actor_kind=HUMAN, note="a question")
+    return cards
+
+
+def test_ab53_the_lanes_are_the_five_stages_in_order(board, client):
+    assert lanes(client.get("/").text) == list(core.STAGES)
+
+
+def test_ab53_queued_cards_sit_in_the_strip_and_the_rest_in_their_stage(board, client):
+    cards = queued_and_waiting(board)
+    html = client.get("/").text
+    top = strip(html)
+    for role in ("ready", "planning", "held"):
+        assert f'data-id="{cards[role]}"' in top, role
+    assert f'data-id="{cards["waiting"]}"' not in top
+    assert f'data-id="{cards["waiting"]}"' in column(html, "implement")
+    assert f'data-id="{cards["backlog"]}"' in column(html, "backlog")
+    for stage in core.STAGES:
+        for role in ("ready", "planning", "held"):
+            assert f'data-id="{cards[role]}"' not in column(html, stage), (stage, role)
+
+
+def test_ab53_the_strip_groups_its_cards_by_queue_status(board, client):
+    cards = queued_and_waiting(board)
+    top = strip(client.get("/").text)
+    groups = re.findall(r'<div class="queue-group" data-queue="([^"]+)"', top)
+    assert groups == list(core.QUEUES)
+
+    def group(q):
+        return re.search(rf'data-queue="{q}".*?(?=<div class="queue-group"|</section>)',
+                         top, re.S).group(0)
+
+    assert f'data-id="{cards["ready"]}"' in group("ready")
+    assert f'data-id="{cards["planning"]}"' in group("ready")
+    assert f'data-id="{cards["held"]}"' in group("on-hold")
+
+
+def test_ab53_strip_cards_do_not_drag(board, client):
+    cards = queued_and_waiting(board)
+    html = client.get("/").text
+    top = strip(html)
+    # Sortable binds only `.kanban .cards`, and the strip holds neither.
+    assert 'class="cards"' not in top and 'class="kanban"' not in top
+    assert "data-moves" not in card(top, cards["ready"])
+    assert html.index('class="queue-strip"') < html.index('class="kanban"')
+
+
+def test_ab53_a_lane_card_offers_its_stage_moves(board, client):
+    cards = queued_and_waiting(board)
+    html = client.get("/").text
+    moves = re.search(r'data-moves="([^"]*)"', card(html, cards["backlog"])).group(1)
+    assert moves.split() == sorted(core.STAGE_MOVES["backlog"])
+    moves = re.search(r'data-moves="([^"]*)"', card(html, cards["waiting"])).group(1)
+    assert moves.split() == sorted(core.STAGE_MOVES["implement"])
+
+
+def test_ab53_every_lane_and_the_strip_carry_a_hint_on_hover(board, client):
+    html = client.get("/").text
+    for stage in core.STAGES:
+        hint = core.STAGE_HINTS[stage]
+        assert re.search(rf'<h2 title="{re.escape(hint)}"', unescape(column(html, stage))), stage
+    assert re.search(rf'<h2 title="{re.escape(core.QUEUE_HINT)}"', unescape(strip(html)))
+
+
+def test_ab53_a_drag_moves_the_stage_and_queues_a_work_stage(board, client):
+    issue = core.show(board, queued_and_waiting(board)["backlog"])
+    r = client.post(f"/issues/{issue['id']}/move",
+                    data={"version": issue["version"], "stage": "planning"}, headers=AS_CHAOS)
+    assert r.status_code == 200, r.text
+    after = core.show(board, issue["id"])
+    assert (after["stage"], after["queue"]) == ("planning", "ready")
+    assert r.json() == {"id": issue["id"], "stage": "planning", "queue": "ready",
+                        "version": after["version"]}
+
+
+def test_ab53_a_stale_drag_is_refused_and_moves_nothing(board, client):
+    issue = core.show(board, queued_and_waiting(board)["backlog"])
+    r = client.post(f"/issues/{issue['id']}/move",
+                    data={"version": issue["version"] - 1, "stage": "planning"}, headers=AS_CHAOS)
+    assert r.status_code == 409
+    assert core.show(board, issue["id"])["stage"] == "backlog"
+
+
+def test_ab53_a_drag_the_stage_rules_refuse_is_422(board, client):
+    issue = core.show(board, queued_and_waiting(board)["backlog"])
+    r = client.post(f"/issues/{issue['id']}/move",
+                    data={"version": issue["version"], "stage": "done"}, headers=AS_CHAOS)
+    assert r.status_code == 422 and "error" in r.json()
+    assert core.show(board, issue["id"])["stage"] == "backlog"
+
+
+def test_ab53_the_queue_button_shows_on_unqueued_work_cards_only(board, client):
+    cards = queued_and_waiting(board)
+    html = client.get("/").text
+    action = 'action="/issues/{}/queue"'
+    assert action.format(cards["waiting"]) in card(html, cards["waiting"])
+    for role in ("ready", "planning", "held", "backlog"):
+        assert "/queue" not in card(html, cards[role]), role
+
+
+def test_ab53_the_queue_button_queues_the_card_as_ready(board, client):
+    issue = core.show(board, queued_and_waiting(board)["waiting"])
+    r = client.post(f"/issues/{issue['id']}/queue", data={"version": issue["version"]}, headers=AS_CHAOS)
+    assert r.status_code == 303
+    after = core.show(board, issue["id"])
+    assert (after["stage"], after["queue"]) == ("implement", "ready")
+
+
+def test_ab53_a_stale_queue_button_is_refused(board, client):
+    issue = core.show(board, queued_and_waiting(board)["waiting"])
+    r = client.post(f"/issues/{issue['id']}/queue", data={"version": issue["version"] - 1}, headers=AS_CHAOS)
+    assert r.status_code == 409
+    assert core.show(board, issue["id"])["queue"] is None
+
+
+def test_ab53_a_cross_origin_queue_button_is_refused(board, client):
+    issue = core.show(board, queued_and_waiting(board)["waiting"])
+    r = client.post(f"/issues/{issue['id']}/queue", data={"version": issue["version"]},
+                    headers=AS_CHAOS | {"origin": "https://evil.example"})
+    assert r.status_code == 403
+    assert core.show(board, issue["id"])["queue"] is None
+
+
+def test_ab53_a_queued_card_shows_its_stage_badge(board, client):
+    cards = queued_and_waiting(board)
+    html = client.get("/").text
+    top = strip(html)
+    assert re.search(r'class="stage-badge[^"]*"[^>]*>planning<', card(top, cards["planning"]))
+    assert re.search(r'class="stage-badge[^"]*"[^>]*>implement<', card(top, cards["ready"]))
+    assert "stage-badge" not in card(html, cards["waiting"])
+
+
+def test_ab53_a_running_workflow_sits_in_the_strip(board, client):
+    wf = release(board)
+    html = client.get("/").text
+    assert f'data-workflow="{wf["id"]}"' in strip(html)
+    core.next(board, "w1")
+    assert f'data-workflow="{wf["id"]}"' in strip(client.get("/").text)
+
+
+def test_ab53_the_new_issue_form_picks_a_stage(board, client):
+    html = client.get("/").text
+    select = re.search(r'<select name="stage">(.*?)</select>', html, re.S).group(1)
+    assert re.findall(r"<option>([^<]+)</option>", select) == ["backlog", "planning",
+                                                                "implement"]
+    r = client.post("/issues", data={"project": "MS", "title": "planned", "stage": "planning"},
+                    headers=AS_CHAOS)
+    assert r.status_code == 303
+    made = core.search(board, q="planned")[0]
+    assert (made["stage"], made["queue"]) == ("planning", "ready")
+
+
+def test_ab53_a_stage_lane_hides_and_shows_again(board, client):
+    client.post("/preferences/lanes/hide", data={"lane": "backlog"}, headers=AS_CHAOS)
+    html = client.get("/").text
+    assert lanes(html) == [s for s in core.STAGES if s != "backlog"]
+    client.post("/preferences/lanes/show", data={"lane": "backlog"}, headers=AS_CHAOS)
+    assert lanes(client.get("/").text) == list(core.STAGES)
+
+
+def test_ab53_an_old_lane_cookie_falls_back_to_every_stage(board):
+    c = local_client(board)
+    c.cookies.set(web.PREFS_COOKIE, quote(json.dumps({"lanes": ["ready", "need-input"]})))
+    assert lanes(c.get("/").text) == list(core.STAGES)
+
+
+def test_ab53_a_mixed_old_lane_cookie_still_shows_every_stage(board):
+    # Hiding one lane before the deploy left old and new names side by side.
+    # Keeping only the new ones would drop planning and implement, hiding the cards there.
+    c = local_client(board)
+    old = ["backlog", "ready", "need-input", "onhold", "done", "cancelled"]
+    c.cookies.set(web.PREFS_COOKIE, quote(json.dumps({"lanes": old})))
+    assert lanes(c.get("/").text) == list(core.STAGES)

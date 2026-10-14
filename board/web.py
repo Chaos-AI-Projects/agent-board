@@ -405,7 +405,7 @@ def stamp(data) -> str:
     return hashlib.sha256(raw).hexdigest()[:16]
 
 
-_CARD_FIELDS = ("id", "title", "labels", "version", "project", "state",
+_CARD_FIELDS = ("id", "title", "labels", "version", "project", "state", "stage", "queue",
                 "lease_holder", "lease_expires_at")
 
 
@@ -427,7 +427,10 @@ def board_stamp(ctx: dict, buckets: dict) -> str:
                 "current": current and current["title"]}
 
     view = ctx["view"]
-    return stamp({"columns": [(state, [(name, [flow(c) if kind == "workflow" else card(c)
+    return stamp({"queues": [(q, [flow(c) if kind == "workflow" else card(c)
+                                  for kind, c in cards])
+                             for q, cards in ctx["queues"]],
+                  "columns": [(state, [(name, [flow(c) if kind == "workflow" else card(c)
                                                for kind, c in cards])
                                        for name, cards in groups])
                               for state, _, _, groups in ctx["columns"]],
@@ -829,6 +832,10 @@ def read_prefs(raw: str | None) -> dict:
     return prefs
 
 
+# The lanes a saved view could name before the stage lanes replaced them.
+OLD_LANES = frozenset(core.LEGACY_SPLIT) - frozenset(core.STAGES)
+
+
 def _chosen(saved: list[str], known: list[str]) -> list[str]:
     """The known values the user saved, in known order; all of them if none survive."""
     picked = [k for k in known if k in saved]
@@ -896,8 +903,10 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
                 "project_colour": lambda key: project_colour(key, buckets.get(key)),
                 "tz": zone(saved_tz) or default_tz, "inline_types": INLINE_TYPES,
                 "sign_in": google is not None,
-                "moves": lambda issue: sorted(core.TRANSITIONS[issue["state"]]),
-                "lane_hints": core.LANE_HINTS, "fetch_header": FETCH_HEADER, "stamp_poll_ms": STAMP_POLL_SECONDS * 1000, "embed_q": "?embed=1" if embedded(request) else ""}
+                "moves": lambda issue: sorted(core.STAGE_MOVES[issue["stage"]]),
+                "lane_hints": core.LANE_HINTS, "stage_hints": core.STAGE_HINTS,
+                "queue_hint": core.QUEUE_HINT,
+                "work_stages": core.WORK_STAGES, "fetch_header": FETCH_HEADER, "stamp_poll_ms": STAMP_POLL_SECONDS * 1000, "embed_q": "?embed=1" if embedded(request) else ""}
         r = templates.TemplateResponse(request, name, ctx, status_code=status)
         # The board frames its own issue pages (MS-662); nobody else may.
         r.headers["content-security-policy"] = "frame-ancestors 'self'"
@@ -1049,8 +1058,11 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
 
     def view_prefs(request, projects):
         saved = read_prefs(request.cookies.get(PREFS_COOKIE))
+        # An old lane name means the cookie predates the stage lanes. Filtering it would keep
+        # backlog/done/cancelled and drop planning and implement, so start afresh.
+        stale = any(lane in OLD_LANES for lane in saved["lanes"])
         return {"projects": _chosen(saved["projects"], [p["key"] for p in projects]),
-                "lanes": _chosen(saved["lanes"], list(core.TRANSITIONS)),
+                "lanes": list(core.STAGES) if stale else _chosen(saved["lanes"], list(core.STAGES)),
                 "timezone": saved["timezone"], "hide_old_done": saved["hide_old_done"],
                 "mine": saved["mine"]}
 
@@ -1107,13 +1119,21 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
             old_done = len(workflows) - len(kept_wf) + len(loose) - len(kept)
             workflows, loose = kept_wf, kept
         tz = zone(prefs["timezone"]) or default_tz
+        # AB-53: a queued card sits in the top strip under its queue status,
+        # any other in its stage's lane. A workflow is placed by its computed
+        # state, split as the old state names split.
+        for w in workflows:
+            w["stage"], w["queue"] = core.LEGACY_SPLIT[w["state"]]
+        queues = [(q, [("workflow", w) for w in workflows if w["queue"] == q]
+                   + [("issue", i) for i in loose if i["queue"] == q])
+                  for q in core.QUEUES]
         columns = []
-        for state in prefs["lanes"]:
-            wfs = [w for w in workflows if w["state"] == state]
-            issues = [i for i in loose if i["state"] == state]
-            columns.append((state, wfs, issues, lane_groups(wfs, issues, view["now"], tz)))
-        hidden = [s for s in core.TRANSITIONS if s not in prefs["lanes"]]
-        return {"view": view, "columns": columns, "now": view["now"],
+        for stage in prefs["lanes"]:
+            wfs = [w for w in workflows if w["stage"] == stage and w["queue"] is None]
+            issues = [i for i in loose if i["stage"] == stage and i["queue"] is None]
+            columns.append((stage, wfs, issues, lane_groups(wfs, issues, view["now"], tz)))
+        hidden = [s for s in core.STAGES if s not in prefs["lanes"]]
+        return {"view": view, "queues": queues, "columns": columns, "now": view["now"],
                 "lane_meta": core.lane_meta(engine), "done_cap": DONE_CAP,
                 "tracked": prefs["projects"], "hidden": hidden,
                 "hide_old_done": prefs["hide_old_done"], "old_done": old_done,
@@ -1150,14 +1170,14 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
     @app.get("/preferences", response_class=HTMLResponse)
     def preferences_page(request: Request):
         view = core.overview(engine)
-        return page(request, "preferences.html", view=view, lanes=list(core.TRANSITIONS),
+        return page(request, "preferences.html", view=view, lanes=list(core.STAGES),
                     prefs=view_prefs(request, view["projects"]), default_tz=default_tz)
 
     @app.post("/preferences")
     async def save_preferences(request: Request):
         f = await request.form()
         known = {"projects": [p["key"] for p in core.overview(engine)["projects"]],
-                 "lanes": list(core.TRANSITIONS)}
+                 "lanes": list(core.STAGES)}
         sent = {"projects": f.getlist("project"), "lanes": f.getlist("lane")}
         # Only known values are kept, in board order, so the cookie stays small.
         # Every box ticked is saved as [], which means all, so a project or lane
@@ -1193,7 +1213,7 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         if action not in ("hide", "show"):
             return error(request, 404, "No such lane action.")
         lane = (await request.form()).get("lane")
-        known = list(core.TRANSITIONS)
+        known = list(core.STAGES)
         if lane not in known:
             return error(request, 422, "No such lane.")
         prefs = read_prefs(request.cookies.get(PREFS_COOKIE))
@@ -1307,7 +1327,7 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
             files = await save_uploads(f)
             issue = core.create(engine, project, f.get("title", ""), actor=me.email,
                                 actor_kind=me.kind, body=f.get("body", ""),
-                                state=f.get("state") or "backlog",
+                                state=f.get("state") or "backlog", stage=f.get("stage") or None,
                                 rank=_form_int(f.get("rank")),
                                 labels=_form_labels(f.get("labels")) or (), attachments=files)
         except BaseException:
@@ -1366,17 +1386,42 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
 
     @app.post("/issues/{issue_id}/move")
     async def move(request: Request, issue_id: str):
-        """A drag between columns: a state change from the board, answered in JSON."""
+        """A drag between stage lanes (AB-53), answered in JSON.
+
+        A page loaded before AB-53 still posts an old state name; it goes
+        through `core.edit`'s shim, as it did then.
+        """
         me = await run_in_threadpool(actor, request)
         f = await request.form()
+        version = _form_int(f.get("version"))
         try:
-            issue = core.edit(engine, issue_id, actor=me.email, actor_kind=me.kind,
-                              expected_version=int(f.get("version", -1)),
-                              state=f.get("state"), note=f.get("note") or None)
+            if f.get("stage") is None:
+                issue = core.edit(engine, issue_id, actor=me.email, actor_kind=me.kind,
+                                  expected_version=-1 if version is None else version,
+                                  state=f.get("state"), note=f.get("note") or None)
+                return {"id": issue["id"], "state": issue["state"], "version": issue["version"]}
+            issue = core.move(engine, issue_id, f.get("stage"), actor=me.email,
+                              actor_kind=me.kind, note=f.get("note") or None,
+                              expected_version=-1 if version is None else version)
         except core.BoardError as exc:
             status = 409 if isinstance(exc, (core.Conflict, core.LeaseLost)) else 422
             return JSONResponse({"error": str(exc)}, status_code=status)
-        return {"id": issue["id"], "state": issue["state"], "version": issue["version"]}
+        return {"id": issue["id"], "stage": issue["stage"], "queue": issue["queue"],
+                "version": issue["version"]}
+
+    @app.post("/issues/{issue_id}/queue")
+    async def queue(request: Request, issue_id: str):
+        """The Queue button on a waiting planning or implement card (AB-53)."""
+        me = await run_in_threadpool(actor, request)
+        f = await request.form()
+        version = _form_int(f.get("version"))
+        try:
+            core.queue(engine, issue_id, "ready", actor=me.email, actor_kind=me.kind,
+                       expected_version=-1 if version is None else version)
+        except core.Conflict:
+            return error(request, 409, f"{issue_id} changed since you loaded it. "
+                         "Reload the board to see what changed.", issue_id)
+        return back(None, request)
 
     @app.post("/issues/{issue_id}/note")
     async def note(request: Request, issue_id: str):

@@ -3,9 +3,10 @@
 {%- set m = lane_meta[issue.id] if lane_meta is defined and issue.id in lane_meta else none -%}
 <article class="card{% if ls %} lease-{{ ls }}{% endif %}{% if extra %} done-extra{% endif %}" style="--proj-bg: {{ pc.bg }}; --proj-border: {{ pc.border }}"
          data-id="{{ issue.id }}" data-version="{{ issue.version }}"
-         data-href="/issues/{{ issue.id }}" data-moves="{{ moves(issue)|join(' ') }}">
-  <a href="/issues/{{ issue.id }}">{{ issue.id }}</a> {{ issue.title }}
+         data-href="/issues/{{ issue.id }}"{% if not queued %} data-moves="{{ moves(issue)|join(' ') }}"{% endif %}>
+  <a href="/issues/{{ issue.id }}">{{ issue.id }}</a> {{ issue.title }}{% if queued %} <span class="stage-badge stage-{{ issue.stage }}" title="Stage">{{ issue.stage }}</span>{% endif %}
   {% if issue.labels %}<div class="labels">{% for l in issue.labels %}<span>{{ l }}</span> {% endfor %}</div>{% endif %}
   {% if m %}<div class="card-meta"><span class="age" title="in {{ issue.state }} since {{ m.entered_at|localtime(tz) if tz is defined else m.entered_at }}">{{ lane_age(m.entered_at, now) }}</span>{% if m.pr and m.pr.startswith(("https://", "http://")) %} <a class="pr" href="{{ m.pr }}" target="_blank" rel="noopener" title="Pull request {{ m.pr }}">PR</a>{% endif %}{% for u in m.urls if u.ref.startswith(("https://", "http://")) %} <a class="url" href="{{ u.ref }}" target="_blank" rel="noopener" title="{{ u.ref }}">{{ u.name or u.ref|url_host }}</a>{% endfor %}</div>{% endif %}
+  {% if not queued and issue.stage in work_stages and issue.queue is none %}<form class="queue-form" autocomplete="off" method="post" action="/issues/{{ issue.id }}/queue"><input type="hidden" name="version" value="{{ issue.version }}"><button title="Send this card back to the queue as ready">Queue</button></form>{% endif %}
   {% include "_lease.html" %}
 </article>

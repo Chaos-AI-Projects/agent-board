@@ -88,6 +88,21 @@ QUEUE_MOVES: dict[str | None, set[str | None]] = {
     "on-hold": {None},
 }
 CREATE_STAGES = {"backlog", "planning", "implement"}
+# AB-53: the web board's hover text for each stage lane and the queue strip.
+STAGE_HINTS = {
+    "backlog": "Ideas nobody has asked for yet. Drag one to planning or implement to "
+               "queue it.",
+    "planning": "Cards to plan. Waiting here, out of the queue, means the plan is "
+                "written and waits for you: drag to implement to approve it.",
+    "implement": "Cards to build. Waiting here, out of the queue, means the agent "
+                 "has a question or finished work for you. Queue sends it back.",
+    "done": "Finished. An agent closes with a note such as a PR; you may close "
+            "without one. Dragging back to implement reopens it with a reason.",
+    "cancelled": "Dropped. Final.",
+}
+QUEUE_HINT = ("Queued planning and implement cards: ready waits for board next, "
+              "processing is held by an agent, on-hold is frozen. Not draggable; "
+              "change a queued card from its page.")
 READY = ("implement", "ready")
 # The old state names, as the `transition` shim and the `state` of a view
 # still read them until phase 4 (AB-55). Migration 0010 holds the same table.
@@ -596,12 +611,15 @@ def transition(engine, issue_id: str, state: str, *, actor: str, actor_kind: str
 
 def move(engine, issue_id: str, stage: str, *, actor: str, actor_kind: str,
          note: str | None = None, token: str | None = None,
-         request_id: str | None = None, preempt: bool = False) -> dict:
+         request_id: str | None = None, preempt: bool = False,
+         expected_version: int | None = None) -> dict:
     """Set an issue's stage (plan section 2, AB-52).
 
     Entering planning or implement queues the card as ready; any other stage
     takes it out of the queue. Moving to the stage it is in changes nothing.
     Reopening a done card needs a reason and no lease, as `transition` does.
+    `expected_version`, when given, is the version a web page showed; any
+    other raises `Conflict` (AB-53).
     """
     if stage not in STAGES:
         raise InvalidTransition(f"unknown stage {stage!r}")
@@ -612,16 +630,18 @@ def move(engine, issue_id: str, stage: str, *, actor: str, actor_kind: str,
         return stage, ("ready" if stage in WORK_STAGES else None)
 
     return _place_op(engine, "move", issue_id, place, [stage], actor, actor_kind, note,
-                     token, request_id, preempt)
+                     token, request_id, preempt, expected_version)
 
 
 def queue(engine, issue_id: str, status: str | None, *, actor: str, actor_kind: str,
           note: str | None = None, token: str | None = None,
-          request_id: str | None = None, preempt: bool = False) -> dict:
+          request_id: str | None = None, preempt: bool = False,
+          expected_version: int | None = None) -> dict:
     """Set an issue's queue status: ready, on-hold, or None (plan section 2, AB-52).
 
     Only `next` sets processing. Releasing a claimed card to None needs a
     note; the card then waits in its stage's lane, as need-input did.
+    `expected_version` works as in `move`.
     """
     status = status or None
     if status is not None and status not in QUEUES:
@@ -629,16 +649,20 @@ def queue(engine, issue_id: str, status: str | None, *, actor: str, actor_kind: 
     if status == "processing":
         raise InvalidTransition(f"{issue_id}: only board next sets processing")
     return _place_op(engine, "queue", issue_id, lambda issue: (issue.state, status),
-                     [status], actor, actor_kind, note, token, request_id, preempt)
+                     [status], actor, actor_kind, note, token, request_id, preempt,
+                     expected_version)
 
 
 def _place_op(engine, op, issue_id, place, args, actor, actor_kind, note, token,
-              request_id, preempt):
+              request_id, preempt, expected_version=None):
     key = (_scoped(op, issue_id, request_id)
            or _derive(actor, op, issue_id, token, *args, note))
 
     def body(s):
         issue = _get(s, issue_id, lock=True)
+        if expected_version is not None and issue.version != expected_version:
+            raise Conflict(f"{issue.id} is at version {issue.version}, "
+                           f"the page showed {expected_version}")
         now = store.db_now(s)
         stage, queue = place(issue)
         if actor_kind == "agent" and issue.lease_holder is None:
@@ -652,7 +676,7 @@ def _place_op(engine, op, issue_id, place, args, actor, actor_kind, note, token,
         return _view(s, issue)
 
     return _write(engine, key, body, _replay_view,
-                  [*args, note, actor, actor_kind, token, preempt])
+                  [*args, note, actor, actor_kind, token, preempt, expected_version])
 
 
 def annotate(engine, issue_id: str, note: str, *, actor: str, actor_kind: str,

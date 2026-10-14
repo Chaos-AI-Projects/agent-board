@@ -11,7 +11,7 @@
     </fieldset>
     <label>Title <input name="title" required size="60"></label>
     <label>Body <textarea name="body"></textarea></label>
-    <label>State <select name="state"><option>backlog</option><option>ready</option></select></label>
+    <label>Stage <select name="stage"><option>backlog</option><option>planning</option><option>implement</option></select></label>
     <label>Labels <input name="labels" placeholder="comma, separated"></label>
     <label>Files <input type="file" name="files" multiple></label>
     <button class="primary">Create</button> <button type="reset" class="cancel">Cancel</button>
@@ -44,10 +44,31 @@
   </div>
 </details>
 </div>
+{# AB-53: queued cards wait in one strip above the stage lanes. Nothing in it
+   drags: a queued card changes from its own page. #}
+<section class="queue-strip" aria-label="Queue">
+  <h2 title="{{ queue_hint }}">queue ({{ queues|map(attribute="1")|map("length")|sum }})</h2>
+  {% for q, cards in queues %}
+  <div class="queue-group" data-queue="{{ q }}">
+    <h3>{{ q }} ({{ cards|length }})</h3>
+    <div class="queue-cards">
+    {% for kind, item in cards %}
+    {% if kind == "workflow" %}{% set wf = item %}
+    {% if wf.project %}{% set pc = project_colour(wf.project) %}{% endif %}
+    <article class="card workflow-card" data-workflow="{{ wf.id }}" data-href="/issues/{{ wf.target }}"{% if wf.project %} style="--proj-bg: {{ pc.bg }}; --proj-border: {{ pc.border }}"{% endif %}>
+      <a href="/issues/{{ wf.target }}">{{ wf.title }}</a> <span class="stage-badge stage-{{ wf.stage }}" title="Stage">{{ wf.stage }}</span>
+      <div class="steps-summary">{{ wf.steps|length }} step{{ "" if wf.steps|length == 1 else "s" }}{% if wf.current %} &middot; current: {{ wf.current.title }}{% endif %}</div>
+    </article>
+    {% else %}{% set issue = item %}{% set queued = true %}{% include "_card.html" %}{% endif %}
+    {% endfor %}
+    </div>
+  </div>
+  {% endfor %}
+</section>
 <div class="kanban">
 {% for state, workflows, issues, groups in columns %}
 <section class="column" data-state="{{ state }}">
-  <h2 title="{{ lane_hints[state] }}">{{ state }} ({{ workflows|length + issues|length }}){% if state == "done" and old_done %}<span class="old-done-count"> + {{ old_done }} older hidden</span>{% endif %}{% if columns|length > 1 %}<form autocomplete="off" method="post" action="/preferences/lanes/hide"><input type="hidden" name="lane" value="{{ state }}"><button class="hide-lane" title="Hide this lane" aria-label="Hide the {{ state }} lane">&times;</button></form>{% endif %}</h2>
+  <h2 title="{{ stage_hints[state] }}">{{ state }} ({{ workflows|length + issues|length }}){% if state == "done" and old_done %}<span class="old-done-count"> + {{ old_done }} older hidden</span>{% endif %}{% if columns|length > 1 %}<form autocomplete="off" method="post" action="/preferences/lanes/hide"><input type="hidden" name="lane" value="{{ state }}"><button class="hide-lane" title="Hide this lane" aria-label="Hide the {{ state }} lane">&times;</button></form>{% endif %}</h2>
   {% if state == "done" %}<form class="old-done" autocomplete="off" method="post" action="/preferences/done/{{ "show" if hide_old_done else "hide" }}"><button title="Cards finished more than 14 days ago">{{ "Show older" if hide_old_done else "Hide finished over 2 weeks ago" }}</button></form>{% endif %}
   {# AB-34: past done_cap cards the done lane hides the rest behind a button. #}
   {% set ns = namespace(n=0) %}
@@ -80,7 +101,7 @@
 </aside>
 <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.6/Sortable.min.js"></script>
 <script>
-  // Dragging a card to another column is a state change through core.edit.
+  // Dragging a card to another stage lane is a stage change through core.move.
   // Each card lists the columns its state may move to (data-moves), so a
   // column that would refuse the move does not accept the drop and is dimmed
   // while the card is in the air. A move refused anyway (a lease, a stale
@@ -106,12 +127,13 @@
     // auto-reload must not beat a refusal's alert.
     // A drop into another date group of the same lane is no move (AB-17).
     if (evt.from.dataset.state === evt.to.dataset.state) { dragging = false; return; }
+    // AB-53: the lanes are stages, so a drop posts the stage it landed in.
     var card = evt.item, state = evt.to.dataset.state;
-    var body = new URLSearchParams({version: card.dataset.version, state: state});
-    if (state === "need-input") {
-      var note = prompt("A move to need-input needs a note:");
-      if (!note) { location.reload(); return; }
-      body.set("note", note);
+    var body = new URLSearchParams({version: card.dataset.version, stage: state});
+    if (evt.from.dataset.state === "done") {
+      var why = prompt("Reopening a done card needs a reason:");
+      if (!why) { location.reload(); return; }
+      body.set("note", why);
     } else if (state === "done") {
       // A human closes without a note (AB-49); Cancel still abandons the move.
       var reason = prompt("A note for done (optional):");

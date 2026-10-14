@@ -85,6 +85,20 @@
   .column h2 { font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
                color: var(--muted); margin: 0 0 8px; cursor: help; }
   .column h2 { position: sticky; top: 0; z-index: 1; background: var(--bg); padding: 10px 0 8px; }
+  /* AB-53: the queue strip runs across the top; its groups sit side by side
+     and each scrolls its cards sideways. */
+  .queue-strip { padding: 0 10px 10px; border-bottom: 1px solid var(--border); margin-bottom: 10px; }
+  .queue-strip h2 { font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
+                    color: var(--muted); margin: 0; padding: 10px 0 8px; }
+  .queue-strip h3 { font-size: 11px; font-weight: 500; color: var(--muted); margin: 4px 0 6px; }
+  .queue-group { margin-bottom: 6px; }
+  .queue-cards { display: flex; gap: 8px; overflow-x: auto; min-height: 20px; }
+  .queue-cards .card { flex: 0 0 240px; }
+  .stage-badge { font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: uppercase;
+                 color: var(--muted); border: 1px solid var(--border); border-radius: 3px; padding: 0 4px;
+                 white-space: nowrap; }
+  .queue-form { display: inline; }
+  .queue-form button { font-size: 12px; margin-top: 6px; }
   .column.drop-ok { outline: 2px dashed var(--ok); }
   .column.drop-no { opacity: 0.4; }
   .card[data-href] { cursor: pointer; }
