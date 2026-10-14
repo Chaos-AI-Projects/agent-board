@@ -85,14 +85,22 @@
   .column h2 { font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
                color: var(--muted); margin: 0 0 8px; cursor: help; }
   .column h2 { position: sticky; top: 0; z-index: 1; background: var(--bg); padding: 10px 0 8px; }
-  /* AB-53: the queue strip runs across the top; its groups sit side by side
-     and each scrolls its cards sideways. */
+  /* AB-53: the queue strip runs across the top. AB-57: it is one row, its
+     queue statuses side by side with a rule between them, and each status
+     scrolls its own cards sideways. An empty status shrinks to its heading. */
   .queue-strip { padding: 0 10px 10px; border-bottom: 1px solid var(--border); margin-bottom: 10px; }
+  .queue-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 0 8px; }
   .queue-strip h2 { font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
-                    color: var(--muted); margin: 0; padding: 10px 0 8px; }
+                    color: var(--muted); margin: 0; }
+  .queue-strip .queue-count { font-size: 11px; color: var(--muted); }
+  .queue-toggle { margin: 0; }
+  .queue-toggle button { font-size: 11px; padding: 0 6px; }
   .card .schedule { font-size: 11px; color: var(--muted); margin-top: 2px; }
   .queue-strip h3 { font-size: 11px; font-weight: 500; color: var(--muted); margin: 4px 0 6px; }
-  .queue-group { margin-bottom: 6px; }
+  .queue-lane { display: flex; flex-wrap: nowrap; gap: 0; }
+  .queue-group { flex: 1 1 0; min-width: 0; padding: 0 10px; border-left: 1px solid var(--border); }
+  .queue-group:first-child { padding-left: 0; border-left: none; }
+  .queue-group[data-count="0"] { flex: 0 0 auto; }
   .queue-cards { display: flex; gap: 8px; overflow-x: auto; min-height: 20px; }
   .queue-cards .card { flex: 0 0 240px; }
   .stage-badge { font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: uppercase;

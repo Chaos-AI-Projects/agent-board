@@ -45,11 +45,19 @@
 </details>
 </div>
 {# AB-53: queued cards wait in one strip above the stage lanes. Nothing in it
-   drags: a queued card changes from its own page. #}
+   drags: a queued card changes from its own page. AB-57: the strip is one
+   horizontal lane, its queue statuses side by side, and it collapses to its
+   counts. The choice is a saved view pref, so a reload keeps it. #}
 <section class="queue-strip" aria-label="Queue">
-  <h2 title="{{ queue_hint }}">queue ({{ queues|map(attribute="1")|map("length")|sum }})</h2>
+  <div class="queue-head">
+    <h2 title="{{ queue_hint }}">queue ({{ queues|map(attribute="1")|map("length")|sum }})</h2>
+    {% if queue_collapsed %}{% for q, cards in queues %}<span class="queue-count" data-queue="{{ q }}">{{ q }} {{ cards|length }}</span>{% endfor %}{% endif %}
+    <form class="queue-toggle" autocomplete="off" method="post" action="/preferences/queue/{{ "expand" if queue_collapsed else "collapse" }}"><button title="{{ "Show the queued cards" if queue_collapsed else "Hide the queued cards, keep the counts" }}">{{ "Expand" if queue_collapsed else "Collapse" }}</button></form>
+  </div>
+  {% if not queue_collapsed %}
+  <div class="queue-lane">
   {% for q, cards in queues %}
-  <div class="queue-group" data-queue="{{ q }}">
+  <div class="queue-group" data-queue="{{ q }}" data-count="{{ cards|length }}">
     <h3>{{ q }} ({{ cards|length }})</h3>
     <div class="queue-cards">
     {% for kind, item in cards %}
@@ -64,6 +72,8 @@
     </div>
   </div>
   {% endfor %}
+  </div>
+  {% endif %}
 </section>
 <div class="kanban">
 {% for state, workflows, issues, groups in columns %}

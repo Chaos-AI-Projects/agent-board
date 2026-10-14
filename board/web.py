@@ -439,7 +439,7 @@ def board_stamp(ctx: dict, buckets: dict) -> str:
                   "projects": view["projects"], "templates": view["templates"],
                   "tracked": ctx["tracked"], "hidden": ctx["hidden"], "buckets": buckets,
                   "hide_old_done": ctx["hide_old_done"], "old_done": ctx["old_done"],
-                  "mine": ctx["mine"]})
+                  "mine": ctx["mine"], "queue_collapsed": ctx["queue_collapsed"]})
 
 
 def issue_stamp(issue: dict, now: str, buckets: dict) -> str:
@@ -814,14 +814,16 @@ def _form_labels(value):
 
 def read_prefs(raw: str | None) -> dict:
     """The saved view from a `board_prefs` cookie: projects, lanes, timezone,
-    whether the done lane hides cards finished over two weeks ago (AB-13), and
-    whether the board shows only the cards the viewer created (AB-42).
+    whether the done lane hides cards finished over two weeks ago (AB-13),
+    whether the board shows only the cards the viewer created (AB-42), and
+    whether the queue strip is collapsed to its counts (AB-57).
 
     The value is JSON, percent-encoded so a browser sends it back unmangled.
     Anything unreadable, and any other key, is ignored. A list key that is
     absent or not a list of strings comes back as [], which means all; a
     timezone that is not a string comes back as "", which means the default.
-    `hide_old_done` and `mine` are True only when the cookie says exactly true.
+    `hide_old_done`, `mine` and `queue_collapsed` are True only when the cookie
+    says exactly true.
     """
     try:
         data = json.loads(unquote(raw or ""))
@@ -837,6 +839,7 @@ def read_prefs(raw: str | None) -> dict:
     prefs["timezone"] = tz if isinstance(tz, str) else ""
     prefs["hide_old_done"] = data.get("hide_old_done") is True
     prefs["mine"] = data.get("mine") is True
+    prefs["queue_collapsed"] = data.get("queue_collapsed") is True
     return prefs
 
 
@@ -1072,7 +1075,7 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         return {"projects": _chosen(saved["projects"], [p["key"] for p in projects]),
                 "lanes": list(core.STAGES) if stale else _chosen(saved["lanes"], list(core.STAGES)),
                 "timezone": saved["timezone"], "hide_old_done": saved["hide_old_done"],
-                "mine": saved["mine"]}
+                "mine": saved["mine"], "queue_collapsed": saved["queue_collapsed"]}
 
     def board_view(request):
         view = core.overview(engine)
@@ -1151,7 +1154,8 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
                 "lane_meta": core.lane_meta(engine), "done_cap": DONE_CAP,
                 "tracked": prefs["projects"], "hidden": hidden,
                 "hide_old_done": prefs["hide_old_done"], "old_done": old_done,
-                "mine": mine, "can_mine": me is not None}
+                "mine": mine, "can_mine": me is not None,
+                "queue_collapsed": prefs["queue_collapsed"]}
 
     @app.get("/", response_class=HTMLResponse)
     def board_page(request: Request):
@@ -1204,7 +1208,8 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         tz = (f.get("timezone") or "").strip()
         prefs["timezone"] = tz if zone(tz) else ""
         kept = read_prefs(request.cookies.get(PREFS_COOKIE))
-        prefs["hide_old_done"], prefs["mine"] = kept["hide_old_done"], kept["mine"]
+        for key in ("hide_old_done", "mine", "queue_collapsed"):
+            prefs[key] = kept[key]
         return saved(prefs)
 
     @app.post("/preferences/projects")
@@ -1250,6 +1255,15 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
             return error(request, 404, "No such done-lane action.")
         prefs = read_prefs(request.cookies.get(PREFS_COOKIE))
         prefs["hide_old_done"] = action == "hide"
+        return saved(prefs)
+
+    @app.post("/preferences/queue/{action}")
+    def save_queue_toggle(request: Request, action: str):
+        """The queue strip's toggle (AB-57): collapse it to its counts, or expand it."""
+        if action not in ("collapse", "expand"):
+            return error(request, 404, "No such queue action.")
+        prefs = read_prefs(request.cookies.get(PREFS_COOKIE))
+        prefs["queue_collapsed"] = action == "collapse"
         return saved(prefs)
 
     @app.post("/preferences/mine/{action}")

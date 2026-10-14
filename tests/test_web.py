@@ -1356,7 +1356,7 @@ def test_saving_preferences_sets_a_lax_year_long_cookie(client, board):
     assert "max-age=31536000" in cookie.lower()
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
         "projects": ["BR"], "lanes": ["implement", "done"], "timezone": "",
-        "hide_old_done": False, "mine": False}
+        "hide_old_done": False, "mine": False, "queue_collapsed": False}
 
 
 def test_the_board_shows_only_the_saved_projects_and_lanes(client, board):
@@ -1432,7 +1432,7 @@ def test_saving_keeps_only_known_projects_and_lanes(client, board):
                                       "lane": ["done", "bogus", "ready", "implement"]})
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
         "projects": ["BR"], "lanes": ["implement", "done"], "timezone": "",
-        "hide_old_done": False, "mine": False}
+        "hide_old_done": False, "mine": False, "queue_collapsed": False}
 
 
 def test_preferences_are_a_same_origin_post_only(client, board):
@@ -1511,7 +1511,7 @@ def test_a_banner_save_keeps_the_saved_lanes_and_timezone(client, board):
     client.post("/preferences/projects", data={"project": ["BR"]})
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
         "projects": ["BR"], "lanes": ["implement", "done"], "timezone": "Asia/Tokyo",
-        "hide_old_done": False, "mine": False}
+        "hide_old_done": False, "mine": False, "queue_collapsed": False}
     assert lanes(client.get("/").text) == ["implement", "done"]
 
 
@@ -1549,7 +1549,7 @@ def test_the_preferences_page_still_saves_every_key(client, board):
     client.post("/preferences/projects", data={"project": ["BR"]})
     client.post("/preferences", data={"project": ["MS"], "lane": ["implement"]})
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
-        "projects": ["MS"], "lanes": ["implement"], "timezone": "", "hide_old_done": False, "mine": False}
+        "projects": ["MS"], "lanes": ["implement"], "timezone": "", "hide_old_done": False, "mine": False, "queue_collapsed": False}
 
 
 # --- the banner is "View", right of the toggles (MS-653) -------------------------
@@ -1675,11 +1675,11 @@ def test_a_lane_save_keeps_projects_and_timezone(client, board):
     client.post("/preferences/lanes/hide", data={"lane": "done"})
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
         "projects": ["BR"], "lanes": [s for s in ALL_LANES if s != "done"],
-        "timezone": "Asia/Tokyo", "hide_old_done": False, "mine": False}
+        "timezone": "Asia/Tokyo", "hide_old_done": False, "mine": False, "queue_collapsed": False}
     client.post("/preferences/lanes/show", data={"lane": "done"})
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
         "projects": ["BR"], "lanes": [], "timezone": "Asia/Tokyo",
-        "hide_old_done": False, "mine": False}
+        "hide_old_done": False, "mine": False, "queue_collapsed": False}
 
 
 @pytest.mark.parametrize("action", ["hide", "show"])
@@ -4556,3 +4556,98 @@ def test_ab54_a_date_that_never_comes_is_refused_on_the_page(board, client):
                     data=schedule_form(core.show(board, iid), cron="0 9 31 2 *", timezone="UTC"))
     assert r.status_code == 422
     assert core.show(board, iid)["schedule"] is None
+
+
+# --- AB-57: the queue is one collapsible horizontal lane ---------------------------
+
+
+def queue_toggle(html):
+    m = re.search(r'<form[^>]*class="queue-toggle"[^>]*action="/preferences/queue/(\w+)"[^>]*>'
+                  r'\s*<button[^>]*>([^<]+)</button>', strip(html))
+    assert m, "no queue toggle"
+    return m.group(1), m.group(2)
+
+
+def test_ab57_the_three_queue_segments_sit_side_by_side_in_one_lane(board, client):
+    queued_and_waiting(board)
+    top = strip(client.get("/").text)
+    lane = re.search(r'<div class="queue-lane">(.*)</div>\s*</section>', top, re.S)
+    assert lane, "no single queue lane"
+    assert top.count('class="queue-lane"') == 1
+    segments = re.findall(r'<div class="queue-group" data-queue="([^"]+)" data-count="(\d+)"',
+                          lane.group(1))
+    assert segments == [("ready", "2"), ("processing", "0"), ("on-hold", "1")]
+
+
+def test_ab57_the_lane_is_a_single_row_in_the_stylesheet(board, client):
+    html = client.get("/").text
+    css = re.search(r'\.queue-lane\s*\{([^}]*)\}', html)
+    assert css and "display: flex" in css.group(1) and "nowrap" in css.group(1)
+
+
+def test_ab57_the_strip_starts_open_and_offers_to_collapse(board, client):
+    a = ready(board, "a ready one")
+    html = client.get("/").text
+    assert queue_toggle(html) == ("collapse", "Collapse")
+    assert f'data-id="{a}"' in strip(html)
+
+
+def test_ab57_collapsing_hides_the_cards_but_keeps_the_counts(board, client):
+    cards = queued_and_waiting(board)
+    r = client.post("/preferences/queue/collapse")
+    assert r.status_code == 303 and r.headers["location"] == "/"
+    html = client.get("/").text
+    top = strip(html)
+    for role in ("ready", "planning", "held"):
+        assert f'data-id="{cards[role]}"' not in top, role
+    assert 'class="queue-lane"' not in top
+    assert queue_toggle(html) == ("expand", "Expand")
+    counts = re.findall(r'<span class="queue-count" data-queue="([^"]+)">[^<]*?(\d+)</span>', top)
+    assert counts == [("ready", "2"), ("processing", "0"), ("on-hold", "1")]
+    assert "queue (3)" in top
+    # The stage lanes are untouched.
+    assert f'data-id="{cards["waiting"]}"' in column(html, "implement")
+
+
+def test_ab57_the_choice_survives_a_reload_and_expand_brings_the_cards_back(board, client):
+    a = ready(board)
+    client.post("/preferences/queue/collapse")
+    assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE))["queue_collapsed"] is True
+    assert f'data-id="{a}"' not in strip(client.get("/").text)
+    assert f'data-id="{a}"' not in strip(client.get("/").text)
+    client.post("/preferences/queue/expand")
+    assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE))["queue_collapsed"] is False
+    assert f'data-id="{a}"' in strip(client.get("/").text)
+
+
+def test_ab57_other_view_saves_keep_the_strip_collapsed(board, client):
+    client.post("/preferences/queue/collapse")
+    client.post("/preferences", data={"project": ["MS"], "lane": list(core.STAGES)})
+    assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE))["queue_collapsed"] is True
+    client.post("/preferences/done/hide")
+    client.post("/preferences/lanes/hide", data={"lane": "cancelled"})
+    assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE))["queue_collapsed"] is True
+
+
+def test_ab57_an_unknown_queue_action_is_404(board, client):
+    assert client.post("/preferences/queue/sideways").status_code == 404
+
+
+def test_ab57_only_an_exact_true_collapses_the_strip():
+    assert web.read_prefs(None)["queue_collapsed"] is False
+    for raw in ('{"queue_collapsed":1}', '{"queue_collapsed":"true"}', "nonsense"):
+        assert web.read_prefs(quote(raw, safe=""))["queue_collapsed"] is False, raw
+    assert web.read_prefs(quote('{"queue_collapsed":true}', safe=""))["queue_collapsed"] is True
+
+
+def test_ab57_the_board_stamp_moves_when_the_toggle_does(board, client):
+    ready(board)
+    before = board_stamp(client)
+    client.post("/preferences/queue/collapse")
+    assert board_stamp(client) != before
+
+
+def test_ab57_the_toggle_sits_beside_the_heading_not_inside_it(board, client):
+    top = strip(client.get("/").text)
+    heading = re.search(r"<h2[^>]*>(.*?)</h2>", top, re.S).group(1)
+    assert "<form" not in heading and 'class="queue-toggle"' in top
