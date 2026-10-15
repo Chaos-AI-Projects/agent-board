@@ -47,14 +47,15 @@
 {# AB-53: queued cards wait in one strip above the stage lanes. Nothing in it
    drags: a queued card changes from its own page. AB-57: the strip is one
    horizontal lane, its queue statuses side by side, and it collapses to its
-   counts. The choice is a saved view pref, so a reload keeps it. #}
-<section class="queue-strip" aria-label="Queue">
+   counts. The choice is a saved view pref, so a reload keeps it. AB-59: both
+   the cards and the counts are always served, and the collapsed class picks
+   which shows, so the toggle's script needs no reload. #}
+<section class="queue-strip{{ " collapsed" if queue_collapsed }}" aria-label="Queue">
   <div class="queue-head">
     <h2 title="{{ queue_hint }}">queue ({{ queues|map(attribute="1")|map("length")|sum }})</h2>
-    {% if queue_collapsed %}{% for q, cards in queues %}<span class="queue-count" data-queue="{{ q }}">{{ q }} {{ cards|length }}</span>{% endfor %}{% endif %}
+    {% for q, cards in queues %}<span class="queue-count" data-queue="{{ q }}">{{ q }} {{ cards|length }}</span>{% endfor %}
     <form class="queue-toggle" autocomplete="off" method="post" action="/preferences/queue/{{ "expand" if queue_collapsed else "collapse" }}"><button title="{{ "Show the queued cards" if queue_collapsed else "Hide the queued cards, keep the counts" }}">{{ "Expand" if queue_collapsed else "Collapse" }}</button></form>
   </div>
-  {% if not queue_collapsed %}
   <div class="queue-lane">
   {% for q, cards in queues %}
   <div class="queue-group" data-queue="{{ q }}" data-count="{{ cards|length }}">
@@ -73,7 +74,6 @@
   </div>
   {% endfor %}
   </div>
-  {% endif %}
 </section>
 <div class="kanban">
 {% for state, workflows, issues, groups in columns %}
@@ -315,6 +315,52 @@
     frame.contentWindow.scrollTo(kept.x, kept.y);
   }
   window.onAutoReload = keepPanel;
+</script>
+<script>
+  // AB-59: Collapse and Expand toggle the strip in place. The cookie is still
+  // saved, by a fetch the server answers with 204, so a reload keeps the
+  // choice; without this script the form posts and the page reloads. Saves go
+  // one at a time, so a quick double click cannot land them out of order, and
+  // a refused save (an expired sign-in) puts the strip back. Another open tab
+  // follows through the storage event; the stamp in the stored value makes
+  // every toggle fire it.
+  (function () {
+    var strip = document.querySelector(".queue-strip");
+    var form = strip && strip.querySelector(".queue-toggle");
+    if (!form) return;
+    var button = form.querySelector("button"), KEY = "ab59-queue-collapsed", saving = Promise.resolve();
+    function draw(collapsed) {
+      strip.classList.toggle("collapsed", collapsed);
+      form.action = "/preferences/queue/" + (collapsed ? "expand" : "collapse");
+      button.textContent = collapsed ? "Expand" : "Collapse";
+      button.title = collapsed ? "Show the queued cards" : "Hide the queued cards, keep the counts";
+    }
+    function share(collapsed) {
+      try { localStorage.setItem(KEY, JSON.stringify({collapsed: collapsed, at: Date.now()})); } catch (_) { /* private mode */ }
+    }
+    // The form holds only this button, so a click covers every way to send
+    // it; a submit listener would trip the issue panel's MS-662 guard.
+    button.addEventListener("click", function (ev) {
+      ev.preventDefault();
+      var collapsed = !strip.classList.contains("collapsed");
+      var url = form.action, headers = {};
+      headers[{{ fetch_header|tojson }}] = "1";
+      draw(collapsed);
+      share(collapsed);
+      saving = saving.then(function () {
+        return fetch(url, {method: "POST", headers: headers, credentials: "same-origin"});
+      }).then(function (r) {
+        if (!r.ok) throw new Error(r.status);
+      }).catch(function () {
+        draw(!collapsed);
+        share(!collapsed);
+      });
+    });
+    window.addEventListener("storage", function (e) {
+      if (e.key !== KEY || !e.newValue) return;
+      try { draw(JSON.parse(e.newValue).collapsed === true); } catch (_) { /* not ours */ }
+    });
+  })();
 </script>
 <script>
   // AB-34: a long done lane shows its first cards and a button for the rest.

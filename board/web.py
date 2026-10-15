@@ -69,7 +69,7 @@ from urllib.parse import quote, unquote, urlsplit
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.templating import Jinja2Templates
 from markdown_it import MarkdownIt
@@ -415,7 +415,9 @@ def board_stamp(ctx: dict, buckets: dict) -> str:
     untracked project or a hidden lane, or a note, does not reload it. The
     clock moves on every read, so it stays out; what it decides, each card's
     lease status, goes in instead. A note does move it when it changes the
-    kind of actor who acted last, which decides the Queue button (AB-58)."""
+    kind of actor who acted last, which decides the Queue button (AB-58).
+    The queue strip's collapse stays out (AB-59): the page toggles itself, and
+    a moved stamp would reload it straight after."""
     now = ctx["now"]
 
     def card(i):
@@ -440,7 +442,7 @@ def board_stamp(ctx: dict, buckets: dict) -> str:
                   "projects": view["projects"], "templates": view["templates"],
                   "tracked": ctx["tracked"], "hidden": ctx["hidden"], "buckets": buckets,
                   "hide_old_done": ctx["hide_old_done"], "old_done": ctx["old_done"],
-                  "mine": ctx["mine"], "queue_collapsed": ctx["queue_collapsed"]})
+                  "mine": ctx["mine"]})
 
 
 def issue_stamp(issue: dict, now: str, buckets: dict) -> str:
@@ -1265,7 +1267,9 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
             return error(request, 404, "No such queue action.")
         prefs = read_prefs(request.cookies.get(PREFS_COOKIE))
         prefs["queue_collapsed"] = action == "collapse"
-        return saved(prefs)
+        # AB-59: the page's own script already toggled the strip; it wants
+        # only the cookie, not a redirect to a page it will not load.
+        return saved(prefs, Response(status_code=204) if request.headers.get(FETCH_HEADER) else None)
 
     @app.post("/preferences/mine/{action}")
     def save_mine_toggle(request: Request, action: str):
@@ -1276,8 +1280,8 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         prefs["mine"] = action == "on"
         return saved(prefs)
 
-    def saved(prefs):
-        r = back()
+    def saved(prefs, r=None):
+        r = r or back()
         # safe="": a bare "/" (Asia/Tokyo) makes Starlette quote the whole value.
         r.set_cookie(PREFS_COOKIE, quote(json.dumps(prefs, separators=(",", ":")), safe=""),
                      max_age=PREFS_MAX_AGE, samesite="lax", httponly=True)

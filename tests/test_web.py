@@ -79,7 +79,7 @@ def card(html, issue_id):
 
 def strip(html):
     """The top queue strip's markup."""
-    m = re.search(r'<section class="queue-strip"[^>]*>.*?</section>', html, re.S)
+    m = re.search(r'<section class="queue-strip[ "][^>]*>.*?</section>', html, re.S)
     assert m, "no queue strip"
     return m.group(0)
 
@@ -4209,7 +4209,7 @@ def test_ab53_the_strip_groups_its_cards_by_queue_status(board, client):
     assert groups == list(core.QUEUES)
 
     def group(q):
-        return re.search(rf'data-queue="{q}".*?(?=<div class="queue-group"|</section>)',
+        return re.search(rf'<div class="queue-group" data-queue="{q}".*?(?=<div class="queue-group"|</section>)',
                          top, re.S).group(0)
 
     assert f'data-id="{cards["ready"]}"' in group("ready")
@@ -4595,6 +4595,18 @@ def queue_toggle(html):
     return m.group(1), m.group(2)
 
 
+def strip_collapsed(html):
+    m = re.search(r'<section class="queue-strip( collapsed)?"', html)
+    assert m, "no queue strip"
+    return bool(m.group(1))
+
+
+def lane_of(top):
+    m = re.search(r'<div class="queue-lane">(.*)</div>\s*</section>', top, re.S)
+    assert m, "no single queue lane"
+    return m.group(1)
+
+
 def test_ab57_the_three_queue_segments_sit_side_by_side_in_one_lane(board, client):
     queued_and_waiting(board)
     top = strip(client.get("/").text)
@@ -4625,9 +4637,11 @@ def test_ab57_collapsing_hides_the_cards_but_keeps_the_counts(board, client):
     assert r.status_code == 303 and r.headers["location"] == "/"
     html = client.get("/").text
     top = strip(html)
+    # AB-59: the cards stay in the page for the toggle to bring back; the
+    # strip's collapsed class is what hides them.
+    assert strip_collapsed(html)
     for role in ("ready", "planning", "held"):
-        assert f'data-id="{cards[role]}"' not in top, role
-    assert 'class="queue-lane"' not in top
+        assert f'data-id="{cards[role]}"' in lane_of(top), role
     assert queue_toggle(html) == ("expand", "Expand")
     counts = re.findall(r'<span class="queue-count" data-queue="([^"]+)">[^<]*?(\d+)</span>', top)
     assert counts == [("ready", "2"), ("processing", "0"), ("on-hold", "1")]
@@ -4640,11 +4654,12 @@ def test_ab57_the_choice_survives_a_reload_and_expand_brings_the_cards_back(boar
     a = ready(board)
     client.post("/preferences/queue/collapse")
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE))["queue_collapsed"] is True
-    assert f'data-id="{a}"' not in strip(client.get("/").text)
-    assert f'data-id="{a}"' not in strip(client.get("/").text)
+    assert strip_collapsed(client.get("/").text)
+    assert strip_collapsed(client.get("/").text)
     client.post("/preferences/queue/expand")
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE))["queue_collapsed"] is False
-    assert f'data-id="{a}"' in strip(client.get("/").text)
+    html = client.get("/").text
+    assert not strip_collapsed(html) and f'data-id="{a}"' in strip(html)
 
 
 def test_ab57_other_view_saves_keep_the_strip_collapsed(board, client):
@@ -4667,14 +4682,58 @@ def test_ab57_only_an_exact_true_collapses_the_strip():
     assert web.read_prefs(quote('{"queue_collapsed":true}', safe=""))["queue_collapsed"] is True
 
 
-def test_ab57_the_board_stamp_moves_when_the_toggle_does(board, client):
-    ready(board)
-    before = board_stamp(client)
-    client.post("/preferences/queue/collapse")
-    assert board_stamp(client) != before
-
-
 def test_ab57_the_toggle_sits_beside_the_heading_not_inside_it(board, client):
     top = strip(client.get("/").text)
     heading = re.search(r"<h2[^>]*>(.*?)</h2>", top, re.S).group(1)
     assert "<form" not in heading and 'class="queue-toggle"' in top
+
+
+# --- AB-59: the queue toggle works in the page, without a reload -------------------
+
+
+def test_ab59_an_open_strip_carries_its_counts_for_the_toggle_to_show(board, client):
+    queued_and_waiting(board)
+    html = client.get("/").text
+    assert not strip_collapsed(html)
+    counts = re.findall(r'<span class="queue-count" data-queue="([^"]+)">[^<]*?(\d+)</span>', strip(html))
+    assert counts == [("ready", "2"), ("processing", "0"), ("on-hold", "1")]
+
+
+def test_ab59_the_stylesheet_hides_by_the_collapsed_class(board, client):
+    html = client.get("/").text
+    lane = re.search(r'\.queue-strip\.collapsed \.queue-lane\s*\{([^}]*)\}', html)
+    assert lane and "display: none" in lane.group(1)
+    counts = re.search(r'\.queue-strip:not\(\.collapsed\) \.queue-count\s*\{([^}]*)\}', html)
+    assert counts and "display: none" in counts.group(1)
+
+
+def test_ab59_a_fetched_toggle_saves_the_cookie_without_a_redirect(board, client):
+    r = client.post("/preferences/queue/collapse", headers={web.FETCH_HEADER: "1"})
+    assert r.status_code == 204 and "location" not in r.headers
+    assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE))["queue_collapsed"] is True
+    r = client.post("/preferences/queue/expand", headers={web.FETCH_HEADER: "1"})
+    assert r.status_code == 204
+    assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE))["queue_collapsed"] is False
+
+
+def test_ab59_a_fetched_unknown_action_is_still_refused(board, client):
+    r = client.post("/preferences/queue/sideways", headers={web.FETCH_HEADER: "1"})
+    assert r.status_code == 404
+
+
+def test_ab59_the_toggle_does_not_move_the_board_stamp(board, client):
+    # The page toggles itself; a moved stamp would reload it ten seconds later.
+    ready(board)
+    before = board_stamp(client)
+    client.post("/preferences/queue/collapse")
+    assert board_stamp(client) == before
+
+
+def test_ab59_the_page_script_takes_over_the_toggle_form(board, client):
+    html = client.get("/").text
+    script = re.search(r"<script>\s*// AB-59:(.*?)</script>", html, re.S)
+    assert script, "no AB-59 toggle script"
+    body = script.group(1)
+    assert ".queue-toggle" in body and "preventDefault" in body
+    assert web.FETCH_HEADER in body
+    assert "location.reload" not in body
