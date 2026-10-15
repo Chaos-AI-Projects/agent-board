@@ -305,17 +305,31 @@ def _id_order(issue_id: str):
     return (key, int(n)) if n.isdigit() else (issue_id, 0)
 
 
-def lane_groups(workflows: list[dict], issues: list[dict], now, tz: ZoneInfo) -> list:
+# AB-67: the group at the top of a lane holding its unseen finished cards.
+UNSEEN_GROUP = "Finished, not yet opened"
+
+
+def is_news(card: tuple, unseen: set[str]) -> bool:
+    """Whether a lane's (kind, card) pair is an unseen finished card (AB-67)."""
+    kind, c = card
+    return c.get("unseen", False) if kind == "workflow" else c["id"] in unseen
+
+
+def lane_groups(workflows: list[dict], issues: list[dict], now, tz: ZoneInfo,
+                unseen: set[str] = frozenset()) -> list:
     """A lane's cards as (group, [(kind, card)]), in DATE_GROUPS order, empty
     groups left out. Workflow and loose cards share one list per group, sorted
-    by project key, then id; rank plays no part (Chaos, AB-17)."""
+    by project key, then id; rank plays no part (Chaos, AB-17). Unseen
+    finished cards come first, in their own UNSEEN_GROUP (AB-67)."""
     cards = sorted([("workflow", w, w["sort_project"], ("", w["id"])) for w in workflows]
                    + [("issue", i, i["project"], _id_order(i["id"])) for i in issues],
                    key=lambda c: (c[2], c[0] == "issue", c[3]))
-    groups = []
+    news = [(kind, card) for kind, card, _, _ in cards if is_news((kind, card), unseen)]
+    groups = [(UNSEEN_GROUP, news)] if news else []
     for name, _ in DATE_GROUPS:
         here = [(kind, card) for kind, card, _, _ in cards
-                if date_group(card["updated_at"], now, tz) == name]
+                if not is_news((kind, card), unseen)
+                and date_group(card["updated_at"], now, tz) == name]
         if here:
             groups.append((name, here))
     return groups
@@ -444,7 +458,7 @@ def board_stamp(ctx: dict, buckets: dict) -> str:
                   "projects": view["projects"], "templates": view["templates"],
                   "tracked": ctx["tracked"], "hidden": ctx["hidden"], "buckets": buckets,
                   "hide_old_done": ctx["hide_old_done"], "old_done": ctx["old_done"],
-                  "mine": ctx["mine"]})
+                  "mine": ctx["mine"], "unseen": sorted(ctx["unseen"])})
 
 
 def issue_stamp(issue: dict, now: str, buckets: dict) -> str:
@@ -915,11 +929,21 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
             raise Unauthenticated()
         return found
 
+    def unseen(request) -> set[str]:
+        """The finished cards the viewer has not opened since (AB-67). Only a
+        person has them; an agent, or nobody, has none."""
+        if not hasattr(request.state, "unseen"):
+            me = who(request)
+            request.state.unseen = (core.unseen(engine, me.email)
+                                    if me is not None and me.kind == HUMAN else set())
+        return request.state.unseen
+
     def page(request, name, status=200, **ctx):
         me = who(request)
         saved_tz = read_prefs(request.cookies.get(PREFS_COOKIE))["timezone"]
         buckets = core.colour_buckets(engine)
         ctx |= {"me": me.email if me else None, "lease_status": lease_status,
+                "unseen": unseen(request),
                 "recent": core.recent_projects(engine, me.email) if me else None,
                 "project_colour": lambda key: project_colour(key, buckets.get(key)),
                 "tz": zone(saved_tz) or default_tz, "inline_types": INLINE_TYPES,
@@ -1153,26 +1177,39 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         # is due within SCHEDULE_LEAD. The lane is a view; the card stays ready.
         horizon = datetime.fromisoformat(view["now"]) + core.SCHEDULE_LEAD
         # AB-65: a card whose schedule is switched off waits there too, last.
+        # AB-67: a finished card the viewer has not opened leads its lane. A
+        # workflow card leads when any of its steps is such a card, and opens
+        # that step, so clicking it clears the highlight.
+        news = unseen(request)
         waiting = sorted((i for i in loose if i["queue"] == "ready"
                           and (i["schedule_paused"] or i["next_run_at"]
                                and datetime.fromisoformat(i["next_run_at"]) > horizon)),
-                         key=lambda i: (i["schedule_paused"], i["next_run_at"] or ""))
+                         key=lambda i: (i["id"] not in news, i["schedule_paused"],
+                                        i["next_run_at"] or ""))
         later = {i["id"] for i in waiting}
-        queues = [(q, [("workflow", w) for w in workflows if w["queue"] == q]
-                   + [("issue", i) for i in loose if i["queue"] == q and i["id"] not in later])
+        for w in workflows:
+            fresh = [st["id"] for st in w["steps"] if st["id"] in news]
+            w["unseen"] = bool(fresh)
+            if fresh:
+                w["target"] = fresh[0]
+        queues = [(q, sorted([("workflow", w) for w in workflows if w["queue"] == q]
+                             + [("issue", i) for i in loose
+                                if i["queue"] == q and i["id"] not in later],
+                             key=lambda c: not is_news(c, news)))
                   for q in core.QUEUES]
         columns = []
         for stage in prefs["lanes"]:
             wfs = [w for w in workflows if w["stage"] == stage and w["queue"] is None]
             issues = [i for i in loose if i["stage"] == stage and i["queue"] is None]
-            columns.append((stage, wfs, issues, lane_groups(wfs, issues, view["now"], tz)))
+            columns.append((stage, wfs, issues,
+                            lane_groups(wfs, issues, view["now"], tz, news)))
         hidden = [s for s in core.STAGES if s not in prefs["lanes"]]
         return {"view": view, "queues": queues, "columns": columns, "now": view["now"],
                 "scheduled": waiting,
                 "lane_meta": core.lane_meta(engine), "done_cap": DONE_CAP,
                 "tracked": prefs["projects"], "hidden": hidden,
                 "hide_old_done": prefs["hide_old_done"], "old_done": old_done,
-                "mine": mine, "can_mine": me is not None,
+                "mine": mine, "can_mine": me is not None, "unseen": news,
                 "queue_collapsed": prefs["queue_collapsed"],
                 "scheduled_collapsed": prefs["scheduled_collapsed"],
                 "schedule_fields": prefs["schedule_fields"]}
@@ -1367,6 +1404,10 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
     @app.get("/issues/{issue_id}", response_class=HTMLResponse)
     def issue_page(request: Request, issue_id: str):
         issue = core.show(engine, issue_id)
+        # AB-67: a person opening the card has seen how its last run ended.
+        me = who(request)
+        if me is not None and me.kind == HUMAN:
+            core.mark_seen(engine, me.email, issue["id"])
         # A step shows the workflow it belongs to; an origin shows its plan (MS-644).
         wf = issue["workflow"] or issue["plan"]
         # The note form offers where the issue is now plus the moves allowed from there.

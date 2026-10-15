@@ -341,6 +341,20 @@ class Dependency(Base):
     created_by: Mapped[str] = mapped_column(String(200))
 
 
+class CardSeen(Base):
+    """The newest event on a card when a person last opened it (AB-67).
+
+    An agent finishing the card after that event makes it news to them again.
+    """
+
+    __tablename__ = "card_seen"
+
+    actor: Mapped[str] = mapped_column(String(200), primary_key=True)
+    issue_id: Mapped[str] = mapped_column(ForeignKey("issue.id"), primary_key=True,
+                                          index=True)
+    event_id: Mapped[int] = mapped_column(EventId)
+
+
 class Workflow(Base):
     """An ordered group of issues. Its state is computed from the steps."""
 

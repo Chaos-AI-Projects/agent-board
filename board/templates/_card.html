@@ -1,7 +1,7 @@
 {%- set ls = lease_status(issue, now) -%}
 {%- set pc = project_colour(issue.project) -%}
 {%- set m = lane_meta[issue.id] if lane_meta is defined and issue.id in lane_meta else none -%}
-<article class="card{% if ls %} lease-{{ ls }}{% endif %}{% if extra %} done-extra{% endif %}" style="--proj-bg: {{ pc.bg }}; --proj-border: {{ pc.border }}"
+<article class="card{% if unseen is defined and issue.id in unseen %} unseen{% endif %}{% if ls %} lease-{{ ls }}{% endif %}{% if extra %} done-extra{% endif %}" style="--proj-bg: {{ pc.bg }}; --proj-border: {{ pc.border }}"
          data-id="{{ issue.id }}" data-version="{{ issue.version }}"
          data-href="/issues/{{ issue.id }}"{% if not queued %} data-moves="{{ moves(issue)|join(' ') }}"{% endif %}>
   <a href="/issues/{{ issue.id }}">{{ issue.id }}</a> {{ issue.title }}{% if queued %} <span class="stage-badge stage-{{ issue.stage }}" title="Stage">{{ issue.stage }}</span>{% endif %}

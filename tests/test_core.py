@@ -2137,3 +2137,99 @@ def test_ab63_stats_count_an_entered_card_as_created_by_the_creator(board):
     assert (rows[CHAOS]["created"], rows[CHAOS]["actor_kind"], rows[CHAOS]["events"]) == (
         1, HUMAN, 0)
     assert (rows["overlord"]["created"], rows["overlord"]["events"]) == (0, 1)
+
+
+# --- AB-67: unseen finished cards --------------------------------------------
+
+OTHER = "other@example.com"
+
+
+def agent_run(engine, issue_id, worker="w1"):
+    """An agent's run on the card: claim it, then release it out of processing."""
+    claim = core.next(engine, worker)
+    assert claim["issue"]["id"] == issue_id
+    core.move(engine, issue_id, "done", actor=worker, actor_kind=AGENT,
+              token=claim["lease_token"], note="did it")
+
+
+def test_ab67_a_finished_card_is_unseen_by_its_creator_only(board):
+    mine = ready(board, "mine")
+    agent_run(board, mine)
+    assert core.unseen(board, CHAOS) == {mine}
+    assert core.unseen(board, OTHER) == set()
+
+
+def test_ab67_a_named_creator_counts_as_the_creator(board):
+    iid = core.create(board, "MS", "for chaos", actor="overlord", actor_kind=AGENT,
+                      stage="implement", creator=CHAOS)["id"]
+    agent_run(board, iid)
+    assert core.unseen(board, CHAOS) == {iid}
+    assert core.unseen(board, "overlord") == set()
+
+
+def test_ab67_any_human_event_makes_a_card_the_users(board):
+    iid = ready(board, "someone else's")
+    core.annotate(board, iid, "watching", actor=OTHER, actor_kind=HUMAN)
+    agent_run(board, iid)
+    assert core.unseen(board, OTHER) == {iid}
+
+
+def test_ab67_an_agent_event_does_not_make_a_card_its_actors(board):
+    iid = ready(board, "x")
+    core.annotate(board, iid, "agent note", actor=OTHER, actor_kind=AGENT)
+    agent_run(board, iid)
+    assert core.unseen(board, OTHER) == set()
+
+
+def test_ab67_a_card_never_finished_is_not_unseen(board):
+    ready(board, "waiting")
+    assert core.unseen(board, CHAOS) == set()
+
+
+def test_ab67_releasing_to_any_lane_is_a_finish(board):
+    iid = ready(board, "x")
+    claim = core.next(board, "w1")
+    core.queue(board, iid, None, actor="w1", actor_kind=AGENT, token=claim["lease_token"],
+               note="question for chaos")
+    assert core.unseen(board, CHAOS) == {iid}
+
+
+def test_ab67_seen_clears_and_a_later_finish_highlights_again(board):
+    iid = ready(board, "x")
+    claim = core.next(board, "w1")
+    core.queue(board, iid, "ready", actor="w1", actor_kind=AGENT,
+               token=claim["lease_token"], note="checkpoint")
+    core.mark_seen(board, CHAOS, iid)
+    assert core.unseen(board, CHAOS) == set()
+    agent_run(board, iid)
+    assert core.unseen(board, CHAOS) == {iid}
+
+
+def test_ab67_the_users_own_later_action_counts_as_seen(board):
+    iid = ready(board, "x")
+    agent_run(board, iid)
+    core.annotate(board, iid, "thanks", actor=CHAOS, actor_kind=HUMAN)
+    assert core.unseen(board, CHAOS) == set()
+
+
+def test_ab67_a_card_back_in_processing_is_not_unseen(board):
+    iid = ready(board, "x")
+    claim = core.next(board, "w1")
+    core.queue(board, iid, "ready", actor="w1", actor_kind=AGENT,
+               token=claim["lease_token"], note="checkpoint")
+    core.next(board, "w2")
+    assert core.unseen(board, CHAOS) == set()
+
+
+def test_ab67_mark_seen_on_an_unknown_card_is_not_found(board):
+    with pytest.raises(core.NotFound):
+        core.mark_seen(board, CHAOS, "MS-99")
+
+
+def test_ab67_mark_seen_twice_keeps_one_row(board):
+    iid = ready(board, "x")
+    agent_run(board, iid)
+    core.mark_seen(board, CHAOS, iid)
+    core.mark_seen(board, CHAOS, iid)
+    with store.session(board) as s:
+        assert s.scalar(select(func.count()).select_from(store.CardSeen)) == 1

@@ -48,7 +48,7 @@
     {% for kind, item in cards %}
     {% if kind == "workflow" %}{% set wf = item %}
     {% if wf.project %}{% set pc = project_colour(wf.project) %}{% endif %}
-    <article class="card workflow-card" data-workflow="{{ wf.id }}" data-href="/issues/{{ wf.target }}"{% if wf.project %} style="--proj-bg: {{ pc.bg }}; --proj-border: {{ pc.border }}"{% endif %}>
+    <article class="card workflow-card{% if wf.unseen %} unseen{% endif %}" data-workflow="{{ wf.id }}" data-href="/issues/{{ wf.target }}"{% if wf.project %} style="--proj-bg: {{ pc.bg }}; --proj-border: {{ pc.border }}"{% endif %}>
       <a href="/issues/{{ wf.target }}">{{ wf.title }}</a> <span class="stage-badge stage-{{ wf.stage }}" title="Stage">{{ wf.stage }}</span>
       <div class="steps-summary">{{ wf.steps|length }} step{{ "" if wf.steps|length == 1 else "s" }}{% if wf.current %} &middot; current: {{ wf.current.title }}{% endif %}</div>
     </article>
@@ -100,7 +100,7 @@
   {% set extra = capped and ns.n >= done_cap %}{% set ns.n = ns.n + 1 %}
   {% if kind == "workflow" %}{% set wf = item %}
   {% if wf.project %}{% set pc = project_colour(wf.project) %}{% endif %}
-  <article class="card workflow-card{% if extra %} done-extra{% endif %}" data-workflow="{{ wf.id }}" data-href="/issues/{{ wf.target }}"{% if wf.project %} style="--proj-bg: {{ pc.bg }}; --proj-border: {{ pc.border }}"{% endif %}>
+  <article class="card workflow-card{% if wf.unseen %} unseen{% endif %}{% if extra %} done-extra{% endif %}" data-workflow="{{ wf.id }}" data-href="/issues/{{ wf.target }}"{% if wf.project %} style="--proj-bg: {{ pc.bg }}; --proj-border: {{ pc.border }}"{% endif %}>
     <a href="/issues/{{ wf.target }}">{{ wf.title }}</a>
     <div class="steps-summary">{{ wf.steps|length }} step{{ "" if wf.steps|length == 1 else "s" }}{% if wf.current %} &middot; current: {{ wf.current.title }}{% endif %}</div>
   </article>

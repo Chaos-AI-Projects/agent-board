@@ -28,7 +28,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import aliased
 
 from board import store
-from board.store import (Artifact, Attachment, Dependency, Event, Issue, Label, Project, Template,
+from board.store import (Artifact, Attachment, CardSeen, Dependency, Event, Issue, Label, Project, Template,
                          TemplateStep, Workflow)
 
 DEFAULT_TTL = timedelta(minutes=90)
@@ -222,6 +222,57 @@ def done_times(engine) -> dict[str, str]:
                          .outerjoin(arrived, arrived.c.issue_id == Issue.id)
                          .where(Issue.state == "done").order_by(Issue.id))
         return {i: _iso(at) for i, at in rows}
+
+
+def _finishes():
+    """Events that end an agent's run: its card leaves processing (AB-67)."""
+    return and_(Event.actor_kind == "agent", Event.from_queue == "processing",
+                or_(Event.to_queue.is_(None), Event.to_queue != "processing"))
+
+
+def unseen(engine, actor: str) -> set[str]:
+    """The ids of finished cards `actor` has not looked at since (AB-67).
+
+    A card is theirs when they created it, an agent created it for them, or
+    they wrote any event on it as a human. It is unseen when an agent's run
+    on it ended after both their last opening of it and their own last
+    event on it, and no agent is working it again now.
+    """
+    with store.session(engine) as s:
+        mine = (Event.actor == actor) & (Event.actor_kind == "human")
+        theirs = exists().where(Event.issue_id == Issue.id,
+                                or_(mine, (Event.kind == "create")
+                                    & (Event.on_behalf_of == actor)))
+        finished = (select(func.max(Event.id)).where(Event.issue_id == Issue.id, _finishes())
+                    .correlate(Issue).scalar_subquery())
+        acted = (select(func.max(Event.id)).where(Event.issue_id == Issue.id, mine)
+                 .correlate(Issue).scalar_subquery())
+        opened = (select(CardSeen.event_id)
+                  .where(CardSeen.issue_id == Issue.id, CardSeen.actor == actor)
+                  .correlate(Issue).scalar_subquery())
+        rows = s.scalars(select(Issue.id).where(
+            theirs, or_(Issue.queue.is_(None), Issue.queue != "processing"),
+            finished > func.coalesce(opened, 0), finished > func.coalesce(acted, 0)))
+        return set(rows)
+
+
+def mark_seen(engine, actor: str, issue_id: str) -> None:
+    """Record that `actor` has the card in front of them, as of its newest event."""
+    for _ in range(2):
+        try:
+            with store.session(engine) as s, s.begin():
+                _get(s, issue_id)
+                newest = s.scalar(select(func.max(Event.id)).where(Event.issue_id == issue_id))
+                row = s.get(CardSeen, (actor, issue_id))
+                if row is None:
+                    s.add(CardSeen(actor=actor, issue_id=issue_id, event_id=newest or 0))
+                elif row.event_id != newest:
+                    row.event_id = newest or 0
+            return
+        except IntegrityError:
+            # Two pages opened the card at once and the other inserted first;
+            # the second pass updates its row.
+            continue
 
 
 def lane_meta(engine) -> dict[str, dict]:

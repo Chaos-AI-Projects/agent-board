@@ -5127,3 +5127,142 @@ def test_ab65_a_switched_off_card_waits_in_the_scheduled_lane(board, client):
     assert f'data-id="{iid}"' not in strip(html)
     one = unescape(card(scheduled_lane(html), iid))
     assert "off" in one
+
+
+# --- AB-67: unseen finished cards --------------------------------------------
+
+
+def finished(engine, title="x", stage="done"):
+    """A card Chaos created that an agent claimed and then released."""
+    iid = ready(engine, title)
+    claim = core.next(engine, "w1")
+    assert claim["issue"]["id"] == iid
+    if stage == "done":
+        core.move(engine, iid, "done", actor="w1", actor_kind=AGENT, token=claim["lease_token"],
+                  note="did it")
+    else:
+        core.queue(engine, iid, None, actor="w1", actor_kind=AGENT,
+                   token=claim["lease_token"], note="question")
+    return iid
+
+
+def unseen_count(html):
+    m = re.search(r'<a[^>]*class="unseen-count"[^>]*>(\d+)', html)
+    return int(m.group(1)) if m else 0
+
+
+def test_ab67_the_header_counts_unseen_finished_cards(client, board):
+    finished(board, "one")
+    finished(board, "two")
+    assert unseen_count(client.get("/", headers=AS_CHAOS).text) == 2
+    assert unseen_count(client.get("/search", headers=AS_CHAOS).text) == 2
+
+
+def test_ab67_the_count_is_hidden_at_zero_and_for_other_people(client, board):
+    assert 'class="unseen-count"' not in client.get("/", headers=AS_CHAOS).text
+    finished(board)
+    html = client.get("/", headers={web.ACTOR_HEADER: "someone@else"}).text
+    assert 'class="unseen-count"' not in html
+
+
+def test_ab67_an_agent_never_gets_a_count(board, monkeypatch):
+    finished(board)
+    monkeypatch.setattr(web, "_local", lambda request: web.auth.Identity(CHAOS, AGENT))
+    html = local_client(board).get("/").text
+    assert 'class="unseen-count"' not in html
+    assert "card unseen" not in html
+
+
+def test_ab67_an_unseen_card_is_highlighted(client, board):
+    iid = finished(board)
+    plain = idea(board)
+    html = client.get("/", headers=AS_CHAOS).text
+    assert "unseen" in card(html, iid).split(">", 1)[0]
+    assert "unseen" not in card(html, plain).split(">", 1)[0]
+
+
+def test_ab67_opening_a_card_clears_it(client, board):
+    iid = finished(board)
+    client.get(f"/issues/{iid}?embed=1", headers=AS_CHAOS)
+    html = client.get("/", headers=AS_CHAOS).text
+    assert unseen_count(html) == 0
+    assert "unseen" not in card(html, iid).split(">", 1)[0]
+
+
+def test_ab67_the_issue_page_shows_the_count_after_its_own_clear(client, board):
+    iid = finished(board, "a")
+    finished(board, "b")
+    assert unseen_count(client.get(f"/issues/{iid}", headers=AS_CHAOS).text) == 1
+
+
+def test_ab67_highlighted_cards_sit_first_in_their_lane(client, board):
+    # All three wait in the implement lane, where id order would put `third` last.
+    first = finished(board, "first", stage="implement")
+    second = finished(board, "second", stage="implement")
+    third = finished(board, "third", stage="implement")
+    core.mark_seen(board, CHAOS, first)
+    core.mark_seen(board, CHAOS, second)
+    html = client.get("/", headers=AS_CHAOS).text
+    lane = re.search(r'<section class="column" data-state="implement">.*?</section>',
+                     html, re.S).group(0)
+    assert re.findall(r'data-id="(MS-\d+)"', lane) == [third, first, second]
+    assert web.UNSEEN_GROUP in lane
+
+
+def test_ab67_the_board_stamp_moves_when_a_card_is_seen(client, board):
+    iid = finished(board)
+    before = client.get("/stamp", headers=AS_CHAOS).json()["stamp"]
+    client.get(f"/issues/{iid}", headers=AS_CHAOS)
+    assert client.get("/stamp", headers=AS_CHAOS).json()["stamp"] != before
+
+
+def test_ab67_an_unseen_card_leads_its_queue_segment(client, board):
+    ids = [ready(board, "first"), ready(board, "second")]
+    claims = [core.next(board, "w1"), core.next(board, "w2")]
+    for worker, claim in zip(("w1", "w2"), claims):
+        core.queue(board, claim["issue"]["id"], "ready", actor=worker, actor_kind=AGENT,
+                   token=claim["lease_token"], note="checkpoint")
+    core.mark_seen(board, CHAOS, ids[0])
+    html = client.get("/", headers=AS_CHAOS).text
+    seg = re.search(r'<div class="queue-group" data-queue="ready".*?</div>\s*</div>', html, re.S).group(0)
+    assert re.findall(r'data-id="(MS-\d+)"', seg) == [ids[1], ids[0]]
+
+
+def test_ab67_clicking_an_unseen_workflow_card_clears_it(client, board):
+    # The finished step is done, so the workflow's usual target is the next
+    # step; the highlighted card must open the step that is news instead.
+    origin = ready(board, "big job")
+    view = core.plan(board, origin, [{"title": "a"}, {"title": "b"}], actor=CHAOS,
+                     actor_kind=HUMAN)
+    a, _ = [s["id"] for s in view["plan"]["steps"]]
+    claim = core.next(board, "w1")
+    assert claim["issue"]["id"] == a
+    core.move(board, a, "done", actor="w1", actor_kind=AGENT, token=claim["lease_token"],
+              note="did it")
+    html = client.get("/", headers=AS_CHAOS).text
+    m = re.search(r'<article class="card workflow-card unseen"[^>]*data-href="([^"]+)"', html)
+    assert m and m.group(1) == f"/issues/{a}"
+    client.get(m.group(1) + "?embed=1", headers=AS_CHAOS)
+    html = client.get("/", headers=AS_CHAOS).text
+    assert unseen_count(html) == 0
+    assert "workflow-card unseen" not in html
+
+
+def test_ab67_an_unseen_card_leads_the_scheduled_lane(client, board):
+    # Each card finishes a run and goes back to wait for a far-off schedule;
+    # by run time `early` would sit first.
+    ids = []
+    for title, cron in (("early", "0 10 1 1 *"), ("late", "0 10 1 6 *")):
+        iid = ready(board, title)
+        claim = core.next(board, "w1")
+        assert claim["issue"]["id"] == iid
+        core.set_schedule(board, iid, cron, timezone="UTC", actor="w1", actor_kind=AGENT,
+                          token=claim["lease_token"])
+        core.queue(board, iid, "ready", actor="w1", actor_kind=AGENT,
+                   token=claim["lease_token"], note="next run")
+        ids.append(iid)
+    early, late = ids
+    core.mark_seen(board, CHAOS, early)
+    html = client.get("/", headers=AS_CHAOS).text
+    lane = re.search(r'<section class="column scheduled-lane.*?</section>', html, re.S).group(0)
+    assert re.findall(r'data-id="(MS-\d+)"', lane) == [late, early]

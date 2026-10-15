@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from board import store
 
 TABLES = {
+    "card_seen",
     "project",
     "issue",
     "event",
@@ -391,7 +392,7 @@ def test_0004_adds_the_attachment_table_and_downgrade_drops_only_it(engine):
     assert "attachment" in inspect(engine).get_table_names()
     store.downgrade(engine, "0003")
     names = set(inspect(engine).get_table_names())
-    assert "attachment" not in names and TABLES - {"attachment", "dependency"} - OAUTH_TABLES <= names
+    assert "attachment" not in names and TABLES - {"attachment", "dependency", "card_seen"} - OAUTH_TABLES <= names
 
 
 def test_0005_adds_workflow_origin_and_downgrade_drops_only_it(engine):
@@ -409,7 +410,7 @@ def test_0006_adds_the_dependency_table_and_downgrade_drops_only_it(engine):
     assert "dependency" in inspect(engine).get_table_names()
     store.downgrade(engine, "0005")
     names = set(inspect(engine).get_table_names())
-    assert "dependency" not in names and TABLES - {"dependency"} - OAUTH_TABLES <= names
+    assert "dependency" not in names and TABLES - {"dependency", "card_seen"} - OAUTH_TABLES <= names
 
 
 def test_0007_adds_the_oauth_tables_and_downgrade_drops_only_them(engine):
@@ -417,7 +418,7 @@ def test_0007_adds_the_oauth_tables_and_downgrade_drops_only_them(engine):
     assert OAUTH_TABLES <= set(inspect(engine).get_table_names())
     store.downgrade(engine, "0006")
     names = set(inspect(engine).get_table_names())
-    assert not OAUTH_TABLES & names and TABLES - OAUTH_TABLES <= names
+    assert not OAUTH_TABLES & names and TABLES - OAUTH_TABLES - {"card_seen"} <= names
 
 
 def test_0009_adds_the_artifact_name_and_downgrade_drops_only_it(engine):
@@ -504,3 +505,25 @@ def test_ab63_0011_adds_on_behalf_of_to_events_and_downgrade_drops_it(engine):
     assert "on_behalf_of" in {c["name"] for c in inspect(engine).get_columns("event")}
     store.downgrade(engine, "0010")
     assert "on_behalf_of" not in {c["name"] for c in inspect(engine).get_columns("event")}
+
+
+def test_ab67_0013_counts_every_finish_before_it_as_seen(engine):
+    # A card finished before the feature shipped is not news: the upgrade
+    # marks it seen for every person on it, creator or later human actor.
+    from board import core
+    store.upgrade(engine, "0012")
+    core.create_project(engine, "MS", "m")
+    mine = core.create(engine, "MS", "a", actor="chaos@example.com", actor_kind="human",
+                       stage="implement")["id"]
+    theirs = core.create(engine, "MS", "b", actor="overlord", actor_kind="agent",
+                         stage="implement", creator="other@example.com")["id"]
+    core.annotate(engine, theirs, "hm", actor="third@example.com", actor_kind="human")
+    for iid in (mine, theirs):
+        claim = core.next(engine, "w1")
+        core.move(engine, claim["issue"]["id"], "done", actor="w1", actor_kind="agent",
+                  token=claim["lease_token"], note="did it")
+    store.upgrade(engine, "0013")
+    for who in ("chaos@example.com", "other@example.com", "third@example.com"):
+        assert core.unseen(engine, who) == set()
+    store.downgrade(engine, "0012")
+    assert "card_seen" not in inspect(engine).get_table_names()
