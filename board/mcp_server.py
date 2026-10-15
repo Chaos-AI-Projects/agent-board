@@ -182,6 +182,7 @@ def build_server(engine, actor: str | Callable[[], str], brain=_FROM_ENV,
         Planning and implement start queued as ready.
         `schedule` is five cron fields read in `timezone`, which defaults to
         $BOARD_TIMEZONE, else UTC; `next` skips the card until each due time.
+        Runs must fall at least 5 minutes apart.
         `creator` is the person's email when an agent enters the card for
         someone; the agent stays the actor of the create event (AB-63).
         """

@@ -4544,7 +4544,8 @@ def test_ab54_clearing_the_schedule(board, client):
 
 def test_ab54_a_bad_cron_or_zone_is_refused_and_nothing_saved(board, client):
     iid = ready(board)
-    for fields in ({"cron": "every day"}, {"timezone": "Mars/Olympus"}):
+    for fields in ({"cron": "every day"}, {"timezone": "Mars/Olympus"},
+                   {"cron": "0,2 9 * * *"}):
         r = client.post(f"/issues/{iid}/schedule", headers=AS_CHAOS,
                         data=schedule_form(core.show(board, iid), **fields))
         assert r.status_code == 422, fields
@@ -4844,6 +4845,7 @@ def test_ab61_a_blank_zone_is_the_creators_own(board, monkeypatch, cookie, env, 
 @pytest.mark.parametrize("fields, says", [
     ({"cron": "every morning"}, "five cron fields"),
     ({"cron": "0 9 * * *", "timezone": "Mars/Olympus"}, "unknown time zone"),
+    ({"cron": "* * * * *", "timezone": "UTC"}, "5 minutes"),
 ])
 def test_ab61_a_bad_schedule_saves_nothing(board, client, fields, says):
     schedule_fields_on(client)

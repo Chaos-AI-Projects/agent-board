@@ -74,6 +74,12 @@ READY = ("implement", "ready")
 SCHEDULE_EVENT = "schedule"
 # A ready scheduled card joins the top strip this long before it is due.
 SCHEDULE_LEAD = timedelta(minutes=5)
+# AB-66: the closest two fire times of one schedule may fall, in minutes.
+SCHEDULE_MIN_GAP = 5
+# Every weekday falls on every date, leap day included, within 28 years.
+CALENDAR_CYCLE_YEARS = 28
+# croniter's R item, bare or as R(a-b) or R/n, rolls a new value on every read.
+RANDOM_ITEM = re.compile(r"r(\(|/|$)", re.IGNORECASE)
 SCHEDULED_HINT = ("Ready cron cards not due for more than five minutes. Each joins the "
                   "queue strip as its due time nears. Not draggable.")
 TZ_ENV = "BOARD_TIMEZONE"
@@ -1401,6 +1407,9 @@ def _check_schedule(schedule, zone):
     schedule = " ".join(schedule.split())
     if len(schedule.split()) != 5 or not croniter.is_valid(schedule):
         raise BoardError(f"a schedule is five cron fields, not {schedule!r}")
+    if any(RANDOM_ITEM.match(item) for field in schedule.split() for item in field.split(",")):
+        raise BoardError(f"the schedule {schedule!r} has a random R field, so its runs could "
+                         f"fall under {SCHEDULE_MIN_GAP} minutes apart")
     if not zone:
         raise BoardError("a schedule needs a time zone")
     try:
@@ -1412,7 +1421,43 @@ def _check_schedule(schedule, zone):
         next_due(schedule, zone, datetime.now(timezone.utc))
     except CroniterBadDateError:
         raise BoardError(f"the schedule {schedule!r} never comes due") from None
+    gap = _short_gap(schedule)
+    if gap is not None:
+        raise BoardError(f"the schedule {schedule!r} can fire as little as {gap} "
+                         f"minute{'s' * (gap != 1)} apart; runs must be at least "
+                         f"{SCHEDULE_MIN_GAP} minutes apart")
     return schedule, zone
+
+
+def _short_gap(schedule):
+    """The fewest minutes between two fire times, when under SCHEDULE_MIN_GAP.
+
+    Gaps are wall-clock. Within a day they come from the minute and hour
+    fields alone. Across midnight the day's last time meets the next day's
+    first, which counts only when two consecutive dates both fire.
+    """
+    fields, _ = croniter.expand(schedule)
+    minutes = range(60) if fields[0] == ["*"] else fields[0]
+    hours = range(24) if fields[1] == ["*"] else fields[1]
+    times = sorted(h * 60 + m for h in hours for m in minutes)
+    gaps = [b - a for a, b in zip(times, times[1:])]
+    overnight = 24 * 60 - times[-1] + times[0]
+    if overnight < SCHEDULE_MIN_GAP and _fires_on_consecutive_days(schedule):
+        gaps.append(overnight)
+    gap = min(gaps, default=None)
+    return gap if gap is not None and gap < SCHEDULE_MIN_GAP else None
+
+
+def _fires_on_consecutive_days(schedule):
+    days = croniter("0 0 " + " ".join(schedule.split()[2:]), datetime(2000, 1, 1))
+    end = datetime(2000 + CALENDAR_CYCLE_YEARS, 1, 1)
+    prev = days.get_next(datetime)
+    while prev < end:
+        day = days.get_next(datetime)
+        if day - prev == timedelta(days=1):
+            return True
+        prev = day
+    return False
 
 
 def _apply_schedule(issue, schedule, zone, now):

@@ -76,7 +76,7 @@
     {# AB-61: the same cron and zone pair as the card page's schedule form.
        AB-64: shown only once the viewer turns them on in /preferences. #}
     {% if schedule_fields %}
-    <label>Cron <input name="cron" value="" size="20" placeholder="0 9 * * 1-5" title="Five cron fields; leave blank for no schedule"></label>
+    <label>Cron <input name="cron" value="" size="20" placeholder="0 9 * * 1-5" title="Five cron fields, runs at least 5 minutes apart; leave blank for no schedule"></label>
     <label>Time zone <input name="timezone" value="{{ tz.key }}" size="24"></label>
     {% endif %}
     <label>Files <input type="file" name="files" multiple></label>

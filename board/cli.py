@@ -138,7 +138,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--label", action="append", default=[])
     sp.add_argument("--workflow-id", type=int)
     sp.add_argument("--position", type=int)
-    sp.add_argument("--schedule", help="five cron fields; the card waits until each due time")
+    sp.add_argument("--schedule", help="five cron fields, runs at least 5 minutes apart; the card waits until each due time")
     sp.add_argument("--timezone", help="the IANA zone --schedule is read in; defaults to "
                                        "$BOARD_TIMEZONE, else UTC")
     sp.add_argument("--creator", help="the person an agent enters the card for; "

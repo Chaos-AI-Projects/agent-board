@@ -439,6 +439,9 @@ def test_create_and_schedule_take_a_timezone(migrated, monkeypatch):
     is_error, payload = call(migrated, "create", actor=CHAOS, project="MS", title="y",
                              schedule="0 9 * * *", timezone="Mars/Olympus")
     assert is_error and "zone" in payload["message"]
+    is_error, payload = call(migrated, "create", actor=CHAOS, project="MS", title="z",
+                             schedule="* * * * *")
+    assert is_error and "5 minutes" in payload["message"]
     assert ok(migrated, "next") == {"issue": None}
 
 

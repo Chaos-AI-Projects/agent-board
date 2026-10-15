@@ -154,6 +154,61 @@ def test_a_date_that_never_comes_is_refused(board):
         scheduled(board, expr="0 9 31 2 *")
 
 
+# --- AB-66: no schedule fires more often than every 5 minutes ---------------------
+
+
+@pytest.mark.parametrize("expr", [
+    "* * * * *",
+    "*/4 * * * *",
+    "0,2 9 * * *",
+    "0-3 9 * * 1",
+    # 23:58 one day and 00:00 the next are 2 minutes apart.
+    "0,58 0,23 * * *",
+    "0,58 0,23 * * 1,2",
+    "0,58 0,23 14,15 * *",
+])
+def test_ab66_a_schedule_under_five_minutes_apart_is_refused(board, expr):
+    with pytest.raises(core.BoardError, match="5 minutes"):
+        scheduled(board, expr=expr)
+
+
+@pytest.mark.parametrize("expr", [
+    "*/5 * * * *",
+    "0,5 9 * * *",
+    "0 9 * * *",
+    # Monday 23:58 and Wednesday 00:00 are never on consecutive days.
+    "0,58 0,23 * * 1,3",
+    "0,58 0,23 1 * *",
+    "0,58 0,23 L * *",
+])
+def test_ab66_five_minutes_apart_or_more_is_kept(board, expr):
+    assert scheduled(board, expr=expr)["schedule"] == expr
+
+
+@pytest.mark.parametrize("expr", ["R * * * *", "0 R * * *", "r/10 * * * *", "R(0-30) 9 * * *"])
+def test_ab66_a_random_field_is_refused(board, expr):
+    # croniter rolls R afresh on every next_due, so its gap is anyone's guess.
+    with pytest.raises(core.BoardError, match="random"):
+        scheduled(board, expr=expr)
+
+
+def test_ab66_month_and_day_names_are_not_mistaken_for_random(board):
+    assert scheduled(board, expr="0 9 * apr,mar fri")["schedule"] == "0 9 * apr,mar fri"
+
+
+def test_ab66_the_refusal_says_how_close_the_runs_fall(board):
+    with pytest.raises(core.BoardError, match=r"2 minutes apart"):
+        scheduled(board, expr="0,2 9 * * *")
+
+
+def test_ab66_changing_a_schedule_is_refused_too(board):
+    issue = scheduled(board)
+    with pytest.raises(core.BoardError, match="5 minutes"):
+        core.set_schedule(board, issue["id"], "* * * * *", timezone=SYDNEY,
+                          actor=CHAOS, actor_kind=HUMAN)
+    assert core.show(board, issue["id"])["schedule"] == "0 9 * * *"
+
+
 # --- AB-65: a schedule switched off and on ---------------------------------------
 
 

@@ -530,6 +530,9 @@ def test_schedule_sets_and_clears_and_refuses_an_unknown_zone(url):
     bad = board(url, "--actor-kind", "human", "schedule", issue_id, "--cron", "0 9 * * *",
                 "--timezone", "Mars/Olympus", actor=CHAOS)
     assert bad.returncode == 1 and "zone" in bad.stderr
+    often = board(url, "--actor-kind", "human", "schedule", issue_id, "--cron", "* * * * *",
+                  "--timezone", "UTC", actor=CHAOS)
+    assert often.returncode == 1 and "5 minutes" in often.stderr
     cleared = ok(board(url, "--actor-kind", "human", "schedule", issue_id, "--clear",
                        actor=CHAOS))
     assert cleared["schedule"] is None and cleared["next_run_at"] is None

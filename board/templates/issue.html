@@ -108,7 +108,7 @@
   <label>Time zone <input name="timezone" value="{{ issue.schedule_tz or tz.key }}" size="24"></label>
   <button class="primary">Save schedule</button>
   {% if issue.schedule %}<button name="clear" value="1">Clear schedule</button>{% endif %}
-  <div>Five cron fields, read in the zone beside them. A scheduled card waits until it is due, and a finished run goes back to ready for the next one.</div>
+  <div>Five cron fields, read in the zone beside them, with runs at least 5 minutes apart. A scheduled card waits until it is due, and a finished run goes back to ready for the next one.</div>
 </form>
 </details>
 </section>
