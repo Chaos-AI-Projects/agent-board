@@ -4771,3 +4771,70 @@ def test_ab60_the_moved_form_still_creates_an_issue(board, client):
                     headers=AS_CHAOS, follow_redirects=False)
     assert r.status_code in (302, 303)
     assert core.search(board, q="from under the strip")
+
+
+# --- AB-61: the New issue form can set a cron schedule --------------------------------
+
+
+def new_issue_form(html):
+    return html.split('action="/issues"', 1)[1].split("</form>", 1)[0]
+
+
+def test_ab61_the_new_issue_form_offers_cron_and_the_viewers_zone(board, client):
+    client.post("/preferences", data={"timezone": "Europe/London"})
+    form = new_issue_form(client.get("/").text)
+    assert re.search(r'<input name="cron" value=""[^>]*placeholder="0 9 \* \* 1-5"', form)
+    assert 'name="timezone" value="Europe/London"' in form
+
+
+def test_ab61_a_new_issue_with_a_cron_is_scheduled(board, client):
+    r = client.post("/issues", headers=AS_CHAOS,
+                    data={"project": "MS", "title": "nightly", "stage": "implement",
+                          "cron": " 0  9 * * * ", "timezone": "Australia/Sydney"})
+    assert r.status_code == 303
+    [hit] = core.search(board, q="nightly")
+    issue = core.show(board, hit["id"])
+    assert (issue["schedule"], issue["schedule_tz"]) == ("0 9 * * *", "Australia/Sydney")
+    due = datetime.fromisoformat(issue["next_run_at"]).astimezone(ZoneInfo("Australia/Sydney"))
+    assert (due.hour, due.minute) == (9, 0)
+
+
+def test_ab61_a_blank_cron_leaves_the_issue_unscheduled(board, client):
+    r = client.post("/issues", headers=AS_CHAOS,
+                    data={"project": "MS", "title": "plain", "cron": "  ",
+                          "timezone": "Australia/Sydney"})
+    assert r.status_code == 303
+    [hit] = core.search(board, q="plain")
+    issue = core.show(board, hit["id"])
+    assert (issue["schedule"], issue["schedule_tz"], issue["next_run_at"]) == (None, None, None)
+
+
+@pytest.mark.parametrize("cookie, env, expected", [
+    ("Europe/London", "Asia/Tokyo", "Europe/London"),
+    (None, "Asia/Tokyo", "Asia/Tokyo"),
+    (None, None, "UTC"),
+])
+def test_ab61_a_blank_zone_is_the_creators_own(board, monkeypatch, cookie, env, expected):
+    if env:
+        monkeypatch.setenv(web.TZ_ENV, env)
+    client = local_client(board)
+    if cookie:
+        client.post("/preferences", data={"timezone": cookie})
+    client.post("/issues", headers=AS_CHAOS,
+                data={"project": "MS", "title": "zoned", "cron": "0 9 * * *", "timezone": ""})
+    [hit] = core.search(board, q="zoned")
+    assert core.show(board, hit["id"])["schedule_tz"] == expected
+
+
+@pytest.mark.parametrize("fields, says", [
+    ({"cron": "every morning"}, "five cron fields"),
+    ({"cron": "0 9 * * *", "timezone": "Mars/Olympus"}, "unknown time zone"),
+])
+def test_ab61_a_bad_schedule_saves_nothing(board, client, fields, says):
+    r = client.post("/issues", headers=AS_CHAOS,
+                    data={"project": web.NEW_PROJECT, "new_project_key": "NP",
+                          "new_project_name": "x", "title": "orphan"} | fields)
+    assert r.status_code == 422
+    assert says in unescape(r.text)
+    assert core.search(board, q="orphan") == []
+    assert [p["key"] for p in core.projects(board)] == ["MS"]

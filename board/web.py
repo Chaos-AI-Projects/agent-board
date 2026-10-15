@@ -926,6 +926,13 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         r.headers["content-security-policy"] = "frame-ancestors 'self'"
         return r
 
+    def cron_zone(request, form):
+        """The zone a form's cron is read in. A blank one is the setter's own:
+        the `board_prefs` zone, else `BOARD_TIMEZONE`, else UTC, the order the
+        board shows times in."""
+        mine = zone(read_prefs(request.cookies.get(PREFS_COOKIE))["timezone"]) or default_tz
+        return (form.get("timezone") or "").strip() or mine.key
+
     def error(request, status, message, issue_id=None):
         if request.headers.get(FETCH_HEADER):
             return JSONResponse({"error": message}, status_code=status)
@@ -1363,11 +1370,14 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
             project = made["key"]
         try:
             files = await save_uploads(f)
+            # AB-61: a blank cron is no schedule, so the zone beside it is ignored.
+            cron = (f.get("cron") or "").strip() or None
             issue = core.create(engine, project, f.get("title", ""), actor=me.email,
                                 actor_kind=me.kind, body=f.get("body", ""),
                                 stage=f.get("stage") or "backlog",
                                 rank=_form_int(f.get("rank")),
-                                labels=_form_labels(f.get("labels")) or (), attachments=files)
+                                labels=_form_labels(f.get("labels")) or (), attachments=files,
+                                schedule=cron, timezone=cron_zone(request, f) if cron else None)
         except BaseException:
             if made:
                 # The issue's own error is the one to report, not a failed undo.
@@ -1465,14 +1475,12 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
     async def schedule(request: Request, issue_id: str):
         """Set, change or clear a card's cron schedule from its page (AB-54).
 
-        A blank zone is the setter's own: the `board_prefs` zone, else
-        `BOARD_TIMEZONE`, else UTC, the order the board shows times in.
+        A blank zone is the setter's own (`cron_zone`).
         """
         me = await run_in_threadpool(actor, request)
         f = await request.form()
         cron = None if f.get("clear") == "1" else (f.get("cron") or "").strip() or None
-        mine = zone(read_prefs(request.cookies.get(PREFS_COOKIE))["timezone"]) or default_tz
-        tz = (f.get("timezone") or "").strip() or mine.key
+        tz = cron_zone(request, f)
         try:
             core.set_schedule(engine, issue_id, cron, timezone=tz, actor=me.email,
                               actor_kind=me.kind, preempt=f.get("preempt") == "1",

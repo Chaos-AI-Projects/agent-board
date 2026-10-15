@@ -73,6 +73,9 @@
     <label>Body <textarea name="body"></textarea></label>
     <label>Stage <select name="stage"><option>backlog</option><option>planning</option><option>implement</option></select></label>
     <label>Labels <input name="labels" placeholder="comma, separated"></label>
+    {# AB-61: the same cron and zone pair as the card page's schedule form. #}
+    <label>Cron <input name="cron" value="" size="20" placeholder="0 9 * * 1-5" title="Five cron fields; leave blank for no schedule"></label>
+    <label>Time zone <input name="timezone" value="{{ tz.key }}" size="24"></label>
     <label>Files <input type="file" name="files" multiple></label>
     <button class="primary">Create</button> <button type="reset" class="cancel">Cancel</button>
   </form>
