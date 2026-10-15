@@ -414,12 +414,13 @@ def board_stamp(ctx: dict, buckets: dict) -> str:
     """The board's stamp: only what this board renders, so a card in an
     untracked project or a hidden lane, or a note, does not reload it. The
     clock moves on every read, so it stays out; what it decides, each card's
-    lease status, goes in instead."""
+    lease status, goes in instead. A note does move it when it changes the
+    kind of actor who acted last, which decides the Queue button (AB-58)."""
     now = ctx["now"]
 
     def card(i):
         return ({k: i[k] for k in _CARD_FIELDS} | {"lease": lease_status(i, now)}
-                | {"pr": ctx["lane_meta"].get(i["id"], {}).get("pr")})
+                | {k: ctx["lane_meta"].get(i["id"], {}).get(k) for k in ("pr", "last_actor_kind")})
 
     def flow(w):
         current = w["current"]

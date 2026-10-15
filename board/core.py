@@ -225,7 +225,9 @@ def lane_meta(engine) -> dict[str, dict]:
     to its `updated_at`, as `done_times` does for done. `pr` is the ref of its
     newest PR artifact, or None. `urls` holds every url artifact's ref and
     name in link order (AB-40, AB-43): unlike a PR, a later link does not
-    replace an earlier one.
+    replace an earlier one. `last_actor_kind` is the actor kind of its newest
+    event: the Queue button shows only when that was a human, so an agent or
+    system event hides it (AB-58).
     """
     with store.session(engine) as s:
         arrived = (select(Event.issue_id, Event.to_state, Event.to_queue,
@@ -238,7 +240,12 @@ def lane_meta(engine) -> dict[str, dict]:
                          .outerjoin(arrived, (arrived.c.issue_id == Issue.id)
                                     & (arrived.c.to_state == Issue.state)
                                     & arrived.c.to_queue.is_not_distinct_from(Issue.queue)))
-        meta = {i: {"entered_at": _iso(at), "pr": None, "urls": []} for i, at in rows}
+        meta = {i: {"entered_at": _iso(at), "pr": None, "urls": [], "last_actor_kind": None}
+                for i, at in rows}
+        newest = select(func.max(Event.id)).group_by(Event.issue_id)
+        for issue_id, actor_kind in s.execute(select(Event.issue_id, Event.actor_kind)
+                                              .where(Event.id.in_(newest))):
+            meta[issue_id]["last_actor_kind"] = actor_kind
         for issue_id, kind, ref, name in s.execute(
                 select(Artifact.issue_id, Artifact.kind, Artifact.ref, Artifact.name)
                 .where(Artifact.kind.in_(("pr", "url"))).order_by(Artifact.id)):

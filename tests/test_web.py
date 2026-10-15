@@ -4280,6 +4280,33 @@ def test_ab53_the_queue_button_shows_on_unqueued_work_cards_only(board, client):
         assert "/queue" not in card(html, cards[role]), role
 
 
+def test_ab58_no_queue_button_when_an_agent_made_the_last_change(board, client):
+    iid = ready(board, "a question")
+    token = core.next(board, "bot")["lease_token"]
+    core.queue(board, iid, None, actor="bot", actor_kind=AGENT, token=token, note="a question")
+    assert core.show(board, iid)["queue"] is None
+    html = client.get("/").text
+    assert 'class="queue-form"' not in card(html, iid)
+
+
+def test_ab58_the_queue_button_shows_when_a_human_made_the_last_change(board, client):
+    iid = ready(board, "a question")
+    token = core.next(board, "bot")["lease_token"]
+    core.queue(board, iid, None, actor="bot", actor_kind=AGENT, token=token, note="a question")
+    core.queue(board, iid, "on-hold", actor=CHAOS, actor_kind=HUMAN)
+    core.queue(board, iid, None, actor=CHAOS, actor_kind=HUMAN)
+    html = client.get("/").text
+    assert f'action="/issues/{iid}/queue"' in card(html, iid)
+
+
+def test_ab58_an_agent_note_on_a_parked_card_hides_the_button_and_moves_the_stamp(board, client):
+    iid = queued_and_waiting(board)["waiting"]
+    before = board_stamp(client)
+    core.annotate(board, iid, "answer recorded", actor="bot", actor_kind=AGENT)
+    assert board_stamp(client) != before
+    assert 'class="queue-form"' not in card(client.get("/").text, iid)
+
+
 def test_ab53_the_queue_button_queues_the_card_as_ready(board, client):
     issue = core.show(board, queued_and_waiting(board)["waiting"])
     r = client.post(f"/issues/{issue['id']}/queue", data={"version": issue["version"]}, headers=AS_CHAOS)
