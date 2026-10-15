@@ -816,19 +816,24 @@ def _form_labels(value):
     return [l.strip() for l in value.split(",") if l.strip()]
 
 
+# The `board_prefs` keys that are plain on/off switches.
+PREF_FLAGS = ("hide_old_done", "mine", "queue_collapsed", "scheduled_collapsed",
+              "schedule_fields", "schedule_warning_accepted")
+
+
 def read_prefs(raw: str | None) -> dict:
     """The saved view from a `board_prefs` cookie: projects, lanes, timezone,
     whether the done lane hides cards finished over two weeks ago (AB-13),
     whether the board shows only the cards the viewer created (AB-42),
-    whether the queue strip is collapsed to its counts (AB-57), and whether
-    the scheduled lane is collapsed to its count (AB-62).
+    whether the queue strip is collapsed to its counts (AB-57), whether
+    the scheduled lane is collapsed to its count (AB-62), and whether the New
+    issue form shows its schedule fields and their warning was accepted (AB-64).
 
     The value is JSON, percent-encoded so a browser sends it back unmangled.
     Anything unreadable, and any other key, is ignored. A list key that is
     absent or not a list of strings comes back as [], which means all; a
     timezone that is not a string comes back as "", which means the default.
-    `hide_old_done`, `mine`, `queue_collapsed` and `scheduled_collapsed` are
-    True only when the cookie says exactly true.
+    Every flag in `PREF_FLAGS` is True only when the cookie says exactly true.
     """
     try:
         data = json.loads(unquote(raw or ""))
@@ -842,10 +847,8 @@ def read_prefs(raw: str | None) -> dict:
         prefs[key] = value if ok else []
     tz = data.get("timezone")
     prefs["timezone"] = tz if isinstance(tz, str) else ""
-    prefs["hide_old_done"] = data.get("hide_old_done") is True
-    prefs["mine"] = data.get("mine") is True
-    prefs["queue_collapsed"] = data.get("queue_collapsed") is True
-    prefs["scheduled_collapsed"] = data.get("scheduled_collapsed") is True
+    for key in PREF_FLAGS:
+        prefs[key] = data.get(key) is True
     return prefs
 
 
@@ -1087,9 +1090,7 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         stale = any(lane in OLD_LANES for lane in saved["lanes"])
         return {"projects": _chosen(saved["projects"], [p["key"] for p in projects]),
                 "lanes": list(core.STAGES) if stale else _chosen(saved["lanes"], list(core.STAGES)),
-                "timezone": saved["timezone"], "hide_old_done": saved["hide_old_done"],
-                "mine": saved["mine"], "queue_collapsed": saved["queue_collapsed"],
-                "scheduled_collapsed": saved["scheduled_collapsed"]}
+                "timezone": saved["timezone"]} | {key: saved[key] for key in PREF_FLAGS}
 
     def board_view(request):
         view = core.overview(engine)
@@ -1170,7 +1171,8 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
                 "hide_old_done": prefs["hide_old_done"], "old_done": old_done,
                 "mine": mine, "can_mine": me is not None,
                 "queue_collapsed": prefs["queue_collapsed"],
-                "scheduled_collapsed": prefs["scheduled_collapsed"]}
+                "scheduled_collapsed": prefs["scheduled_collapsed"],
+                "schedule_fields": prefs["schedule_fields"]}
 
     @app.get("/", response_class=HTMLResponse)
     def board_page(request: Request):
@@ -1223,7 +1225,7 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         tz = (f.get("timezone") or "").strip()
         prefs["timezone"] = tz if zone(tz) else ""
         kept = read_prefs(request.cookies.get(PREFS_COOKIE))
-        for key in ("hide_old_done", "mine", "queue_collapsed", "scheduled_collapsed"):
+        for key in PREF_FLAGS:
             prefs[key] = kept[key]
         return saved(prefs)
 
@@ -1301,6 +1303,24 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         prefs = read_prefs(request.cookies.get(PREFS_COOKIE))
         prefs["mine"] = action == "on"
         return saved(prefs)
+
+    @app.post("/preferences/schedule-fields/{action}")
+    async def save_schedule_fields_toggle(request: Request, action: str):
+        """The New issue form's schedule fields (AB-64): show or hide them.
+
+        The first time they are turned on, the warning page answers instead and
+        nothing is saved; its Accept button posts again with accept=1. After that
+        one acceptance the toggle flips with no warning.
+        """
+        if action not in ("on", "off"):
+            return error(request, 404, "No such schedule-fields action.")
+        prefs = read_prefs(request.cookies.get(PREFS_COOKIE))
+        if action == "on" and not prefs["schedule_warning_accepted"]:
+            if (await request.form()).get("accept") != "1":
+                return page(request, "schedule_warning.html")
+            prefs["schedule_warning_accepted"] = True
+        prefs["schedule_fields"] = action == "on"
+        return saved(prefs, RedirectResponse("/preferences", status_code=303))
 
     def saved(prefs, r=None):
         r = r or back()
@@ -1386,7 +1406,9 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         try:
             files = await save_uploads(f)
             # AB-61: a blank cron is no schedule, so the zone beside it is ignored.
-            cron = (f.get("cron") or "").strip() or None
+            # AB-64: so is any cron at all while the viewer's form hides the fields.
+            shown = read_prefs(request.cookies.get(PREFS_COOKIE))["schedule_fields"]
+            cron = ((f.get("cron") or "").strip() or None) if shown else None
             issue = core.create(engine, project, f.get("title", ""), actor=me.email,
                                 actor_kind=me.kind, body=f.get("body", ""),
                                 stage=f.get("stage") or "backlog",

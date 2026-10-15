@@ -14,4 +14,10 @@
   <p>An IANA name such as Australia/Sydney. Blank uses the board's default, {{ default_tz.key }}.</p>
   <button class="primary">Save</button>
 </form>
+<form method="post" action="/preferences/schedule-fields/{{ 'off' if prefs.schedule_fields else 'on' }}">
+  <fieldset><legend>New issue form</legend>
+  <p>Schedule fields (cron and time zone) are {{ 'shown' if prefs.schedule_fields else 'hidden' }}.</p>
+  <button>{{ 'Hide' if prefs.schedule_fields else 'Show' }} schedule fields</button>
+  </fieldset>
+</form>
 {% endblock %}

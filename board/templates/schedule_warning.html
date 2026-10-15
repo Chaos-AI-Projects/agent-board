@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Schedule fields -- agent-board{% endblock %}
+{% block main %}
+<form method="post" action="/preferences/schedule-fields/on">
+  <h2>Before you turn on schedule fields</h2>
+  <p>A scheduled card re-enters the ready queue on every due time, so an agent will run it again each time until the schedule is cleared.</p>
+  <p>This warning shows once. After you accept it, the toggle on Preferences flips freely.</p>
+  <input type="hidden" name="accept" value="1">
+  <button class="primary">I understand, show the fields</button> <a href="/preferences">Cancel</a>
+</form>
+{% endblock %}

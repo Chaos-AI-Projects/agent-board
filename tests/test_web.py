@@ -1357,7 +1357,8 @@ def test_saving_preferences_sets_a_lax_year_long_cookie(client, board):
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
         "projects": ["BR"], "lanes": ["implement", "done"], "timezone": "",
         "hide_old_done": False, "mine": False, "queue_collapsed": False,
-        "scheduled_collapsed": False}
+        "scheduled_collapsed": False,
+        "schedule_fields": False, "schedule_warning_accepted": False}
 
 
 def test_the_board_shows_only_the_saved_projects_and_lanes(client, board):
@@ -1434,7 +1435,8 @@ def test_saving_keeps_only_known_projects_and_lanes(client, board):
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
         "projects": ["BR"], "lanes": ["implement", "done"], "timezone": "",
         "hide_old_done": False, "mine": False, "queue_collapsed": False,
-        "scheduled_collapsed": False}
+        "scheduled_collapsed": False,
+        "schedule_fields": False, "schedule_warning_accepted": False}
 
 
 def test_preferences_are_a_same_origin_post_only(client, board):
@@ -1514,7 +1516,8 @@ def test_a_banner_save_keeps_the_saved_lanes_and_timezone(client, board):
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
         "projects": ["BR"], "lanes": ["implement", "done"], "timezone": "Asia/Tokyo",
         "hide_old_done": False, "mine": False, "queue_collapsed": False,
-        "scheduled_collapsed": False}
+        "scheduled_collapsed": False,
+        "schedule_fields": False, "schedule_warning_accepted": False}
     assert lanes(client.get("/").text) == ["implement", "done"]
 
 
@@ -1553,7 +1556,8 @@ def test_the_preferences_page_still_saves_every_key(client, board):
     client.post("/preferences", data={"project": ["MS"], "lane": ["implement"]})
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
         "projects": ["MS"], "lanes": ["implement"], "timezone": "", "hide_old_done": False, "mine": False, "queue_collapsed": False,
-        "scheduled_collapsed": False}
+        "scheduled_collapsed": False,
+        "schedule_fields": False, "schedule_warning_accepted": False}
 
 
 # --- the banner is "View", right of the toggles (MS-653) -------------------------
@@ -1681,12 +1685,14 @@ def test_a_lane_save_keeps_projects_and_timezone(client, board):
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
         "projects": ["BR"], "lanes": [s for s in ALL_LANES if s != "done"],
         "timezone": "Asia/Tokyo", "hide_old_done": False, "mine": False, "queue_collapsed": False,
-        "scheduled_collapsed": False}
+        "scheduled_collapsed": False,
+        "schedule_fields": False, "schedule_warning_accepted": False}
     client.post("/preferences/lanes/show", data={"lane": "done"})
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
         "projects": ["BR"], "lanes": [], "timezone": "Asia/Tokyo",
         "hide_old_done": False, "mine": False, "queue_collapsed": False,
-        "scheduled_collapsed": False}
+        "scheduled_collapsed": False,
+        "schedule_fields": False, "schedule_warning_accepted": False}
 
 
 @pytest.mark.parametrize("action", ["hide", "show"])
@@ -4787,6 +4793,7 @@ def new_issue_form(html):
 
 
 def test_ab61_the_new_issue_form_offers_cron_and_the_viewers_zone(board, client):
+    schedule_fields_on(client)
     client.post("/preferences", data={"timezone": "Europe/London"})
     form = new_issue_form(client.get("/").text)
     assert re.search(r'<input name="cron" value=""[^>]*placeholder="0 9 \* \* 1-5"', form)
@@ -4794,6 +4801,7 @@ def test_ab61_the_new_issue_form_offers_cron_and_the_viewers_zone(board, client)
 
 
 def test_ab61_a_new_issue_with_a_cron_is_scheduled(board, client):
+    schedule_fields_on(client)
     r = client.post("/issues", headers=AS_CHAOS,
                     data={"project": "MS", "title": "nightly", "stage": "implement",
                           "cron": " 0  9 * * * ", "timezone": "Australia/Sydney"})
@@ -4824,6 +4832,7 @@ def test_ab61_a_blank_zone_is_the_creators_own(board, monkeypatch, cookie, env, 
     if env:
         monkeypatch.setenv(web.TZ_ENV, env)
     client = local_client(board)
+    schedule_fields_on(client)
     if cookie:
         client.post("/preferences", data={"timezone": cookie})
     client.post("/issues", headers=AS_CHAOS,
@@ -4837,6 +4846,7 @@ def test_ab61_a_blank_zone_is_the_creators_own(board, monkeypatch, cookie, env, 
     ({"cron": "0 9 * * *", "timezone": "Mars/Olympus"}, "unknown time zone"),
 ])
 def test_ab61_a_bad_schedule_saves_nothing(board, client, fields, says):
+    schedule_fields_on(client)
     r = client.post("/issues", headers=AS_CHAOS,
                     data={"project": web.NEW_PROJECT, "new_project_key": "NP",
                           "new_project_name": "x", "title": "orphan"} | fields)
@@ -4969,3 +4979,87 @@ def test_ab63_a_card_its_creator_wrote_names_only_the_creator(board, client):
     assert f"Created by {CHAOS}" in html
     assert "entered by agent" not in html
     assert "created this for" not in html
+
+
+# --- AB-64: the New issue schedule fields sit behind a preference -----------------------
+
+
+def schedule_fields_on(client):
+    """Turn the pref on the way a person does: accept the warning once."""
+    r = client.post("/preferences/schedule-fields/on", data={"accept": "1"})
+    assert r.status_code == 303
+
+
+def test_ab64_the_new_issue_form_hides_the_schedule_fields_by_default(board, client):
+    form = new_issue_form(client.get("/").text)
+    assert 'name="cron"' not in form and 'name="timezone"' not in form
+
+
+def test_ab64_the_server_ignores_a_posted_schedule_while_the_pref_is_off(board, client):
+    r = client.post("/issues", headers=AS_CHAOS,
+                    data={"project": "MS", "title": "sneaky", "cron": "0 9 * * *",
+                          "timezone": "Australia/Sydney"})
+    assert r.status_code == 303
+    [hit] = core.search(board, q="sneaky")
+    issue = core.show(board, hit["id"])
+    assert (issue["schedule"], issue["schedule_tz"], issue["next_run_at"]) == (None, None, None)
+
+
+def test_ab64_turning_it_on_first_shows_the_warning_and_saves_nothing(board, client):
+    r = client.post("/preferences/schedule-fields/on")
+    assert r.status_code == 200
+    assert "re-enters the ready queue on every due time" in unescape(r.text)
+    assert re.search(r'<form[^>]*action="/preferences/schedule-fields/on"', r.text)
+    assert 'name="accept" value="1"' in r.text
+    assert "set-cookie" not in r.headers
+    prefs = web.read_prefs(client.cookies.get(web.PREFS_COOKIE))
+    assert (prefs["schedule_fields"], prefs["schedule_warning_accepted"]) == (False, False)
+
+
+def test_ab64_accepting_the_warning_turns_the_fields_on(board, client):
+    schedule_fields_on(client)
+    prefs = web.read_prefs(client.cookies.get(web.PREFS_COOKIE))
+    assert (prefs["schedule_fields"], prefs["schedule_warning_accepted"]) == (True, True)
+    form = new_issue_form(client.get("/").text)
+    assert 'name="cron"' in form and 'name="timezone"' in form
+    client.post("/issues", headers=AS_CHAOS,
+                data={"project": "MS", "title": "wanted", "cron": "0 9 * * *",
+                      "timezone": "Australia/Sydney"})
+    [hit] = core.search(board, q="wanted")
+    assert core.show(board, hit["id"])["schedule"] == "0 9 * * *"
+
+
+def test_ab64_after_one_acceptance_the_toggle_flips_with_no_warning(board, client):
+    schedule_fields_on(client)
+    assert client.post("/preferences/schedule-fields/off").status_code == 303
+    prefs = web.read_prefs(client.cookies.get(web.PREFS_COOKIE))
+    assert (prefs["schedule_fields"], prefs["schedule_warning_accepted"]) == (False, True)
+    assert 'name="cron"' not in new_issue_form(client.get("/").text)
+    assert client.post("/preferences/schedule-fields/on").status_code == 303
+    assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE))["schedule_fields"] is True
+
+
+def test_ab64_the_preferences_page_offers_the_toggle(board, client):
+    page = client.get("/preferences").text
+    assert re.search(r'<form[^>]*action="/preferences/schedule-fields/on"', page)
+    schedule_fields_on(client)
+    page = client.get("/preferences").text
+    assert re.search(r'<form[^>]*action="/preferences/schedule-fields/off"', page)
+
+
+def test_ab64_other_view_saves_keep_the_schedule_pref(board, client):
+    schedule_fields_on(client)
+    client.post("/preferences", data={"timezone": "Europe/London"})
+    client.post("/preferences/queue/collapse")
+    prefs = web.read_prefs(client.cookies.get(web.PREFS_COOKIE))
+    assert (prefs["schedule_fields"], prefs["schedule_warning_accepted"]) == (True, True)
+
+
+def test_ab64_an_unknown_action_is_refused(board, client):
+    assert client.post("/preferences/schedule-fields/maybe").status_code == 404
+
+
+def test_ab64_only_an_exact_true_counts():
+    raw = quote(json.dumps({"schedule_fields": 1, "schedule_warning_accepted": "true"}), safe="")
+    prefs = web.read_prefs(raw)
+    assert (prefs["schedule_fields"], prefs["schedule_warning_accepted"]) == (False, False)
