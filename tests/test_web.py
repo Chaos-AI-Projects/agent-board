@@ -4949,3 +4949,23 @@ def test_ab62_the_page_script_takes_over_both_toggles(board, client):
     script = re.search(r"<script>\s*// AB-59:(.*?)</script>", html, re.S).group(1)
     assert ".scheduled-lane" in script and ".scheduled-toggle" in script
     assert "location.reload" not in script
+
+
+def text_of(html):
+    """A page's visible text with tags dropped and whitespace collapsed."""
+    return " ".join(unescape(re.sub(r"<[^>]+>", " ", html)).split())
+
+
+def test_ab63_the_issue_page_names_the_creator_and_the_entering_agent(board, client):
+    iid = core.create(board, "MS", "his ask", actor="overlord", actor_kind=AGENT,
+                      creator=CHAOS)["id"]
+    html = text_of(client.get(f"/issues/{iid}").text)
+    assert f"Created by {CHAOS}, entered by agent overlord" in html
+    assert f"overlord (agent) · created this for {CHAOS}" in html
+
+
+def test_ab63_a_card_its_creator_wrote_names_only_the_creator(board, client):
+    html = text_of(client.get(f"/issues/{ready(board)}").text)
+    assert f"Created by {CHAOS}" in html
+    assert "entered by agent" not in html
+    assert "created this for" not in html

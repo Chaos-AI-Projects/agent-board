@@ -176,18 +176,20 @@ def build_server(engine, actor: str | Callable[[], str], brain=_FROM_ENV,
                workflow_id: int | None = None, position: int | None = None,
                request_id: str | None = None,
                queue: str | None = None, schedule: str | None = None,
-               timezone: str | None = None) -> CallToolResult:
+               timezone: str | None = None, creator: str | None = None) -> CallToolResult:
         """A new issue in `stage`: backlog, planning or implement.
 
         Planning and implement start queued as ready.
         `schedule` is five cron fields read in `timezone`, which defaults to
         $BOARD_TIMEZONE, else UTC; `next` skips the card until each due time.
+        `creator` is the person's email when an agent enters the card for
+        someone; the agent stays the actor of the create event (AB-63).
         """
         return run(core.create, engine, project, title, body=body, stage=stage,
                    queue=queue, rank=rank,
                    labels=labels or [], workflow_id=workflow_id, position=position,
                    request_id=request_id, schedule=schedule,
-                   timezone=_zone(schedule, timezone), **who())
+                   timezone=_zone(schedule, timezone), creator=creator, **who())
 
     @mcp.tool()
     def schedule(id: str, schedule: str | None, timezone: str | None = None,

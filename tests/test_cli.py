@@ -556,3 +556,19 @@ def test_ab55_create_takes_no_state(url):
     assert proc.returncode == 2
     out = ok(board(url, "create", "--project", "MS", "--title", "t"))
     assert (out["stage"], out["queue"]) == ("backlog", None)
+
+
+def test_ab63_create_names_the_person_an_agent_enters_the_card_for(url):
+    out = ok(board(url, "--actor-kind", "agent", "create", "--project", "MS",
+                   "--title", "his ask", "--creator", CHAOS, actor="overlord"))
+    assert (out["creator"], out["creator_kind"], out["created_by_agent"]) == (
+        CHAOS, "human", "overlord")
+    assert out["events"][0]["actor"] == "overlord"
+    assert out["events"][0]["on_behalf_of"] == CHAOS
+
+
+def test_ab63_a_human_cannot_name_a_creator(url):
+    proc = board(url, "--actor-kind", "human", "create", "--project", "MS",
+                 "--title", "t", "--creator", "someone@example.com", actor=CHAOS)
+    assert proc.returncode == 1
+    assert "only an agent" in json.loads(proc.stderr)["message"]

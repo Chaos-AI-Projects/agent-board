@@ -392,7 +392,7 @@ def overview(engine, *, q: str | None = None, project: str | None = None,
             "assignees": sorted({a for col in (Issue.assignee, Issue.lease_holder)
                                  for a in s.scalars(select(col).distinct()
                                                     .where(col.is_not(None)))}),
-            "creators": sorted(s.scalars(select(Event.actor).distinct()
+            "creators": sorted(s.scalars(select(_creator_col()).distinct()
                                          .where(Event.kind == "create"))),
             "templates": [{"name": t.name, "title": t.title}
                           for t in s.scalars(select(Template).order_by(Template.name))],
@@ -433,10 +433,16 @@ def search(engine, *, q: str | None = None, project: str | None = None,
     `project`, `label` and `assignee` match exactly. Nothing writes an
     issue's `assignee` yet, so `assignee` also matches the lease holder: the
     agent or human holding a card is the one working it. `creator` is the
-    actor of the issue's create event (AB-27). An empty filter is no filter.
+    actor of the issue's create event (AB-27), or the person an agent named
+    on it (AB-63). An empty filter is no filter.
     """
     with store.session(engine) as s:
         return _search(s, q, project, label, assignee, creator)
+
+
+def _creator_col():
+    """A create event's creator: the person named for it, else its actor (AB-63)."""
+    return func.coalesce(Event.on_behalf_of, Event.actor)
 
 
 def _search(s, q, project, label, assignee, creator=None):
@@ -461,7 +467,7 @@ def _search(s, q, project, label, assignee, creator=None):
         stmt = stmt.where(or_(Issue.assignee == assignee, Issue.lease_holder == assignee))
     if creator:
         stmt = stmt.where(exists().where(Event.issue_id == Issue.id, Event.kind == "create",
-                                         Event.actor == creator))
+                                         _creator_col() == creator))
     return [_row(i) for i in s.scalars(stmt)]
 
 
@@ -490,7 +496,9 @@ def counted_kind(actor: str, kind: str, agents=frozenset()) -> str:
 def stats(engine, *, days: int = STATS_DAYS, limit: int = 50, agents=frozenset()) -> dict:
     """What each actor did in the last `days` days, read from the event log (AB-29).
 
-    Per actor and actor kind: `created` counts create events, `moved` counts
+    Per actor and actor kind: `created` counts the cards each one created,
+    crediting a card an agent entered for a person to that person (AB-63),
+    who counts as human. `moved` counts
     events that changed an issue's state (a claim or a transition), `done`
     the moves into done, `noted` the annotations, and `events` every event of
     any kind. A reclaim, a preempt, or a transition to the state the issue is
@@ -513,10 +521,15 @@ def stats(engine, *, days: int = STATS_DAYS, limit: int = 50, agents=frozenset()
         since = now - timedelta(days=days)
         rows = s.execute(
             select(Event.actor, Event.actor_kind,
-                   count(Event.kind == "create"), count(moved),
+                   count(and_(Event.kind == "create", Event.on_behalf_of.is_(None))),
+                   count(moved),
                    count(and_(moved, Event.to_state == "done")),
                    count(Event.kind == "annotate"), func.count())
             .where(Event.at >= since).group_by(Event.actor, Event.actor_kind)).all()
+        entered = s.execute(
+            select(Event.on_behalf_of, func.count())
+            .where(Event.at >= since, Event.kind == "create", Event.on_behalf_of.is_not(None))
+            .group_by(Event.on_behalf_of)).all()
         activity = s.execute(
             select(Event, Issue.title).join(Issue, Event.issue_id == Issue.id)
             .where(Event.at >= since).order_by(Event.id.desc()).limit(limit)).all()
@@ -528,6 +541,10 @@ def stats(engine, *, days: int = STATS_DAYS, limit: int = 50, agents=frozenset()
                                                 "events": 0})
             for name, n in zip(("created", "moved", "done", "noted", "events"), counts):
                 row[name] += n
+        for person, n in entered:
+            actors.setdefault((person, "human"), {"actor": person, "actor_kind": "human",
+                                                  "created": 0, "moved": 0, "done": 0,
+                                                  "noted": 0, "events": 0})["created"] += n
         return {
             "now": _iso(now), "since": _iso(since), "days": days,
             "actors": sorted(actors.values(),
@@ -715,13 +732,15 @@ def create(engine, project: str, title: str, *, actor: str, actor_kind: str,
            position: int | None = None, request_id: str | None = None,
            attachments: list[dict] = (), stage: str | None = None,
            queue: str | None = None, schedule: str | None = None,
-           timezone: str | None = None) -> dict:
+           timezone: str | None = None, creator: str | None = None) -> dict:
     """A new issue, in `stage` (backlog when not given) and `queue`.
 
     `schedule` is five cron fields read in `timezone`, an IANA zone the
-    caller resolves (AB-54); the two go together.
+    caller resolves (AB-54); the two go together. `creator` is the person
+    an agent enters the card for (AB-63); only an agent may name one.
     """
     where = _create_where("an issue", stage or "backlog", queue)
+    creator = _check_creator(creator, actor, actor_kind)
     schedule, timezone = _check_schedule(schedule, timezone)
     if (workflow_id is None) != (position is None):
         raise BoardError("workflow_id and position go together")
@@ -731,7 +750,7 @@ def create(engine, project: str, title: str, *, actor: str, actor_kind: str,
     def run(s):
         now = store.db_now(s)
         issue = _create(s, project, title, actor, actor_kind, body, where, rank,
-                        labels, workflow_id, position, now, key)
+                        labels, workflow_id, position, now, key, creator)
         if schedule is not None:
             _apply_schedule(issue, schedule, timezone, now)
         _attach(s, issue, None, attachments, actor, now)
@@ -739,7 +758,31 @@ def create(engine, project: str, title: str, *, actor: str, actor_kind: str,
 
     return _write(engine, key, run, _replay_view,
                   [title, body, list(where), rank, sorted(set(labels)), workflow_id, position,
-                   actor, actor_kind, schedule, timezone, *_digests(attachments)])
+                   actor, actor_kind, schedule, timezone, *_digests(attachments),
+                   # Only when given, so a call without one hashes as before AB-63.
+                   *([["creator", creator]] if creator else [])])
+
+
+def _check_creator(creator, actor, actor_kind):
+    """The person a card is entered for, or None (AB-63, plan section 3).
+
+    Naming one grants nothing, but it must still name a person: an email
+    that is not a service account's, and not the agent itself.
+    """
+    if creator is None:
+        return None
+    if actor_kind != "agent":
+        raise BoardError("only an agent may name a card's creator; "
+                         "a person who creates a card is its creator")
+    creator = creator.strip()
+    if not creator or len(creator) > 200:
+        raise BoardError("a creator is a non-empty email of at most 200 characters")
+    who = creator.lower()
+    if "@" not in who or who.endswith(SERVICE_ACCOUNT_SUFFIX):
+        raise BoardError(f"a creator is a person's email, not {creator!r}")
+    if who == actor.lower():
+        raise BoardError("an agent cannot name itself as a card's creator")
+    return creator
 
 
 def set_schedule(engine, issue_id: str, schedule: str | None, *, timezone: str | None,
@@ -1287,7 +1330,7 @@ def _create_where(what, stage, queue):
 
 
 def _create(s, project, title, actor, actor_kind, body, where, rank, labels,
-            workflow_id, position, now, key):
+            workflow_id, position, now, key, creator=None):
     stage, queue = where
     number = s.scalar(
         update(Project).where(Project.key == project)
@@ -1304,7 +1347,8 @@ def _create(s, project, title, actor, actor_kind, body, where, rank, labels,
                   labels=[Label(name=n) for n in sorted(set(labels))])
     s.add(issue)
     s.flush()
-    _event(s, issue.id, now, actor, actor_kind, "create", None, stage, None, key, None, queue)
+    _event(s, issue.id, now, actor, actor_kind, "create", None, stage, None, key, None, queue,
+           on_behalf_of=creator)
     return issue
 
 
@@ -1515,12 +1559,13 @@ def _lost_message(s, issue):
 
 
 def _event(s, issue_id, at, actor, actor_kind, kind, from_state, to_state, note, key,
-           from_queue=None, to_queue=None):
+           from_queue=None, to_queue=None, on_behalf_of=None):
     if actor_kind not in ACTOR_KINDS:
         raise BoardError(f"actor kind {actor_kind!r} is not one of {sorted(ACTOR_KINDS)}")
     ev = Event(issue_id=issue_id, at=at, actor=actor, actor_kind=actor_kind, kind=kind,
                from_state=from_state, to_state=to_state, from_queue=from_queue,
-               to_queue=to_queue, note=note, idempotency_key=key)
+               to_queue=to_queue, on_behalf_of=on_behalf_of, note=note,
+               idempotency_key=key)
     s.add(ev)
     s.flush()
     return ev
@@ -1664,6 +1709,7 @@ def _view(s, issue):
         "version": issue.version,
         "created_at": _iso(issue.created_at),
         "updated_at": _iso(issue.updated_at),
+        **_creator_view(issue),
         "closed_by_artifact": any(a.closes for a in issue.artifacts),
         "artifacts": [
             {"kind": a.kind, "ref": a.ref, "name": a.name, "closes": a.closes,
@@ -1676,7 +1722,7 @@ def _view(s, issue):
             {"id": e.id, "at": _iso(e.at), "actor": e.actor, "actor_kind": e.actor_kind,
              "kind": e.kind, "from_stage": e.from_state, "to_stage": e.to_state,
              "from_queue": e.from_queue, "to_queue": e.to_queue,
-             "note": e.note,
+             "on_behalf_of": e.on_behalf_of, "note": e.note,
              "attachments": [_attachment_view(a) for a in issue.attachments
                              if a.event_id == e.id]}
             for e in issue.events
@@ -1687,6 +1733,23 @@ def _view(s, issue):
         "depends_on": _linked(s, Dependency.depends_on_id, Dependency.issue_id, issue.id),
         "blocks": _linked(s, Dependency.issue_id, Dependency.depends_on_id, issue.id),
     }
+
+
+def _creator_view(issue):
+    """Who a card was made for and which agent entered it (AB-63).
+
+    `created_by_agent` is set only when an agent entered the card for a
+    person; a creator named that way is a person, so human.
+    """
+    creates = [e for e in issue.events if e.kind == "create"]
+    if not creates:
+        return {"creator": None, "creator_kind": None, "created_by_agent": None}
+    create = creates[0]
+    if create.on_behalf_of:
+        return {"creator": create.on_behalf_of, "creator_kind": "human",
+                "created_by_agent": create.actor}
+    return {"creator": create.actor, "creator_kind": create.actor_kind,
+            "created_by_agent": None}
 
 
 def _linked(s, far, near, issue_id):

@@ -57,6 +57,12 @@ Every other error prints one JSON object on stderr naming its class. The actor c
 `BOARD_ACTOR`, before or after the subcommand, and `--actor-kind` defaults to `agent`. `next` claims
 only as an agent. `migrate`, `create-project`, `show` and `search` need no actor.
 
+An agent that cards a person's ask names that person with `board create --creator EMAIL`, or the MCP
+`create` tool's `creator` (AB-63). The person becomes the card's creator for search, the "created by
+me" view and the stats page's Created column. The agent stays the create event's actor, and the card
+page reads "Created by EMAIL, entered by agent NAME". Only an agent may name a creator, never itself,
+and naming one grants nothing.
+
 `board search [Q] [--project P] [--label L] [--assignee A]` prints `{"issues": [...]}`. `Q` is a
 case-insensitive substring of the id, title, body or any label, matched with plain `lower() LIKE` so
 neither engine needs a full-text extension. The flags match exactly, and everything given must match. Nothing
@@ -143,7 +149,8 @@ name plays no part.
 its key, because every issue id carries the key. Delete appears only for a project with no issues.
 
 `/stats` is read-only and counts what each actor did over the last 14 days, or `?days=N` for any
-window from 1 to 3650 days. Each row gives an actor's cards created, state changes, moves into done
+window from 1 to 3650 days. Each row gives an actor's cards created, counting a card an agent entered
+for a person as that person's, state changes, moves into done
 and notes, then all their events. Below the table, the newest 50 events link to their issues.
 
 An issue page shows its body as rendered markdown. Its "Edit issue" control opens a form with the

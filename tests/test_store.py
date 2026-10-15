@@ -495,3 +495,12 @@ def test_0010_downgrade_folds_a_planning_card_by_its_queue(engine):
                 ":now, :now)"), {"id": f"MS-{n}", "q": queue, "rank": n, "now": now()})
     store.downgrade(engine, "0009")
     assert _stored_states(engine)[0] == ["ready", "processing", "onhold", "need-input"]
+
+
+def test_ab63_0011_adds_on_behalf_of_to_events_and_downgrade_drops_it(engine):
+    store.upgrade(engine, "0010")
+    assert "on_behalf_of" not in {c["name"] for c in inspect(engine).get_columns("event")}
+    store.upgrade(engine, "0011")
+    assert "on_behalf_of" in {c["name"] for c in inspect(engine).get_columns("event")}
+    store.downgrade(engine, "0010")
+    assert "on_behalf_of" not in {c["name"] for c in inspect(engine).get_columns("event")}

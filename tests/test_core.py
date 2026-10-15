@@ -2066,3 +2066,74 @@ def test_ab49_a_human_still_needs_a_note_for_need_input_and_a_reopen(board):
     core.move(board, iid, "done", actor="w1", actor_kind=AGENT, note="PR", token=tok)
     with pytest.raises(core.NoteRequired):
         core.move(board, iid, "implement", actor=CHAOS, actor_kind=HUMAN)
+
+
+# --- AB-63: an agent enters a card for a person -----------------------------
+
+
+def test_ab63_an_agent_names_the_person_a_card_was_made_for(board):
+    view = core.create(board, "MS", "his ask", actor="overlord", actor_kind=AGENT,
+                       creator=CHAOS)
+    assert (view["creator"], view["creator_kind"], view["created_by_agent"]) == (
+        CHAOS, HUMAN, "overlord")
+    create = view["events"][0]
+    assert (create["actor"], create["actor_kind"], create["on_behalf_of"]) == (
+        "overlord", AGENT, CHAOS)
+
+
+def test_ab63_a_card_without_a_creator_names_whoever_wrote_it(board):
+    mine = core.create(board, "MS", "mine", actor=CHAOS, actor_kind=HUMAN)
+    theirs = core.create(board, "MS", "theirs", actor="overlord", actor_kind=AGENT)
+    assert (mine["creator"], mine["creator_kind"], mine["created_by_agent"]) == (
+        CHAOS, HUMAN, None)
+    assert (theirs["creator"], theirs["creator_kind"], theirs["created_by_agent"]) == (
+        "overlord", AGENT, None)
+    assert theirs["events"][0]["on_behalf_of"] is None
+
+
+def test_ab63_search_and_the_creator_list_use_the_creator(board):
+    entered = core.create(board, "MS", "entered", actor="overlord", actor_kind=AGENT,
+                          creator=CHAOS)["id"]
+    own = core.create(board, "MS", "own", actor="overlord", actor_kind=AGENT)["id"]
+    assert ids(core.search(board, creator=CHAOS)) == [entered]
+    assert ids(core.search(board, creator="overlord")) == [own]
+    assert core.overview(board)["creators"] == sorted([CHAOS, "overlord"])
+
+
+@pytest.mark.parametrize("actor_kind", [HUMAN, "system"])
+def test_ab63_only_an_agent_may_name_a_creator(board, actor_kind):
+    with pytest.raises(core.BoardError, match="only an agent"):
+        core.create(board, "MS", "x", actor=CHAOS, actor_kind=actor_kind,
+                    creator="someone@example.com")
+
+
+@pytest.mark.parametrize("creator", ["overlord", "worker-2", "bot@p.iam.gserviceaccount.com",
+                                     "", "   ", "a" * 190 + "@example.com"])
+def test_ab63_the_creator_is_a_person_named_by_email(board, creator):
+    with pytest.raises(core.BoardError):
+        core.create(board, "MS", "x", actor="overlord", actor_kind=AGENT, creator=creator)
+    assert core.search(board) == []
+
+
+def test_ab63_an_agent_cannot_name_itself(board):
+    with pytest.raises(core.BoardError):
+        core.create(board, "MS", "x", actor="bot@example.com", actor_kind=AGENT,
+                    creator="bot@example.com")
+
+
+def test_ab63_a_replayed_create_with_another_creator_is_a_conflict(board):
+    core.create(board, "MS", "x", actor="overlord", actor_kind=AGENT, request_id="r1",
+                creator=CHAOS)
+    again = core.create(board, "MS", "x", actor="overlord", actor_kind=AGENT,
+                        request_id="r1", creator=CHAOS)
+    assert again["id"] == "MS-1"
+    with pytest.raises(core.Conflict):
+        core.create(board, "MS", "x", actor="overlord", actor_kind=AGENT, request_id="r1")
+
+
+def test_ab63_stats_count_an_entered_card_as_created_by_the_creator(board):
+    core.create(board, "MS", "his ask", actor="overlord", actor_kind=AGENT, creator=CHAOS)
+    rows = by_actor(core.stats(board))
+    assert (rows[CHAOS]["created"], rows[CHAOS]["actor_kind"], rows[CHAOS]["events"]) == (
+        1, HUMAN, 0)
+    assert (rows["overlord"]["created"], rows["overlord"]["events"]) == (0, 1)

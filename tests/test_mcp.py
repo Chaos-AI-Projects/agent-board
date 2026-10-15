@@ -484,3 +484,16 @@ def test_ab55_every_tool_refuses_an_unknown_argument(migrated):
     assert core.search(migrated, project="MS") == []
     is_error, text = raw_call(migrated, "next", projekt="MS")
     assert is_error and "projekt" in text
+
+
+def test_ab63_create_takes_the_person_an_agent_enters_the_card_for(migrated):
+    board(migrated)
+    out = ok(migrated, "create", project="MS", title="his ask", creator=CHAOS)
+    assert (out["creator"], out["creator_kind"], out["created_by_agent"]) == (
+        CHAOS, "human", WORKER)
+    assert core.search(migrated, creator=CHAOS)[0]["id"] == out["id"]
+
+
+def test_ab63_an_agent_cannot_name_itself_creator(migrated):
+    board(migrated)
+    assert failed(migrated, "create", project="MS", title="t", creator=WORKER)["code"] == 1

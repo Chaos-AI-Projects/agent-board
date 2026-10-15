@@ -7,6 +7,7 @@
 <p><span class="project-key" style="--proj-bg: {{ pc.bg }}; --proj-border: {{ pc.border }}">{{ issue.project }}</span> &middot; Stage <b title="{{ stage_hints[issue.stage] }}">{{ issue.stage }}</b>{% if issue.queue %}, queued <b title="{{ queue_hint }}">{{ issue.queue }}</b>{% else %}, not queued{% endif %}
 {% if issue.workflow %} &middot; step {{ issue.workflow.position }} of <i>{{ issue.workflow.title }}</i> ({{ issue.workflow.queue or issue.workflow.stage }}){% if issue.workflow.origin_issue_id %}, planned from <a href="/issues/{{ issue.workflow.origin_issue_id }}">{{ issue.workflow.origin_issue_id }}</a>{% endif %}{% endif %}
 {% if issue.plan %} &middot; planned as <i>{{ issue.plan.title }}</i> ({{ issue.plan.queue or issue.plan.stage }}){% endif %}</p>
+{% if issue.creator %}<p class="creator">Created by {{ issue.creator }}{% if issue.created_by_agent %}, entered by agent {{ issue.created_by_agent }}{% endif %}</p>{% endif %}
 <div class="card{% if ls %} lease-{{ ls }}{% endif %}">
   {% include "_lease.html" %}
   {% if not ls %}<div class="lease">Not held</div>{% endif %}
@@ -182,7 +183,7 @@
 
 <h2>History</h2>
 <ul class="events">{% for e in issue.events|reverse %}
-<li>{{ e.at|localtime(tz) }} &middot; {{ e.actor }} ({{ e.actor_kind }}) &middot; {{ e.kind }}{% if e.from_stage or e.to_stage %} {{ [e.from_stage, e.from_queue]|select|join(" ") }} &rarr; {{ [e.to_stage, e.to_queue]|select|join(" ") }}{% endif %}{% if e.note and e.kind in ("annotate", "transition") %}<div class="markdown">{{ e.note|markdown }}</div>{% elif e.note %}: {{ e.note }}{% endif %}{{ files(e.attachments) }}</li>
+<li>{{ e.at|localtime(tz) }} &middot; {{ e.actor }} ({{ e.actor_kind }}) &middot; {% if e.kind == "create" and e.on_behalf_of %}created this for {{ e.on_behalf_of }}{% else %}{{ e.kind }}{% endif %}{% if e.from_stage or e.to_stage %} {{ [e.from_stage, e.from_queue]|select|join(" ") }} &rarr; {{ [e.to_stage, e.to_queue]|select|join(" ") }}{% endif %}{% if e.note and e.kind in ("annotate", "transition") %}<div class="markdown">{{ e.note|markdown }}</div>{% elif e.note %}: {{ e.note }}{% endif %}{{ files(e.attachments) }}</li>
 {% endfor %}</ul>
 
 <dialog id="write-error" class="error">

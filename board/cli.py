@@ -141,6 +141,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--schedule", help="five cron fields; the card waits until each due time")
     sp.add_argument("--timezone", help="the IANA zone --schedule is read in; defaults to "
                                        "$BOARD_TIMEZONE, else UTC")
+    sp.add_argument("--creator", help="the person an agent enters the card for; "
+                                      "agents only (AB-63)")
     writes(sp, token=False)
 
     sp = op("schedule", help="set or clear a card's cron schedule; changing it recomputes "
@@ -229,7 +231,7 @@ def _run(engine, a) -> dict | None:
                                stage=a.stage, queue=a.queue, rank=a.rank, labels=a.label, workflow_id=a.workflow_id,
                                position=a.position, request_id=a.request_id,
                                schedule=a.schedule, timezone=_zone(a.schedule, a.timezone),
-                               **who)
+                               creator=a.creator, **who)
         case "schedule":
             return core.set_schedule(engine, a.id, a.cron, timezone=_zone(a.cron, a.timezone),
                                      token=a.token, request_id=a.request_id,

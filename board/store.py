@@ -270,6 +270,9 @@ class Event(Base):
     to_state: Mapped[str | None] = mapped_column(String(32))
     from_queue: Mapped[str | None] = mapped_column(String(32))
     to_queue: Mapped[str | None] = mapped_column(String(32))
+    # The person a create event's agent entered the card for (AB-63). Empty
+    # when the actor is the creator.
+    on_behalf_of: Mapped[str | None] = mapped_column(String(200))
     note: Mapped[str | None] = mapped_column(Text)
     idempotency_key: Mapped[str | None] = mapped_column(String(200), unique=True)
     # SHA-256 of the call's arguments, beside a caller-supplied key: a request
