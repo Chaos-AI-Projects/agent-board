@@ -152,3 +152,81 @@ def test_an_agent_sets_a_schedule_only_under_its_lease(board):
 def test_a_date_that_never_comes_is_refused(board):
     with pytest.raises(core.BoardError, match="never"):
         scheduled(board, expr="0 9 31 2 *")
+
+
+# --- AB-65: a schedule switched off and on ---------------------------------------
+
+
+def switch(engine, issue_id, on, **kw):
+    return core.switch_schedule(engine, issue_id, on, actor=CHAOS, actor_kind=HUMAN, **kw)
+
+
+def test_switching_a_schedule_off_keeps_its_cron_and_zone(board):
+    issue = scheduled(board)
+    after = switch(board, issue["id"], False)
+    assert (after["schedule"], after["schedule_tz"]) == ("0 9 * * *", SYDNEY)
+    assert after["schedule_paused"] is True
+    assert after["next_run_at"] is None
+    assert after["events"][-1]["kind"] == core.SCHEDULE_EVENT
+    assert "off" in after["events"][-1]["note"]
+
+
+def test_a_switched_off_card_is_never_claimed(board):
+    issue = scheduled(board)
+    set_next_run(board, issue["id"], datetime.now(timezone.utc) - timedelta(minutes=1))
+    switch(board, issue["id"], False)
+    assert core.next(board, AGENT) is None
+
+
+def test_a_run_finishing_while_switched_off_does_not_re_enter_the_queue(board):
+    issue = scheduled(board)
+    set_next_run(board, issue["id"], datetime.now(timezone.utc) - timedelta(minutes=1))
+    token = core.next(board, AGENT)["lease_token"]
+    core.switch_schedule(board, issue["id"], False, actor=AGENT, actor_kind=AGENT, token=token)
+    after = core.move(board, issue["id"], "done", actor=AGENT, actor_kind=AGENT,
+                      note="ran", token=token)
+    assert (after["stage"], after["queue"]) == ("implement", "ready")
+    assert after["schedule_paused"] is True and after["next_run_at"] is None
+    assert core.next(board, AGENT) is None
+
+
+def test_switching_it_back_on_resumes_from_the_next_due_time(board):
+    issue = scheduled(board)
+    switch(board, issue["id"], False)
+    after = switch(board, issue["id"], True)
+    assert after["schedule_paused"] is False
+    due = datetime.fromisoformat(after["next_run_at"])
+    now = datetime.fromisoformat(core.now(board))
+    assert now < due <= now + timedelta(days=1)
+    local = due.astimezone(ZoneInfo(SYDNEY))
+    assert (local.hour, local.minute) == (9, 0)
+    assert "on" in after["events"][-1]["note"]
+
+
+def test_changing_the_cron_while_off_keeps_it_off(board):
+    issue = scheduled(board)
+    switch(board, issue["id"], False)
+    after = core.set_schedule(board, issue["id"], "0 10 * * *", timezone=SYDNEY,
+                              actor=CHAOS, actor_kind=HUMAN)
+    assert after["schedule_paused"] is True and after["next_run_at"] is None
+
+
+def test_clearing_a_switched_off_schedule_clears_the_switch(board):
+    issue = scheduled(board)
+    switch(board, issue["id"], False)
+    after = core.set_schedule(board, issue["id"], None, timezone=None,
+                              actor=CHAOS, actor_kind=HUMAN)
+    assert after["schedule_paused"] is False
+    assert core.next(board, AGENT)["issue"]["id"] == issue["id"]
+
+
+def test_an_unscheduled_card_has_no_switch(board):
+    issue = core.create(board, "MS", "x", actor=CHAOS, actor_kind=HUMAN, stage="implement")
+    with pytest.raises(core.BoardError, match="schedule"):
+        switch(board, issue["id"], False)
+
+
+def test_an_agent_switches_a_schedule_only_under_its_lease(board):
+    issue = scheduled(board)
+    with pytest.raises(core.LeaseLost):
+        core.switch_schedule(board, issue["id"], False, actor=AGENT, actor_kind=AGENT)

@@ -5063,3 +5063,65 @@ def test_ab64_only_an_exact_true_counts():
     raw = quote(json.dumps({"schedule_fields": 1, "schedule_warning_accepted": "true"}), safe="")
     prefs = web.read_prefs(raw)
     assert (prefs["schedule_fields"], prefs["schedule_warning_accepted"]) == (False, False)
+
+
+# --- AB-65: the schedule's on/off switch on the card page ----------------------------
+
+
+def schedule_section(html):
+    return re.search(r'<section class="schedule-section".*?</section>', html, re.S).group(0)
+
+
+def test_ab65_a_scheduled_card_page_shows_an_off_switch(board, client):
+    iid = scheduled_card(board, timedelta(hours=3))
+    section = schedule_section(client.get(f"/issues/{iid}").text)
+    assert re.search(rf'<form[^>]*action="/issues/{iid}/schedule/off"', section)
+    assert f'action="/issues/{iid}/schedule/on"' not in section
+
+
+def test_ab65_an_unscheduled_card_page_has_no_switch(board, client):
+    iid = ready(board)
+    section = schedule_section(client.get(f"/issues/{iid}").text)
+    assert "/schedule/off" not in section and "/schedule/on" not in section
+
+
+def test_ab65_switching_off_and_on_from_the_page(board, client):
+    iid = scheduled_card(board, timedelta(hours=3))
+    r = client.post(f"/issues/{iid}/schedule/off", headers=AS_CHAOS,
+                    data={"version": str(core.show(board, iid)["version"])})
+    assert r.status_code == 303
+    issue = core.show(board, iid)
+    assert issue["schedule_paused"] is True and issue["schedule"] == "0 9 * * *"
+    section = unescape(schedule_section(client.get(f"/issues/{iid}").text))
+    assert f'action="/issues/{iid}/schedule/on"' in section
+    assert "off" in section
+    r = client.post(f"/issues/{iid}/schedule/on", headers=AS_CHAOS,
+                    data={"version": str(issue["version"])})
+    assert r.status_code == 303
+    issue = core.show(board, iid)
+    assert issue["schedule_paused"] is False and issue["next_run_at"] is not None
+
+
+def test_ab65_an_unknown_switch_action_is_404(board, client):
+    iid = scheduled_card(board, timedelta(hours=3))
+    r = client.post(f"/issues/{iid}/schedule/maybe", headers=AS_CHAOS,
+                    data={"version": str(core.show(board, iid)["version"])})
+    assert r.status_code == 404
+
+
+def test_ab65_a_stale_switch_is_refused(board, client):
+    iid = scheduled_card(board, timedelta(hours=3))
+    stale = core.show(board, iid)["version"]
+    client.post(f"/issues/{iid}/schedule/off", headers=AS_CHAOS, data={"version": str(stale)})
+    r = client.post(f"/issues/{iid}/schedule/on", headers=AS_CHAOS, data={"version": str(stale)})
+    assert r.status_code == 409
+    assert core.show(board, iid)["schedule_paused"] is True
+
+
+def test_ab65_a_switched_off_card_waits_in_the_scheduled_lane(board, client):
+    iid = scheduled_card(board, timedelta(minutes=-1))
+    core.switch_schedule(board, iid, False, actor=CHAOS, actor_kind=HUMAN)
+    html = client.get("/").text
+    assert f'data-id="{iid}"' not in strip(html)
+    one = unescape(card(scheduled_lane(html), iid))
+    assert "off" in one

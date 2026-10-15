@@ -95,7 +95,13 @@
    viewer's, so the field starts with the card's zone or the viewer's. #}
 <section class="schedule-section">
 <details{% if issue.schedule %} open{% endif %}>
-<summary>Schedule{% if issue.schedule %}: &#x23f0; <code>{{ issue.schedule }}</code> in {{ issue.schedule_tz }}{% if issue.next_run_at %}, next due {{ issue.next_run_at|localtime(tz) }}{% endif %}{% else %}: none{% endif %}</summary>
+<summary>Schedule{% if issue.schedule %}: &#x23f0; <code>{{ issue.schedule }}</code> in {{ issue.schedule_tz }}{% if issue.schedule_paused %}, switched off{% elif issue.next_run_at %}, next due {{ issue.next_run_at|localtime(tz) }}{% endif %}{% else %}: none{% endif %}</summary>
+{% if issue.schedule %}
+<form class="schedule-switch" autocomplete="off" method="post" action="/issues/{{ issue.id }}/schedule/{{ "on" if issue.schedule_paused else "off" }}{{ embed_q }}">
+  <input type="hidden" name="version" value="{{ issue.version }}">
+  <button role="switch" aria-checked="{{ "false" if issue.schedule_paused else "true" }}" title="{{ "Resume from the next due time" if issue.schedule_paused else "Stop the card coming due; the cron and zone stay" }}">Schedule is {{ "off" if issue.schedule_paused else "on" }}: switch {{ "on" if issue.schedule_paused else "off" }}</button>
+</form>
+{% endif %}
 <form autocomplete="off" method="post" action="/issues/{{ issue.id }}/schedule{{ embed_q }}">
   <input type="hidden" name="version" value="{{ issue.version }}">
   <label>Cron <input name="cron" value="{{ issue.schedule or '' }}" size="20" placeholder="0 9 * * 1-5"></label>

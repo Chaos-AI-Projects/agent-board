@@ -407,7 +407,8 @@ def stamp(data) -> str:
 
 
 _CARD_FIELDS = ("id", "title", "labels", "version", "project", "stage", "queue",
-                "lease_holder", "lease_expires_at", "schedule", "schedule_tz", "next_run_at")
+                "lease_holder", "lease_expires_at", "schedule", "schedule_tz", "next_run_at",
+                "schedule_paused")
 
 
 def board_stamp(ctx: dict, buckets: dict) -> str:
@@ -1151,9 +1152,11 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         # AB-54: a ready scheduled card waits in the scheduled lane until it
         # is due within SCHEDULE_LEAD. The lane is a view; the card stays ready.
         horizon = datetime.fromisoformat(view["now"]) + core.SCHEDULE_LEAD
-        waiting = sorted((i for i in loose if i["queue"] == "ready" and i["next_run_at"]
-                          and datetime.fromisoformat(i["next_run_at"]) > horizon),
-                         key=lambda i: i["next_run_at"])
+        # AB-65: a card whose schedule is switched off waits there too, last.
+        waiting = sorted((i for i in loose if i["queue"] == "ready"
+                          and (i["schedule_paused"] or i["next_run_at"]
+                               and datetime.fromisoformat(i["next_run_at"]) > horizon)),
+                         key=lambda i: (i["schedule_paused"], i["next_run_at"] or ""))
         later = {i["id"] for i in waiting}
         queues = [(q, [("workflow", w) for w in workflows if w["queue"] == q]
                    + [("issue", i) for i in loose if i["queue"] == q and i["id"] not in later])
@@ -1529,6 +1532,26 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         except core.Conflict:
             return error(request, 409, f"{issue_id} changed since you loaded it. "
                          "Reload the card to see what changed, then save again.", issue_id)
+        return back(issue_id, request)
+
+    @app.post("/issues/{issue_id}/schedule/{action}")
+    async def schedule_switch(request: Request, issue_id: str, action: str):
+        """Switch a card's schedule off or on from its page (AB-65)."""
+        if action not in ("on", "off"):
+            return error(request, 404, "No such schedule switch.", issue_id)
+        me = await run_in_threadpool(actor, request)
+        f = await request.form()
+        try:
+            core.switch_schedule(engine, issue_id, action == "on", actor=me.email,
+                                 actor_kind=me.kind, preempt=f.get("preempt") == "1",
+                                 expected_version=int(f.get("version", -1)))
+        except core.LeaseHeld as held:
+            fields = {k: v for k, v in f.items() if k not in ("preempt", "files")}
+            return page(request, "takeover.html", 409, issue=core.show(engine, issue_id),
+                        held=held, fields=fields, dropped=[], action=f"schedule/{action}")
+        except core.Conflict:
+            return error(request, 409, f"{issue_id} changed since you loaded it. "
+                         "Reload the card to see what changed, then switch again.", issue_id)
         return back(issue_id, request)
 
     @app.post("/issues/{issue_id}/note")

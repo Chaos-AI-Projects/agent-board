@@ -336,7 +336,7 @@ def next(engine, worker: str, *, ttl: timedelta = DEFAULT_TTL, project: str | No
             token = secrets.token_hex(16)
             # Fires missed while the card waited collapse into this one run.
             due = ({"next_run_at": next_due(issue.schedule, issue.schedule_tz, now)}
-                   if issue.schedule else {})
+                   if issue.schedule and not issue.schedule_paused else {})
             won = s.execute(
                 update(Issue)
                 .where(Issue.id == issue.id, Issue.version == issue.version)
@@ -570,6 +570,7 @@ def _row(i):
         "version": i.version, "workflow_id": i.workflow_id, "position": i.position,
         "updated_at": _iso(i.updated_at), "schedule": i.schedule,
         "schedule_tz": i.schedule_tz, "next_run_at": _iso(i.next_run_at),
+        "schedule_paused": i.schedule_paused,
     }
 
 
@@ -818,6 +819,43 @@ def set_schedule(engine, issue_id: str, schedule: str | None, *, timezone: str |
 
     return _write(engine, key, body, _replay_view,
                   [schedule, timezone, actor, actor_kind, token, preempt, expected_version])
+
+
+def switch_schedule(engine, issue_id: str, on: bool, *, actor: str, actor_kind: str,
+                    token: str | None = None, request_id: str | None = None,
+                    preempt: bool = False, expected_version: int | None = None) -> dict:
+    """Switch a card's schedule off or on, keeping its cron and zone (AB-65).
+
+    Off empties `next_run_at`, so `next` never claims the card and a finished
+    run waits in ready without coming due. On resumes from the next due time
+    after now; fires missed while off are not made up. Guarded as
+    `set_schedule` is.
+    """
+    key = (_scoped("schedule-switch", issue_id, request_id)
+           or _derive(actor, "schedule-switch", issue_id, token, on))
+
+    def body(s):
+        issue = _get(s, issue_id, lock=True)
+        if expected_version is not None and issue.version != expected_version:
+            raise Conflict(f"{issue.id} is at version {issue.version}, "
+                           f"the page showed {expected_version}")
+        if not issue.schedule:
+            raise BoardError(f"{issue.id} has no schedule to switch")
+        now = store.db_now(s)
+        if actor_kind == "agent" and issue.lease_holder is None:
+            raise LeaseLost(f"{issue.id}: an agent switches a schedule only under a lease")
+        _guard(s, issue, actor, actor_kind, token, now, preempt, None)
+        issue.schedule_paused = not on
+        _apply_schedule(issue, issue.schedule, issue.schedule_tz, now)
+        issue.version += 1
+        issue.updated_at = now
+        note = (f"schedule switched on; next due {_iso(issue.next_run_at)}" if on
+                else "schedule switched off")
+        _event(s, issue.id, now, actor, actor_kind, SCHEDULE_EVENT, None, None, note, key)
+        return _view(s, issue)
+
+    return _write(engine, key, body, _replay_view,
+                  [on, actor, actor_kind, token, preempt, expected_version])
 
 
 def default_timezone() -> str:
@@ -1268,7 +1306,7 @@ def _candidates(now, project):
         select(Issue)
         .where(
             or_(
-                and_(Issue.queue == "ready",
+                and_(Issue.queue == "ready", Issue.schedule_paused.is_(False),
                      or_(Issue.next_run_at.is_(None), Issue.next_run_at <= now)),
                 and_(Issue.queue == "processing",
                      Issue.lease_expires_at.is_not(None),
@@ -1379,7 +1417,10 @@ def _check_schedule(schedule, zone):
 
 def _apply_schedule(issue, schedule, zone, now):
     issue.schedule, issue.schedule_tz = schedule, zone
-    issue.next_run_at = next_due(schedule, zone, now) if schedule else None
+    # Clearing the schedule drops its switch; a switched-off one is never due.
+    issue.schedule_paused = bool(schedule) and issue.schedule_paused
+    issue.next_run_at = (next_due(schedule, zone, now)
+                         if schedule and not issue.schedule_paused else None)
 
 
 def _judge(issue, stage, queue, note, actor_kind):
@@ -1701,6 +1742,7 @@ def _view(s, issue):
         "schedule": issue.schedule,
         "schedule_tz": issue.schedule_tz,
         "next_run_at": _iso(issue.next_run_at),
+        "schedule_paused": issue.schedule_paused,
         "rank": issue.rank,
         "assignee": issue.assignee,
         "labels": [l.name for l in issue.labels],

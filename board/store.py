@@ -222,6 +222,9 @@ class Issue(Base):
     # The IANA zone the schedule is read in (AB-54 owns its behaviour).
     schedule_tz: Mapped[str | None] = mapped_column(String(64))
     next_run_at: Mapped[datetime | None] = mapped_column(Timestamp())
+    # The schedule's switch is off (AB-65): cron and zone kept, never due.
+    schedule_paused: Mapped[bool] = mapped_column(Boolean, default=False,
+                                                  server_default=false())
     rank: Mapped[int] = mapped_column(Integer)
     assignee: Mapped[str | None] = mapped_column(String(200))
     workflow_id: Mapped[int | None] = mapped_column(ForeignKey("workflow.id"))
