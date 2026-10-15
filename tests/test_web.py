@@ -1566,7 +1566,8 @@ def test_the_toggles_and_the_view_banner_share_one_row_view_last(client, board):
     html = client.get("/").text
     row = controls_row(html)
     assert banner(html) in row
-    assert row.index('<summary class="new-issue">New issue</summary>') < row.index('class="filter-banner"')
+    # AB-60: New issue left this row for the spot under the queue strip.
+    assert 'class="new-issue"' not in row
     assert row.index(banner(html)) + len(banner(html)) == row.rindex("</details>") + len("</details>")
     assert html.index(row) < html.index('<div class="kanban">')
 
@@ -4737,3 +4738,36 @@ def test_ab59_the_page_script_takes_over_the_toggle_form(board, client):
     assert ".queue-toggle" in body and "preventDefault" in body
     assert web.FETCH_HEADER in body
     assert "location.reload" not in body
+
+
+# --- New issue sits under the queue strip (AB-60) ----------------------------
+
+
+NEW_ISSUE = '<summary class="new-issue">New issue</summary>'
+
+
+def test_ab60_new_issue_sits_between_the_queue_strip_and_the_lanes(board, client):
+    queued_and_waiting(board)
+    html = client.get("/").text
+    top = strip(html)
+    assert html.count(NEW_ISSUE) == 1
+    assert NEW_ISSUE not in top
+    assert html.index(top) + len(top) < html.index(NEW_ISSUE) < html.index('<div class="kanban">')
+
+
+def test_ab60_new_issue_stays_under_a_collapsed_strip(board, client):
+    client.post("/preferences/queue/collapse")
+    html = client.get("/").text
+    assert strip_collapsed(html)
+    top = strip(html)
+    assert html.index(top) + len(top) < html.index(NEW_ISSUE) < html.index('<div class="kanban">')
+
+
+def test_ab60_the_moved_form_still_creates_an_issue(board, client):
+    html = client.get("/").text
+    after = html[html.index(NEW_ISSUE):html.index('<div class="kanban">')]
+    assert 'action="/issues"' in after and 'name="title"' in after
+    r = client.post("/issues", data={"project": "MS", "title": "from under the strip"},
+                    headers=AS_CHAOS, follow_redirects=False)
+    assert r.status_code in (302, 303)
+    assert core.search(board, q="from under the strip")

@@ -1,22 +1,6 @@
 {% extends "base.html" %}
 {% block main %}
 <div class="board-controls">
-<details>
-  <summary class="new-issue">New issue</summary>
-  <form autocomplete="off" method="post" action="/issues" enctype="multipart/form-data">
-    <label>Project <select name="project" required><option value="" disabled selected>choose a project</option>{% for p in view.projects %}<option value="{{ p.key }}">{{ p.key }} ({{ p.name }})</option>{% endfor %}<option value="{{ new_project }}">+ New project</option></select></label>
-    <fieldset class="new-project" hidden disabled>
-      <label>Project key <input name="new_project_key" size="16" maxlength="16" pattern="[A-Z][A-Z0-9]{0,15}" title="1-16 of A-Z and 0-9, starting with a letter"></label>
-      <label>Project name <input name="new_project_name" size="40"></label>
-    </fieldset>
-    <label>Title <input name="title" required size="60"></label>
-    <label>Body <textarea name="body"></textarea></label>
-    <label>Stage <select name="stage"><option>backlog</option><option>planning</option><option>implement</option></select></label>
-    <label>Labels <input name="labels" placeholder="comma, separated"></label>
-    <label>Files <input type="file" name="files" multiple></label>
-    <button class="primary">Create</button> <button type="reset" class="cancel">Cancel</button>
-  </form>
-</details>
 {% if view.templates %}
 <details>
   <summary>New workflow from a template</summary>
@@ -75,6 +59,25 @@
   {% endfor %}
   </div>
 </section>
+{# AB-60: New issue sits under the queue strip, not in the controls row. #}
+<div class="new-issue-row">
+<details>
+  <summary class="new-issue">New issue</summary>
+  <form autocomplete="off" method="post" action="/issues" enctype="multipart/form-data">
+    <label>Project <select name="project" required><option value="" disabled selected>choose a project</option>{% for p in view.projects %}<option value="{{ p.key }}">{{ p.key }} ({{ p.name }})</option>{% endfor %}<option value="{{ new_project }}">+ New project</option></select></label>
+    <fieldset class="new-project" hidden disabled>
+      <label>Project key <input name="new_project_key" size="16" maxlength="16" pattern="[A-Z][A-Z0-9]{0,15}" title="1-16 of A-Z and 0-9, starting with a letter"></label>
+      <label>Project name <input name="new_project_name" size="40"></label>
+    </fieldset>
+    <label>Title <input name="title" required size="60"></label>
+    <label>Body <textarea name="body"></textarea></label>
+    <label>Stage <select name="stage"><option>backlog</option><option>planning</option><option>implement</option></select></label>
+    <label>Labels <input name="labels" placeholder="comma, separated"></label>
+    <label>Files <input type="file" name="files" multiple></label>
+    <button class="primary">Create</button> <button type="reset" class="cancel">Cancel</button>
+  </form>
+</details>
+</div>
 <div class="kanban">
 {% for state, workflows, issues, groups in columns %}
 <section class="column" data-state="{{ state }}">
