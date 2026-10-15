@@ -111,9 +111,12 @@
 </section>
 {% endfor %}
 {# AB-54: a ready cron card waits here until it is due within five minutes,
-   then joins the top strip. A view, not a stage, so nothing drags. #}
-<section class="column scheduled-lane" data-lane="scheduled">
+   then joins the top strip. A view, not a stage, so nothing drags. AB-62: it
+   collapses to the count in its heading, the same saved view pref and in-page
+   toggle as the queue strip. #}
+<section class="column scheduled-lane{{ " collapsed" if scheduled_collapsed }}" data-lane="scheduled">
   <h2 title="{{ scheduled_hint }}">scheduled ({{ scheduled|length }})</h2>
+  <form class="scheduled-toggle" autocomplete="off" method="post" action="/preferences/scheduled/{{ "expand" if scheduled_collapsed else "collapse" }}"><button title="{{ "Show the scheduled cards" if scheduled_collapsed else "Hide the scheduled cards, keep the count" }}">{{ "Expand" if scheduled_collapsed else "Collapse" }}</button></form>
   <div class="scheduled-cards">
   {% for issue in scheduled %}{% set queued = true %}{% include "_card.html" %}{% endfor %}
   </div>
@@ -329,43 +332,48 @@
   // one at a time, so a quick double click cannot land them out of order, and
   // a refused save (an expired sign-in) puts the strip back. Another open tab
   // follows through the storage event; the stamp in the stored value makes
-  // every toggle fire it.
+  // every toggle fire it. AB-62: the scheduled lane's toggle works the same way.
   (function () {
-    var strip = document.querySelector(".queue-strip");
-    var form = strip && strip.querySelector(".queue-toggle");
-    if (!form) return;
-    var button = form.querySelector("button"), KEY = "ab59-queue-collapsed", saving = Promise.resolve();
-    function draw(collapsed) {
-      strip.classList.toggle("collapsed", collapsed);
-      form.action = "/preferences/queue/" + (collapsed ? "expand" : "collapse");
-      button.textContent = collapsed ? "Expand" : "Collapse";
-      button.title = collapsed ? "Show the queued cards" : "Hide the queued cards, keep the counts";
-    }
-    function share(collapsed) {
-      try { localStorage.setItem(KEY, JSON.stringify({collapsed: collapsed, at: Date.now()})); } catch (_) { /* private mode */ }
-    }
-    // The form holds only this button, so a click covers every way to send
-    // it; a submit listener would trip the issue panel's MS-662 guard.
-    button.addEventListener("click", function (ev) {
-      ev.preventDefault();
-      var collapsed = !strip.classList.contains("collapsed");
-      var url = form.action, headers = {};
-      headers[{{ fetch_header|tojson }}] = "1";
-      draw(collapsed);
-      share(collapsed);
-      saving = saving.then(function () {
-        return fetch(url, {method: "POST", headers: headers, credentials: "same-origin"});
-      }).then(function (r) {
-        if (!r.ok) throw new Error(r.status);
-      }).catch(function () {
-        draw(!collapsed);
-        share(!collapsed);
+    var headers = {};
+    headers[{{ fetch_header|tojson }}] = "1";
+    function wire(section, toggle, path, KEY, what) {
+      var box = document.querySelector(section);
+      var form = box && box.querySelector(toggle);
+      if (!form) return;
+      var button = form.querySelector("button"), saving = Promise.resolve();
+      function draw(collapsed) {
+        box.classList.toggle("collapsed", collapsed);
+        form.action = path + (collapsed ? "expand" : "collapse");
+        button.textContent = collapsed ? "Expand" : "Collapse";
+        button.title = collapsed ? "Show the " + what + " cards" : "Hide the " + what + " cards, keep the " + (what === "queued" ? "counts" : "count");
+      }
+      function share(collapsed) {
+        try { localStorage.setItem(KEY, JSON.stringify({collapsed: collapsed, at: Date.now()})); } catch (_) { /* private mode */ }
+      }
+      // The form holds only this button, so a click covers every way to send
+      // it; a submit listener would trip the issue panel's MS-662 guard.
+      button.addEventListener("click", function (ev) {
+        ev.preventDefault();
+        var collapsed = !box.classList.contains("collapsed");
+        var url = form.action;
+        draw(collapsed);
+        share(collapsed);
+        saving = saving.then(function () {
+          return fetch(url, {method: "POST", headers: headers, credentials: "same-origin"});
+        }).then(function (r) {
+          if (!r.ok) throw new Error(r.status);
+        }).catch(function () {
+          draw(!collapsed);
+          share(!collapsed);
+        });
       });
-    });
-    window.addEventListener("storage", function (e) {
-      if (e.key !== KEY || !e.newValue) return;
-      try { draw(JSON.parse(e.newValue).collapsed === true); } catch (_) { /* not ours */ }
-    });
+      window.addEventListener("storage", function (e) {
+        if (e.key !== KEY || !e.newValue) return;
+        try { draw(JSON.parse(e.newValue).collapsed === true); } catch (_) { /* not ours */ }
+      });
+    }
+    wire(".queue-strip", ".queue-toggle", "/preferences/queue/", "ab59-queue-collapsed", "queued");
+    wire(".scheduled-lane", ".scheduled-toggle", "/preferences/scheduled/", "ab62-scheduled-collapsed", "scheduled");
   })();
 </script>
 <script>

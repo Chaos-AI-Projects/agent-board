@@ -104,6 +104,10 @@
   /* AB-59: the collapsed class decides between the cards and the counts. */
   .queue-strip.collapsed .queue-lane { display: none; }
   .queue-strip:not(.collapsed) .queue-count { display: none; }
+  /* AB-62: the scheduled lane collapses to the count in its heading. */
+  .scheduled-lane.collapsed .scheduled-cards { display: none; }
+  .scheduled-toggle { margin: 0 0 8px; }
+  .scheduled-toggle button { font-size: 11px; padding: 0 6px; }
   .queue-cards { display: flex; gap: 8px; overflow-x: auto; min-height: 20px; }
   .queue-cards .card { flex: 0 0 240px; }
   .stage-badge { font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: uppercase;

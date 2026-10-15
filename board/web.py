@@ -416,8 +416,9 @@ def board_stamp(ctx: dict, buckets: dict) -> str:
     clock moves on every read, so it stays out; what it decides, each card's
     lease status, goes in instead. A note does move it when it changes the
     kind of actor who acted last, which decides the Queue button (AB-58).
-    The queue strip's collapse stays out (AB-59): the page toggles itself, and
-    a moved stamp would reload it straight after."""
+    The queue strip's collapse stays out (AB-59), and so does the scheduled
+    lane's (AB-62): the page toggles itself, and a moved stamp would reload it
+    straight after."""
     now = ctx["now"]
 
     def card(i):
@@ -818,15 +819,16 @@ def _form_labels(value):
 def read_prefs(raw: str | None) -> dict:
     """The saved view from a `board_prefs` cookie: projects, lanes, timezone,
     whether the done lane hides cards finished over two weeks ago (AB-13),
-    whether the board shows only the cards the viewer created (AB-42), and
-    whether the queue strip is collapsed to its counts (AB-57).
+    whether the board shows only the cards the viewer created (AB-42),
+    whether the queue strip is collapsed to its counts (AB-57), and whether
+    the scheduled lane is collapsed to its count (AB-62).
 
     The value is JSON, percent-encoded so a browser sends it back unmangled.
     Anything unreadable, and any other key, is ignored. A list key that is
     absent or not a list of strings comes back as [], which means all; a
     timezone that is not a string comes back as "", which means the default.
-    `hide_old_done`, `mine` and `queue_collapsed` are True only when the cookie
-    says exactly true.
+    `hide_old_done`, `mine`, `queue_collapsed` and `scheduled_collapsed` are
+    True only when the cookie says exactly true.
     """
     try:
         data = json.loads(unquote(raw or ""))
@@ -843,6 +845,7 @@ def read_prefs(raw: str | None) -> dict:
     prefs["hide_old_done"] = data.get("hide_old_done") is True
     prefs["mine"] = data.get("mine") is True
     prefs["queue_collapsed"] = data.get("queue_collapsed") is True
+    prefs["scheduled_collapsed"] = data.get("scheduled_collapsed") is True
     return prefs
 
 
@@ -1085,7 +1088,8 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         return {"projects": _chosen(saved["projects"], [p["key"] for p in projects]),
                 "lanes": list(core.STAGES) if stale else _chosen(saved["lanes"], list(core.STAGES)),
                 "timezone": saved["timezone"], "hide_old_done": saved["hide_old_done"],
-                "mine": saved["mine"], "queue_collapsed": saved["queue_collapsed"]}
+                "mine": saved["mine"], "queue_collapsed": saved["queue_collapsed"],
+                "scheduled_collapsed": saved["scheduled_collapsed"]}
 
     def board_view(request):
         view = core.overview(engine)
@@ -1165,7 +1169,8 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
                 "tracked": prefs["projects"], "hidden": hidden,
                 "hide_old_done": prefs["hide_old_done"], "old_done": old_done,
                 "mine": mine, "can_mine": me is not None,
-                "queue_collapsed": prefs["queue_collapsed"]}
+                "queue_collapsed": prefs["queue_collapsed"],
+                "scheduled_collapsed": prefs["scheduled_collapsed"]}
 
     @app.get("/", response_class=HTMLResponse)
     def board_page(request: Request):
@@ -1218,7 +1223,7 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         tz = (f.get("timezone") or "").strip()
         prefs["timezone"] = tz if zone(tz) else ""
         kept = read_prefs(request.cookies.get(PREFS_COOKIE))
-        for key in ("hide_old_done", "mine", "queue_collapsed"):
+        for key in ("hide_old_done", "mine", "queue_collapsed", "scheduled_collapsed"):
             prefs[key] = kept[key]
         return saved(prefs)
 
@@ -1276,6 +1281,16 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         prefs["queue_collapsed"] = action == "collapse"
         # AB-59: the page's own script already toggled the strip; it wants
         # only the cookie, not a redirect to a page it will not load.
+        return saved(prefs, Response(status_code=204) if request.headers.get(FETCH_HEADER) else None)
+
+    @app.post("/preferences/scheduled/{action}")
+    def save_scheduled_toggle(request: Request, action: str):
+        """The scheduled lane's toggle (AB-62): collapse it to its count, or expand it."""
+        if action not in ("collapse", "expand"):
+            return error(request, 404, "No such scheduled-lane action.")
+        prefs = read_prefs(request.cookies.get(PREFS_COOKIE))
+        prefs["scheduled_collapsed"] = action == "collapse"
+        # As for the queue strip (AB-59), a fetched save wants only the cookie.
         return saved(prefs, Response(status_code=204) if request.headers.get(FETCH_HEADER) else None)
 
     @app.post("/preferences/mine/{action}")

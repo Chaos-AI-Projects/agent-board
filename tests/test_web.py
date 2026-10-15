@@ -1356,7 +1356,8 @@ def test_saving_preferences_sets_a_lax_year_long_cookie(client, board):
     assert "max-age=31536000" in cookie.lower()
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
         "projects": ["BR"], "lanes": ["implement", "done"], "timezone": "",
-        "hide_old_done": False, "mine": False, "queue_collapsed": False}
+        "hide_old_done": False, "mine": False, "queue_collapsed": False,
+        "scheduled_collapsed": False}
 
 
 def test_the_board_shows_only_the_saved_projects_and_lanes(client, board):
@@ -1432,7 +1433,8 @@ def test_saving_keeps_only_known_projects_and_lanes(client, board):
                                       "lane": ["done", "bogus", "ready", "implement"]})
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
         "projects": ["BR"], "lanes": ["implement", "done"], "timezone": "",
-        "hide_old_done": False, "mine": False, "queue_collapsed": False}
+        "hide_old_done": False, "mine": False, "queue_collapsed": False,
+        "scheduled_collapsed": False}
 
 
 def test_preferences_are_a_same_origin_post_only(client, board):
@@ -1511,7 +1513,8 @@ def test_a_banner_save_keeps_the_saved_lanes_and_timezone(client, board):
     client.post("/preferences/projects", data={"project": ["BR"]})
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
         "projects": ["BR"], "lanes": ["implement", "done"], "timezone": "Asia/Tokyo",
-        "hide_old_done": False, "mine": False, "queue_collapsed": False}
+        "hide_old_done": False, "mine": False, "queue_collapsed": False,
+        "scheduled_collapsed": False}
     assert lanes(client.get("/").text) == ["implement", "done"]
 
 
@@ -1549,7 +1552,8 @@ def test_the_preferences_page_still_saves_every_key(client, board):
     client.post("/preferences/projects", data={"project": ["BR"]})
     client.post("/preferences", data={"project": ["MS"], "lane": ["implement"]})
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
-        "projects": ["MS"], "lanes": ["implement"], "timezone": "", "hide_old_done": False, "mine": False, "queue_collapsed": False}
+        "projects": ["MS"], "lanes": ["implement"], "timezone": "", "hide_old_done": False, "mine": False, "queue_collapsed": False,
+        "scheduled_collapsed": False}
 
 
 # --- the banner is "View", right of the toggles (MS-653) -------------------------
@@ -1676,11 +1680,13 @@ def test_a_lane_save_keeps_projects_and_timezone(client, board):
     client.post("/preferences/lanes/hide", data={"lane": "done"})
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
         "projects": ["BR"], "lanes": [s for s in ALL_LANES if s != "done"],
-        "timezone": "Asia/Tokyo", "hide_old_done": False, "mine": False, "queue_collapsed": False}
+        "timezone": "Asia/Tokyo", "hide_old_done": False, "mine": False, "queue_collapsed": False,
+        "scheduled_collapsed": False}
     client.post("/preferences/lanes/show", data={"lane": "done"})
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
         "projects": ["BR"], "lanes": [], "timezone": "Asia/Tokyo",
-        "hide_old_done": False, "mine": False, "queue_collapsed": False}
+        "hide_old_done": False, "mine": False, "queue_collapsed": False,
+        "scheduled_collapsed": False}
 
 
 @pytest.mark.parametrize("action", ["hide", "show"])
@@ -4838,3 +4844,108 @@ def test_ab61_a_bad_schedule_saves_nothing(board, client, fields, says):
     assert says in unescape(r.text)
     assert core.search(board, q="orphan") == []
     assert [p["key"] for p in core.projects(board)] == ["MS"]
+
+
+# --- AB-62: the scheduled lane collapses like the queue strip ----------------------
+
+
+def scheduled_toggle(html):
+    m = re.search(r'<form[^>]*class="scheduled-toggle"[^>]*action="/preferences/scheduled/(\w+)"[^>]*>'
+                  r'\s*<button[^>]*>([^<]+)</button>', scheduled_lane(html))
+    assert m, "no scheduled toggle"
+    return m.group(1), m.group(2)
+
+
+def scheduled_collapsed(html):
+    m = re.search(r'<section class="column scheduled-lane( collapsed)?"', html)
+    assert m, "no scheduled lane"
+    return bool(m.group(1))
+
+
+def test_ab62_the_scheduled_lane_offers_collapse_and_keeps_its_count(board, client):
+    later = scheduled_card(board, timedelta(hours=3))
+    html = client.get("/").text
+    assert not scheduled_collapsed(html)
+    assert scheduled_toggle(html) == ("collapse", "Collapse")
+    r = client.post("/preferences/scheduled/collapse")
+    assert r.status_code == 303 and r.headers["location"] == "/"
+    html = client.get("/").text
+    lane = scheduled_lane(html)
+    assert scheduled_collapsed(html)
+    assert scheduled_toggle(html) == ("expand", "Expand")
+    # The card stays served for the toggle to bring back; the count stays in the heading.
+    assert f'data-id="{later}"' in lane
+    assert re.search(r"<h2[^>]*>scheduled \(1\)</h2>", lane)
+
+
+def test_ab62_the_toggle_sits_beside_the_heading_not_inside_it(board, client):
+    lane = scheduled_lane(client.get("/").text)
+    heading = re.search(r"<h2[^>]*>(.*?)</h2>", lane, re.S).group(1)
+    assert "<form" not in heading and 'class="scheduled-toggle"' in lane
+
+
+def test_ab62_the_choice_is_saved_in_board_prefs_and_expand_undoes_it(board, client):
+    client.post("/preferences/scheduled/collapse")
+    assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE))["scheduled_collapsed"] is True
+    assert scheduled_collapsed(client.get("/").text)
+    client.post("/preferences/scheduled/expand")
+    assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE))["scheduled_collapsed"] is False
+    assert not scheduled_collapsed(client.get("/").text)
+
+
+def test_ab62_the_two_toggles_are_independent(board, client):
+    client.post("/preferences/scheduled/collapse")
+    html = client.get("/").text
+    assert scheduled_collapsed(html) and not strip_collapsed(html)
+    client.post("/preferences/queue/collapse")
+    client.post("/preferences/scheduled/expand")
+    html = client.get("/").text
+    assert strip_collapsed(html) and not scheduled_collapsed(html)
+
+
+def test_ab62_other_view_saves_keep_the_lane_collapsed(board, client):
+    client.post("/preferences/scheduled/collapse")
+    client.post("/preferences", data={"project": ["MS"], "lane": list(core.STAGES)})
+    assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE))["scheduled_collapsed"] is True
+    client.post("/preferences/done/hide")
+    client.post("/preferences/queue/collapse")
+    client.post("/preferences/lanes/hide", data={"lane": "cancelled"})
+    assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE))["scheduled_collapsed"] is True
+
+
+def test_ab62_only_an_exact_true_collapses_the_lane():
+    assert web.read_prefs(None)["scheduled_collapsed"] is False
+    for raw in ('{"scheduled_collapsed":1}', '{"scheduled_collapsed":"true"}', "nonsense"):
+        assert web.read_prefs(quote(raw, safe=""))["scheduled_collapsed"] is False, raw
+    assert web.read_prefs(quote('{"scheduled_collapsed":true}', safe=""))["scheduled_collapsed"] is True
+
+
+def test_ab62_an_unknown_scheduled_action_is_404(board, client):
+    assert client.post("/preferences/scheduled/sideways").status_code == 404
+    assert client.post("/preferences/scheduled/sideways", headers={web.FETCH_HEADER: "1"}).status_code == 404
+
+
+def test_ab62_a_fetched_toggle_saves_the_cookie_without_a_redirect(board, client):
+    r = client.post("/preferences/scheduled/collapse", headers={web.FETCH_HEADER: "1"})
+    assert r.status_code == 204 and "location" not in r.headers
+    assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE))["scheduled_collapsed"] is True
+
+
+def test_ab62_the_stylesheet_hides_the_cards_by_the_collapsed_class(board, client):
+    html = client.get("/").text
+    rule = re.search(r'\.scheduled-lane\.collapsed \.scheduled-cards\s*\{([^}]*)\}', html)
+    assert rule and "display: none" in rule.group(1)
+
+
+def test_ab62_the_toggle_does_not_move_the_board_stamp(board, client):
+    scheduled_card(board, timedelta(hours=3))
+    before = board_stamp(client)
+    client.post("/preferences/scheduled/collapse")
+    assert board_stamp(client) == before
+
+
+def test_ab62_the_page_script_takes_over_both_toggles(board, client):
+    html = client.get("/").text
+    script = re.search(r"<script>\s*// AB-59:(.*?)</script>", html, re.S).group(1)
+    assert ".scheduled-lane" in script and ".scheduled-toggle" in script
+    assert "location.reload" not in script
