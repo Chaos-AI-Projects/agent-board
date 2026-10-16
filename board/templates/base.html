@@ -140,8 +140,13 @@
   .card-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 6px;
                font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); }
   /* AB-67: a finished card the viewer has not opened yet. Inset, so the
-     project colour border stays; the accent reads in both themes. */
-  .card.unseen { box-shadow: inset 4px 0 0 var(--accent), 0 0 0 2px var(--accent); }
+     project colour border stays; the accent reads in both themes. AB-71: an
+     accent tint behind it too, mixed into the theme's card colour. */
+  .card.unseen { box-shadow: inset 4px 0 0 var(--accent), 0 0 0 2px var(--accent);
+                 background: color-mix(in srgb, var(--accent) 16%, var(--card)); }
+  .card.unseen:hover { background: color-mix(in srgb, var(--accent) 24%, var(--card-hover)); }
+  .hits li.unseen { background: color-mix(in srgb, var(--accent) 16%, var(--card));
+                    border-left-color: var(--accent); }
   header .unseen-count { background: var(--accent); color: var(--accent-fg); font-weight: 600;
                          font-size: 12px; border-radius: 999px; padding: 1px 8px; }
   header .unseen-count:hover { color: var(--accent-fg); filter: brightness(1.1); }
@@ -233,7 +238,7 @@
 </style>
 </head>
 <body>
-{% if not embed_q %}<header><a href="/">agent-board</a><form autocomplete="off" method="get" action="/search" class="header-search"><input type="search" name="q" value="{{ header_q or "" }}" placeholder="Search issues" aria-label="Search issues"><button type="submit">Search</button></form><a href="/search">Advanced search</a><nav class="header-right">{% if unseen %}<a class="unseen-count" href="/" title="Finished cards you have not opened yet">{{ unseen|length }} finished</a>{% endif %}<a href="/preferences">Preferences</a><a href="/projects">Projects</a><a href="/stats">Stats</a><span class="me">{{ me or "not signed in" }}</span>{% if sign_in and me %}<form method="post" action="/logout" style="margin:0"><button type="submit">Sign out</button></form>{% elif sign_in %}<a href="/login">Sign in</a>{% endif %}<button type="button" id="theme-toggle" title="Switch light / dark theme" aria-label="Switch light / dark theme">&#9681;</button></nav></header>{% endif %}
+{% if not embed_q %}<header><a href="/">agent-board</a><form autocomplete="off" method="get" action="/search" class="header-search"><input type="search" name="q" value="{{ header_q or "" }}" placeholder="Search issues" aria-label="Search issues"><button type="submit">Search</button></form><a href="/search">Advanced search</a><nav class="header-right">{% if unseen %}<a class="unseen-count" href="/search?involved={{ me|urlencode }}&amp;unseen=1" title="Finished cards you have not opened yet">{{ unseen|length }} finished</a>{% endif %}<a href="/preferences">Preferences</a><a href="/projects">Projects</a><a href="/stats">Stats</a><span class="me">{{ me or "not signed in" }}</span>{% if sign_in and me %}<form method="post" action="/logout" style="margin:0"><button type="submit">Sign out</button></form>{% elif sign_in %}<a href="/login">Sign in</a>{% endif %}<button type="button" id="theme-toggle" title="Switch light / dark theme" aria-label="Switch light / dark theme">&#9681;</button></nav></header>{% endif %}
 <main>{% block main %}{% endblock %}</main>
 <script>
   // AB-37: the switch saves the other theme; the storage event carries it to

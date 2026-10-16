@@ -324,6 +324,15 @@ def test_ab27_search_by_creator(url):
     assert [i["id"] for i in out["issues"]] == [mine]
 
 
+
+def test_ab70_search_by_involved(url):
+    theirs = ok(board(url, "create", "--project", "MS", "--title", "theirs",
+                      actor="overlord"))["id"]
+    ok(board(url, "--actor-kind", "human", "annotate", theirs, "--note", "looking", actor=CHAOS))
+    ok(board(url, "create", "--project", "MS", "--title", "untouched", actor="overlord"))
+    out = ok(board(url, "search", "--involved", CHAOS, actor=None))
+    assert [i["id"] for i in out["issues"]] == [theirs]
+
 def test_search_with_no_hits_exits_3(url):
     ready(url, "Search box")
     proc = board(url, "search", "nothing", "--assignee", "nobody", actor=None)

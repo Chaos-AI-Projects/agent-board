@@ -239,10 +239,8 @@ def unseen(engine, actor: str) -> set[str]:
     event on it, and no agent is working it again now.
     """
     with store.session(engine) as s:
-        mine = (Event.actor == actor) & (Event.actor_kind == "human")
-        theirs = exists().where(Event.issue_id == Issue.id,
-                                or_(mine, (Event.kind == "create")
-                                    & (Event.on_behalf_of == actor)))
+        mine = _by_person(actor)
+        theirs = _involves(actor)
         finished = (select(func.max(Event.id)).where(Event.issue_id == Issue.id, _finishes())
                     .correlate(Issue).scalar_subquery())
         acted = (select(func.max(Event.id)).where(Event.issue_id == Issue.id, mine)
@@ -254,6 +252,19 @@ def unseen(engine, actor: str) -> set[str]:
             theirs, or_(Issue.queue.is_(None), Issue.queue != "processing"),
             finished > func.coalesce(opened, 0), finished > func.coalesce(acted, 0)))
         return set(rows)
+
+
+def _by_person(actor: str):
+    """An event `actor` wrote as a human."""
+    return (Event.actor == actor) & (Event.actor_kind == "human")
+
+
+def _involves(actor: str):
+    """Whether the issue is `actor`'s (AB-67, AB-70): they created it, an agent
+    created it for them, or they wrote any event on it as a human."""
+    return exists().where(Event.issue_id == Issue.id,
+                          or_(_by_person(actor), (Event.kind == "create")
+                              & (Event.on_behalf_of == actor)))
 
 
 def mark_seen(engine, actor: str, issue_id: str) -> None:
@@ -432,13 +443,14 @@ def now(engine) -> str:
 
 def overview(engine, *, q: str | None = None, project: str | None = None,
              label: str | None = None, assignee: str | None = None,
-             creator: str | None = None) -> dict:
+             creator: str | None = None, involved: str | None = None) -> dict:
     """Everything the web board renders, read in one session.
 
     `now` is the database clock, so the board judges a lease expired by the
     same clock `next` uses to reclaim it. Issues carry no events or token.
-    The filters are `search`'s; `labels`, `assignees` and `creators` are
-    every value in use, for the filter dropdowns, whatever the filters matched.
+    The filters are `search`'s; `labels`, `assignees`, `creators` and
+    `people` are every value in use, for the filter dropdowns, whatever the
+    filters matched. `people` is everyone `involved` can match (AB-70).
     """
     with store.session(engine) as s:
         return {
@@ -453,7 +465,12 @@ def overview(engine, *, q: str | None = None, project: str | None = None,
                                          .where(Event.kind == "create"))),
             "templates": [{"name": t.name, "title": t.title}
                           for t in s.scalars(select(Template).order_by(Template.name))],
-            "issues": _search(s, q, project, label, assignee, creator),
+            "people": sorted(
+                set(s.scalars(select(Event.actor).distinct()
+                              .where(Event.actor_kind == "human")))
+                | set(s.scalars(select(Event.on_behalf_of).distinct()
+                                .where(Event.on_behalf_of.is_not(None))))),
+            "issues": _search(s, q, project, label, assignee, creator, involved),
             "workflows": [_workflow_view(s, wf)
                           for wf in s.scalars(select(Workflow).order_by(Workflow.id))],
         }
@@ -481,7 +498,7 @@ def workflow(engine, workflow_id: int) -> dict:
 
 def search(engine, *, q: str | None = None, project: str | None = None,
            label: str | None = None, assignee: str | None = None,
-           creator: str | None = None) -> list[dict]:
+           creator: str | None = None, involved: str | None = None) -> list[dict]:
     """Issues matching every filter given, in board order.
 
     `q` is a case-insensitive substring of the id, title, body or any label,
@@ -491,10 +508,12 @@ def search(engine, *, q: str | None = None, project: str | None = None,
     issue's `assignee` yet, so `assignee` also matches the lease holder: the
     agent or human holding a card is the one working it. `creator` is the
     actor of the issue's create event (AB-27), or the person an agent named
-    on it (AB-63). An empty filter is no filter.
+    on it (AB-63). `involved` is a person who created the issue, had it
+    created for them, or wrote any event on it as a human (AB-70). An empty
+    filter is no filter.
     """
     with store.session(engine) as s:
-        return _search(s, q, project, label, assignee, creator)
+        return _search(s, q, project, label, assignee, creator, involved)
 
 
 def _creator_col():
@@ -502,7 +521,7 @@ def _creator_col():
     return func.coalesce(Event.on_behalf_of, Event.actor)
 
 
-def _search(s, q, project, label, assignee, creator=None):
+def _search(s, q, project, label, assignee, creator=None, involved=None):
     stmt = select(Issue).order_by(Issue.rank, Issue.id)
     q = (q or "").strip()
     if q:
@@ -525,6 +544,8 @@ def _search(s, q, project, label, assignee, creator=None):
     if creator:
         stmt = stmt.where(exists().where(Event.issue_id == Issue.id, Event.kind == "create",
                                          _creator_col() == creator))
+    if involved:
+        stmt = stmt.where(_involves(involved))
     return [_row(i) for i in s.scalars(stmt)]
 
 

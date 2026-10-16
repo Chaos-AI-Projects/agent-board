@@ -5266,3 +5266,51 @@ def test_ab67_an_unseen_card_leads_the_scheduled_lane(client, board):
     html = client.get("/", headers=AS_CHAOS).text
     lane = re.search(r'<section class="column scheduled-lane.*?</section>', html, re.S).group(0)
     assert re.findall(r'data-id="(MS-\d+)"', lane) == [late, early]
+
+
+# --- AB-70 / AB-71: the involved search, the header link, the tint ------------
+
+
+def test_ab70_search_filters_by_involved(client, board):
+    mine = idea(board)
+    theirs = core.create(board, "MS", "theirs", actor="someone@else", actor_kind=HUMAN)["id"]
+    html = client.get(f"/search?involved={quote(CHAOS)}", headers=AS_CHAOS).text
+    hits = re.findall(r'class="hit[^"]*" data-id="(MS-\d+)"', html)
+    assert mine in hits and theirs not in hits
+
+
+def test_ab70_the_unseen_filter_keeps_only_the_viewers_unseen_cards(client, board):
+    news = finished(board, "news")
+    idea(board)
+    html = client.get(f"/search?involved={quote(CHAOS)}&unseen=1", headers=AS_CHAOS).text
+    assert re.findall(r'class="hit[^"]*" data-id="(MS-\d+)"', html) == [news]
+
+
+def test_ab70_the_header_count_links_to_the_unseen_search(client, board):
+    finished(board)
+    html = client.get("/", headers=AS_CHAOS).text
+    link = re.search(r'<a[^>]*class="unseen-count"[^>]*>', html).group(0)
+    href = unescape(re.search(r'href="([^"]*)"', link).group(1))
+    assert href == f"/search?involved={quote(CHAOS)}&unseen=1"
+    page_ = client.get(href, headers=AS_CHAOS).text
+    assert len(re.findall(r'class="hit[^"]*" data-id=', page_)) == unseen_count(html)
+
+
+def test_ab70_the_search_form_offers_involved_and_unseen(client, board):
+    idea(board)
+    html = client.get("/search", headers=AS_CHAOS).text
+    assert 'name="involved"' in html and 'name="unseen"' in html
+
+
+def test_ab71_unseen_hits_are_highlighted_in_search(client, board):
+    news = finished(board, "news")
+    plain = idea(board)
+    html = client.get(f"/search?involved={quote(CHAOS)}", headers=AS_CHAOS).text
+    assert re.search(rf'class="hit unseen" data-id="{news}"', html)
+    assert re.search(rf'class="hit" data-id="{plain}"', html)
+
+
+def test_ab71_an_unseen_card_has_a_tinted_background(client, board):
+    css = client.get("/", headers=AS_CHAOS).text
+    rule = re.search(r'\.card\.unseen\s*\{([^}]*)\}', css).group(1)
+    assert "background" in rule

@@ -291,6 +291,13 @@ def test_ab27_search_by_creator(migrated):
     assert [i["id"] for i in ok(migrated, "search", creator=CHAOS)["issues"]] == [mine]
 
 
+
+def test_ab70_search_by_involved(migrated):
+    iid = core.create(board(migrated), "MS", "theirs", actor="overlord", actor_kind="agent")["id"]
+    core.annotate(migrated, iid, "looking", actor=CHAOS, actor_kind="human")
+    core.create(migrated, "MS", "untouched", actor="overlord", actor_kind="agent")
+    assert [i["id"] for i in ok(migrated, "search", involved=CHAOS)["issues"]] == [iid]
+
 def test_search_with_no_match_is_an_empty_result_not_an_error(migrated):
     ready(board(migrated))
     assert ok(migrated, "search", q="nothing like this") == {"issues": []}

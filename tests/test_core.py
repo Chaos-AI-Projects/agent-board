@@ -2375,3 +2375,36 @@ def test_ab69_a_replayed_instantiate_with_another_creator_is_a_conflict(board):
     with pytest.raises(core.Conflict):
         core.instantiate(board, "pair", "MS", actor="overlord", actor_kind=AGENT,
                          request_id="i1")
+
+
+# --- AB-70: search for the cards a person interacted with ---------------------
+
+
+def test_ab70_involved_matches_created_entered_and_human_events(board):
+    made = core.create(board, "MS", "made", actor=CHAOS, actor_kind=HUMAN)["id"]
+    entered = core.create(board, "MS", "entered", actor="overlord", actor_kind=AGENT,
+                          creator=CHAOS)["id"]
+    noted = core.create(board, "MS", "noted", actor=OTHER, actor_kind=HUMAN)["id"]
+    core.annotate(board, noted, "watching", actor=CHAOS, actor_kind=HUMAN)
+    core.create(board, "MS", "untouched", actor=OTHER, actor_kind=HUMAN)
+    assert sorted(ids(core.search(board, involved=CHAOS))) == sorted([made, entered, noted])
+
+
+def test_ab70_an_agent_event_under_the_same_name_is_not_involvement(board):
+    iid = core.create(board, "MS", "x", actor=OTHER, actor_kind=HUMAN)["id"]
+    core.annotate(board, iid, "agent note", actor=CHAOS, actor_kind=AGENT)
+    assert ids(core.search(board, involved=CHAOS)) == []
+
+
+def test_ab70_involved_combines_with_the_other_filters(board):
+    a = core.create(board, "MS", "alpha", actor=CHAOS, actor_kind=HUMAN)["id"]
+    core.create(board, "MS", "beta", actor=CHAOS, actor_kind=HUMAN)
+    assert ids(core.search(board, involved=CHAOS, q="alpha")) == [a]
+
+
+def test_ab70_the_overview_lists_every_person_for_the_involved_filter(board):
+    ready(board, "x")
+    iid = core.create(board, "MS", "y", actor="overlord", actor_kind=AGENT,
+                      creator="third@example.com")["id"]
+    core.annotate(board, iid, "hi", actor=OTHER, actor_kind=HUMAN)
+    assert core.overview(board)["people"] == sorted([CHAOS, OTHER, "third@example.com"])

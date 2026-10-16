@@ -68,7 +68,7 @@ from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit
 from zoneinfo import ZoneInfo
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.templating import Jinja2Templates
@@ -1226,15 +1226,24 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
 
     @app.get("/search", response_class=HTMLResponse)
     def search_page(request: Request, q: str = "", project: str = "", label: str = "",
-                    assignee: str = "", creator: str = ""):
+                    assignee: str = "", creator: str = "", involved: str = "",
+                    unseen_only: str = Query("", alias="unseen")):
         filters = {"q": q.strip(), "project": project, "label": label, "assignee": assignee,
-                   "creator": creator}
+                   "creator": creator, "involved": involved}
         view = core.overview(engine, **filters)
+        results = view["issues"]
+        # AB-70: `unseen` keeps only the viewer's unseen finished cards, so the
+        # header's count and this page agree. It is the viewer's own, so it is
+        # read here rather than passed to core as a person.
+        if unseen_only:
+            news = unseen(request)
+            results = [i for i in results if i["id"] in news]
+        filters["unseen"] = bool(unseen_only)
         # With no filter at all the page is just the form, not every issue.
         searched = any(filters.values())
         return page(request, "search.html", view=view, filters=filters, searched=searched,
                     header_q=filters["q"],
-                    results=view["issues"] if searched else [])
+                    results=results if searched else [])
 
     @app.get("/stats", response_class=HTMLResponse)
     def stats_page(request: Request, days: int = core.STATS_DAYS):

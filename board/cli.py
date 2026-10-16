@@ -96,6 +96,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--label")
     sp.add_argument("--assignee")
     sp.add_argument("--creator", help="the actor who created the issue")
+    sp.add_argument("--involved", help="a person who created the issue, had it created "
+                                       "for them, or acted on it as a human (AB-70)")
 
     sp = op("move", help="set the stage; planning and implement queue the card as ready, "
                          "done needs a --note, done reopens with a --note and no lease")
@@ -216,7 +218,8 @@ def _run(engine, a) -> dict | None:
             return core.show(engine, a.id)
         case "search":
             return {"issues": core.search(engine, q=a.q, project=a.project, label=a.label,
-                                          assignee=a.assignee, creator=a.creator)}
+                                          assignee=a.assignee, creator=a.creator,
+                                          involved=a.involved)}
         case "move":
             return core.move(engine, a.id, a.stage, note=a.note, token=a.token,
                              request_id=a.request_id, preempt=a.preempt, **who)

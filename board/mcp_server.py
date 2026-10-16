@@ -114,17 +114,21 @@ def build_server(engine, actor: str | Callable[[], str], brain=_FROM_ENV,
 
     @mcp.tool()
     def search(q: str | None = None, project: str | None = None, label: str | None = None,
-               assignee: str | None = None, creator: str | None = None) -> CallToolResult:
+               assignee: str | None = None, creator: str | None = None,
+               involved: str | None = None) -> CallToolResult:
         """Issues matching every filter given, in board order, without bodies.
 
         `q` is a case-insensitive substring of the id, title, body or any
         label. `project`, `label`, `assignee` and `creator` match exactly;
         `assignee` also matches the lease holder, and `creator` is whoever
-        created the issue. No filter lists every issue. No match is
+        created the issue. `involved` is a person who created the issue,
+        had it created for them, or wrote any event on it as a human. No
+        filter lists every issue. No match is
         {"issues": []}, not an error.
         """
         return run(lambda: {"issues": core.search(engine, q=q, project=project, label=label,
-                                                  assignee=assignee, creator=creator)})
+                                                  assignee=assignee, creator=creator,
+                                                  involved=involved)})
 
     @mcp.tool()
     def projects() -> CallToolResult:
