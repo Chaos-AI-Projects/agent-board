@@ -500,3 +500,13 @@ def test_ab63_create_takes_the_person_an_agent_enters_the_card_for(migrated):
 def test_ab63_an_agent_cannot_name_itself_creator(migrated):
     board(migrated)
     assert failed(migrated, "create", project="MS", title="t", creator=WORKER)["code"] == 1
+
+
+def test_ab69_instantiate_and_create_batch_take_a_creator(migrated):
+    board(migrated)
+    core.create_template(migrated, "release", "Release", ["build"])
+    wf = ok(migrated, "instantiate", template="release", project="MS", creator=CHAOS)
+    batch = ok(migrated, "create_batch", items=[{"project": "MS", "title": "a"}],
+               creator=CHAOS)
+    made = [wf["steps"][0]["id"], *batch["ids"]]
+    assert sorted(i["id"] for i in core.search(migrated, creator=CHAOS)) == sorted(made)

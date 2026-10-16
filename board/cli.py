@@ -160,6 +160,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("template")
     sp.add_argument("--project", required=True)
     sp.add_argument("--title")
+    sp.add_argument("--creator", help="the person an agent makes the steps for; "
+                                      "agents only (AB-69)")
     writes(sp, token=False)
 
     sp = op("plan", help="break an issue into a workflow of ready steps; exit 5 if it has one")
@@ -172,6 +174,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp = op("create-batch", help="create several issues together, all or nothing")
     sp.add_argument("file", help="a JSON file, or - for stdin: a list of items, or "
                                  "{\"items\": [...], \"workflow_title\": ...}")
+    sp.add_argument("--creator", help="the person an agent makes the batch for; an "
+                                      "item's own creator overrides it; agents only (AB-69)")
     writes(sp, token=False)
 
     sp = op("depend", help="make an issue wait until another is done")
@@ -238,14 +242,14 @@ def _run(engine, a) -> dict | None:
                                      preempt=a.preempt, **who)
         case "instantiate":
             return core.instantiate(engine, a.template, a.project, title=a.title,
-                                    request_id=a.request_id, **who)
+                                    request_id=a.request_id, creator=a.creator, **who)
         case "plan":
             return core.plan(engine, a.id, [{"title": t} for t in a.steps], token=a.token,
                              request_id=a.request_id, preempt=a.preempt, **who)
         case "create-batch":
             items, workflow_title = _batch_file(a.file)
             return core.create_batch(engine, items, workflow_title=workflow_title,
-                                     request_id=a.request_id, **who)
+                                     request_id=a.request_id, creator=a.creator, **who)
         case "depend":
             return core.depend(engine, a.id, a.on, request_id=a.request_id, **who)
         case "undepend":

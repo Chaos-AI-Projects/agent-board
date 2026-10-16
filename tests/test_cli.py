@@ -575,3 +575,16 @@ def test_ab63_a_human_cannot_name_a_creator(url):
                  "--title", "t", "--creator", "someone@example.com", actor=CHAOS)
     assert proc.returncode == 1
     assert "only an agent" in json.loads(proc.stderr)["message"]
+
+
+def test_ab69_instantiate_and_create_batch_take_a_creator(url):
+    eng = store.make_engine(url)
+    core.create_template(eng, "ship", "Ship it", ["build"])
+    eng.dispose()
+    wf = ok(board(url, "--actor-kind", "agent", "instantiate", "ship", "--project", "MS",
+                  "--creator", CHAOS, actor="overlord"))
+    batch = ok(board(url, "--actor-kind", "agent", "create-batch", "-", "--creator", CHAOS,
+                     actor="overlord", stdin=json.dumps([{"project": "MS", "title": "a"}])))
+    for i in [wf["steps"][0]["id"], *batch["ids"]]:
+        out = ok(board(url, "show", i))
+        assert (out["creator"], out["created_by_agent"]) == (CHAOS, "overlord")

@@ -934,9 +934,14 @@ def next_due(schedule: str, zone: str, after: datetime) -> datetime:
 
 
 def instantiate(engine, template: str, project: str, *, actor: str, actor_kind: str,
-                title: str | None = None, request_id: str | None = None) -> dict:
-    """Create a workflow and one ready issue per template step, all or nothing."""
+                title: str | None = None, request_id: str | None = None,
+                creator: str | None = None) -> dict:
+    """Create a workflow and one ready issue per template step, all or nothing.
 
+    `creator` names the person an agent makes the steps for, as in `create`
+    (AB-69).
+    """
+    creator = _check_creator(creator, actor, actor_kind)
     key = _scoped("instantiate", template, request_id)
 
     def replay(s, ev):
@@ -954,17 +959,19 @@ def instantiate(engine, template: str, project: str, *, actor: str, actor_kind: 
         s.flush()
         for i, step in enumerate(tpl.steps):
             _create(s, project, step.title, actor, actor_kind, step.body, READY, None,
-                    (), wf.id, step.position, now, key if i == 0 else None)
+                    (), wf.id, step.position, now, key if i == 0 else None, creator)
         s.flush()
         s.refresh(wf)
         return _workflow_view(s, wf)
 
-    return _write(engine, key, run, replay, [project, title, actor, actor_kind])
+    return _write(engine, key, run, replay, [project, title, actor, actor_kind,
+                                             # Only when given, as in `create`.
+                                             *([["creator", creator]] if creator else [])])
 
 
 def create_batch(engine, items: list[dict], *, actor: str, actor_kind: str,
                  workflow_title: str | None = None,
-                 request_id: str | None = None) -> dict:
+                 request_id: str | None = None, creator: str | None = None) -> dict:
     """Create several issues together, all or nothing (MS-647).
 
     Each item is a dict of `project`, `title`, and optional `body`, `state`
@@ -976,9 +983,14 @@ def create_batch(engine, items: list[dict], *, actor: str, actor_kind: str,
     positions 1..N in list order, so a batch with no `after` keeps strict
     order; without it the issues are loose. Everything is checked before the
     first row is written. Returns `ids` in list order, `refs` mapping each
-    ref to its id, and `workflow_id`.
+    ref to its id, and `workflow_id`. `creator` names the person an agent
+    makes the batch for, as in `create`; an item's own `creator` overrides
+    it (AB-69).
     """
     items = [_batch_item(i, it) for i, it in enumerate(items)]
+    creator = _check_creator(creator, actor, actor_kind)
+    for it in items:
+        it["creator"] = _check_creator(it["creator"], actor, actor_kind)
     if not items:
         raise BoardError("a batch needs at least one item")
     if workflow_title is not None:
@@ -1028,7 +1040,8 @@ def create_batch(engine, items: list[dict], *, actor: str, actor_kind: str,
             item_key = None if key is None else (key if i == 0 else _item_key(key, i))
             issues.append(_create(s, it["project"], it["title"], actor, actor_kind, it["body"],
                                   it["where"], it["rank"], it["labels"],
-                                  wf and wf.id, wf and i + 1, now, item_key))
+                                  wf and wf.id, wf and i + 1, now, item_key,
+                                  it["creator"] or creator))
         for issue, it in zip(issues, items):
             for on in [issues[j].id for j in it["inside"]] + it["outside"]:
                 if s.get(Dependency, (issue.id, on)) is not None:
@@ -1040,10 +1053,15 @@ def create_batch(engine, items: list[dict], *, actor: str, actor_kind: str,
         s.flush()
         return result([i.id for i in issues], wf and wf.id)
 
+    # A creator is hashed only when given, as in `create`, so a call without
+    # one hashes as before AB-69.
     return _write(engine, key, body, replay,
                   [[{k: it[k] for k in ("project", "title", "body", "where", "rank",
-                                        "labels", "ref", "after")} for it in items],
-                   workflow_title, actor, actor_kind])
+                                        "labels", "ref", "after")}
+                    | ({"creator": it["creator"]} if it["creator"] else {})
+                    for it in items],
+                   workflow_title, actor, actor_kind,
+                   *([["creator", creator]] if creator else [])])
 
 
 def _item_key(key, i):
@@ -1083,7 +1101,7 @@ def _batch_item(i, it):
         raise BoardError(f"item {i}: a body is a string")
     return {"project": it["project"], "title": title, "body": body,
             "where": where, "rank": rank, "labels": sorted({l.strip() for l in labels}),
-            "ref": ref, "after": after}
+            "ref": ref, "after": after, "creator": it.get("creator")}
 
 
 def _batch_after(i, after, refs, n):
@@ -1165,10 +1183,15 @@ def plan(engine, issue_id: str, steps: list[dict], *, actor: str, actor_kind: st
         wf = Workflow(title=issue.title, origin_issue_id=issue.id, created_at=now)
         s.add(wf)
         s.flush()
+        # An agent's steps are for the person the origin was made for (AB-69);
+        # a person who plans is the steps' creator, as in `create`.
+        made = _creator_view(issue)
+        creator = (made["creator"] if actor_kind == "agent"
+                   and made["creator_kind"] == "human" else None)
         for position, st in enumerate(steps, 1):
             # The origin's rank, so planning an urgent issue keeps its steps urgent.
             _create(s, st["project"] or issue.project_key, st["title"], actor, actor_kind,
-                    st["body"], READY, issue.rank, (), wf.id, position, now, None)
+                    st["body"], READY, issue.rank, (), wf.id, position, now, None, creator)
         old_stage, old_queue = issue.state, issue.queue
         if issue.state not in WORK_STAGES:
             issue.state = "implement"
@@ -1543,8 +1566,9 @@ def _judge(issue, stage, queue, note, actor_kind):
 def _set_place(s, issue, stage, queue, note, actor, actor_kind, now, key, key_used):
     """Write a card's stage and queue status, and one transition event.
 
-    Leaving processing drops the lease. Closing a step may resume its plan's
-    origin, and leaving done reopens the card.
+    Leaving processing drops the lease, and entering ready lifts any closing
+    artifact (AB-68). Closing a step may resume its plan's origin, and leaving
+    done reopens the card.
     """
     old_stage, old_queue = issue.state, issue.queue
     if stage == "done" and issue.schedule and old_stage in WORK_STAGES:
@@ -1554,6 +1578,8 @@ def _set_place(s, issue, stage, queue, note, actor, actor_kind, now, key, key_us
         issue.state, issue.queue = stage, queue
         if old_queue == "processing":
             issue.lease_holder = issue.lease_token = issue.lease_expires_at = None
+        if queue == "ready" and old_queue != "ready":
+            _unclose(issue)
         issue.version += 1
         issue.updated_at = now
     ev = _event(s, issue.id, now, actor, actor_kind, "transition", old_stage, stage, note,
@@ -1565,6 +1591,16 @@ def _set_place(s, issue, stage, queue, note, actor, actor_kind, now, key, key_us
     return ev
 
 
+def _unclose(issue):
+    """A card back in ready has work left, so no artifact marks it finished (AB-68).
+
+    `next` skips a card with a closing artifact, in `_candidates`. The
+    artifacts stay linked; they only stop closing.
+    """
+    for a in issue.artifacts:
+        a.closes = False
+
+
 def _reopen(s, issue, actor, now):
     """What reopening a done card undoes beyond its own state (AB-24).
 
@@ -1574,8 +1610,7 @@ def _reopen(s, issue, actor, now):
     the step again; any other origin stays where it is, with a note.
     Dependents need nothing here: `next` judges them, in `_candidates`.
     """
-    for a in issue.artifacts:
-        a.closes = False
+    _unclose(issue)
     wf = issue.workflow
     if wf is None or wf.origin_issue_id is None:
         return
@@ -1647,6 +1682,7 @@ def _resume_origin(s, step, now):
     if origin.queue != "on-hold":
         return
     origin.queue = "ready"
+    _unclose(origin)
     origin.version += 1
     origin.updated_at = now
     _event(s, origin.id, now, "board", "system", "transition", origin.state, origin.state,

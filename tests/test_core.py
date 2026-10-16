@@ -1786,6 +1786,44 @@ def test_ab24_reopening_lifts_a_closing_artifact_so_next_hands_it_out(board):
     assert core.next(board, "w2")["issue"]["id"] == i
 
 
+def test_ab68_a_card_queued_ready_again_drops_its_closing_artifact(board):
+    """Chaos's repro: link closes, release to no queue, a human queues it ready."""
+    i = ready(board)
+    claim = core.next(board, "w1")
+    core.link(board, i, "https://example.com/mr/1", kind="pr", closes=True, actor="w1",
+              actor_kind=AGENT, token=claim["lease_token"])
+    core.queue(board, i, None, note="waiting on review", actor="w1", actor_kind=AGENT,
+               token=claim["lease_token"])
+    issue = core.queue(board, i, "ready", actor=CHAOS, actor_kind=HUMAN)
+    assert place(issue) == ("implement", "ready")
+    assert issue["closed_by_artifact"] is False
+    assert [a["ref"] for a in issue["artifacts"]] == ["https://example.com/mr/1"]
+    assert core.next(board, "w2")["issue"]["id"] == i
+
+
+def test_ab68_a_plan_origin_back_in_ready_drops_its_closing_artifact(board):
+    iid, token = claimed(board)
+    core.link(board, iid, "https://example.com/mr/2", kind="pr", closes=True, actor="w1",
+              actor_kind=AGENT, token=token)
+    step = plan(board, iid, token, steps=("a",))["plan"]["steps"][0]["id"]
+    claim = core.next(board, "w2")
+    assert claim["issue"]["id"] == step
+    core.move(board, step, "done", note="did a", actor="w2", actor_kind=AGENT,
+              token=claim["lease_token"])
+    assert core.show(board, iid)["closed_by_artifact"] is False
+    assert core.next(board, "w3")["issue"]["id"] == iid
+
+
+def test_ab68_a_card_that_stays_out_of_ready_keeps_its_closing_artifact(board):
+    i = ready(board)
+    claim = core.next(board, "w1")
+    core.link(board, i, "https://example.com/mr/3", kind="pr", closes=True, actor="w1",
+              actor_kind=AGENT, token=claim["lease_token"])
+    issue = core.queue(board, i, None, note="waiting on review", actor="w1",
+                       actor_kind=AGENT, token=claim["lease_token"])
+    assert issue["closed_by_artifact"] is True
+
+
 def test_ab24_done_times_report_the_latest_close_after_a_reopen(board):
     i = done_card(board)
     age_done(board, i, 30)
@@ -2233,3 +2271,107 @@ def test_ab67_mark_seen_twice_keeps_one_row(board):
     core.mark_seen(board, CHAOS, iid)
     with store.session(board) as s:
         assert s.scalar(select(func.count()).select_from(store.CardSeen)) == 1
+
+
+# --- AB-69: plan, create_batch and instantiate name a human creator ---------
+
+
+def creators(engine, ids_):
+    return [(v["creator"], v["creator_kind"], v["created_by_agent"])
+            for v in (core.show(engine, i) for i in ids_)]
+
+
+def test_ab69_an_agent_plans_steps_for_the_person_who_made_the_origin(board):
+    """Chaos's repro: a person makes card A, an agent plans it in two steps."""
+    iid, token = claimed(board)
+    steps = [st["id"] for st in plan(board, iid, token, steps=("a", "b"))["plan"]["steps"]]
+    assert creators(board, steps) == [(CHAOS, HUMAN, "w1")] * 2
+    assert ids(core.search(board, creator=CHAOS)) == sorted([iid, *steps])
+
+
+def test_ab69_steps_planned_from_an_agents_own_card_keep_the_agent(board):
+    iid = core.create(board, "MS", "mine", actor="w0", actor_kind=AGENT,
+                      stage="implement")["id"]
+    claim = core.next(board, "w1")
+    steps = [st["id"] for st in plan(board, iid, claim["lease_token"],
+                                     steps=("a",))["plan"]["steps"]]
+    assert creators(board, steps) == [("w1", AGENT, None)]
+
+
+def test_ab69_steps_planned_from_an_entered_card_name_its_creator(board):
+    iid = core.create(board, "MS", "his ask", actor="overlord", actor_kind=AGENT,
+                      stage="implement", creator=CHAOS)["id"]
+    claim = core.next(board, "w1")
+    steps = [st["id"] for st in plan(board, iid, claim["lease_token"],
+                                     steps=("a",))["plan"]["steps"]]
+    assert creators(board, steps) == [(CHAOS, HUMAN, "w1")]
+
+
+def test_ab69_a_person_who_plans_is_the_steps_creator(board):
+    iid = ready(board)
+    other = "someone@example.com"
+    steps = [st["id"] for st in core.plan(board, iid, [{"title": "a"}], actor=other,
+                                          actor_kind=HUMAN)["plan"]["steps"]]
+    assert creators(board, steps) == [(other, HUMAN, None)]
+
+
+def test_ab69_create_batch_names_a_creator_for_every_item_or_one(board):
+    out = core.create_batch(board, [{"project": "MS", "title": "a"},
+                                    {"project": "MS", "title": "b",
+                                     "creator": "other@example.com"}],
+                            actor="overlord", actor_kind=AGENT, creator=CHAOS)
+    assert creators(board, out["ids"]) == [(CHAOS, HUMAN, "overlord"),
+                                           ("other@example.com", HUMAN, "overlord")]
+
+
+def test_ab69_create_batch_without_a_creator_keeps_the_agent(board):
+    out = core.create_batch(board, [{"project": "MS", "title": "a"}],
+                            actor="overlord", actor_kind=AGENT)
+    assert creators(board, out["ids"]) == [("overlord", AGENT, None)]
+
+
+@pytest.mark.parametrize("where", ["batch", "item"])
+def test_ab69_create_batch_checks_its_creator_like_create(board, where):
+    item = {"project": "MS", "title": "a"}
+    kw = {}
+    if where == "batch":
+        kw["creator"] = "bot@p.iam.gserviceaccount.com"
+    else:
+        item["creator"] = "overlord"
+    with pytest.raises(core.BoardError):
+        core.create_batch(board, [item], actor="overlord", actor_kind=AGENT, **kw)
+    with pytest.raises(core.BoardError, match="only an agent"):
+        core.create_batch(board, [{"project": "MS", "title": "a", "creator": CHAOS}],
+                          actor=CHAOS, actor_kind=HUMAN)
+    assert core.search(board) == []
+
+
+def test_ab69_a_replayed_create_batch_with_another_creator_is_a_conflict(board):
+    items = [{"project": "MS", "title": "a"}]
+    first = core.create_batch(board, items, actor="overlord", actor_kind=AGENT,
+                              request_id="b1", creator=CHAOS)
+    again = core.create_batch(board, items, actor="overlord", actor_kind=AGENT,
+                              request_id="b1", creator=CHAOS)
+    assert again["ids"] == first["ids"]
+    with pytest.raises(core.Conflict):
+        core.create_batch(board, items, actor="overlord", actor_kind=AGENT, request_id="b1")
+
+
+def test_ab69_instantiate_names_a_creator(board):
+    core.create_template(board, "pair", "Pair", ["one", "two"])
+    wf = core.instantiate(board, "pair", "MS", actor="overlord", actor_kind=AGENT,
+                          creator=CHAOS)
+    assert creators(board, [st["id"] for st in wf["steps"]]) == [
+        (CHAOS, HUMAN, "overlord")] * 2
+    with pytest.raises(core.BoardError, match="only an agent"):
+        core.instantiate(board, "pair", "MS", actor=CHAOS, actor_kind=HUMAN,
+                         creator="other@example.com")
+
+
+def test_ab69_a_replayed_instantiate_with_another_creator_is_a_conflict(board):
+    core.create_template(board, "pair", "Pair", ["one", "two"])
+    core.instantiate(board, "pair", "MS", actor="overlord", actor_kind=AGENT,
+                     request_id="i1", creator=CHAOS)
+    with pytest.raises(core.Conflict):
+        core.instantiate(board, "pair", "MS", actor="overlord", actor_kind=AGENT,
+                         request_id="i1")

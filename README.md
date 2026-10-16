@@ -63,6 +63,10 @@ me" view and the stats page's Created column. The agent stays the create event's
 page reads "Created by EMAIL, entered by agent NAME". Only an agent may name a creator, never itself,
 and naming one grants nothing.
 
+`instantiate` and `create_batch` take the same `creator` (`--creator` in the CLI), and a batch
+item's own `creator` overrides the batch's. When an agent plans a card a person made, each step
+names that person as its creator (AB-69).
+
 `board search [Q] [--project P] [--label L] [--assignee A]` prints `{"issues": [...]}`. `Q` is a
 case-insensitive substring of the id, title, body or any label, matched with plain `lower() LIKE` so
 neither engine needs a full-text extension. The flags match exactly, and everything given must match. Nothing
