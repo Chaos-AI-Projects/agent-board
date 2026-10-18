@@ -16,7 +16,7 @@
 <ol class="hits">
 {% for issue in results %}
   {% set pc = project_colour(issue.project) %}<li class="hit{% if issue.id in unseen %} unseen{% endif %}" data-id="{{ issue.id }}" style="--proj-bg: {{ pc.bg }}; --proj-border: {{ pc.border }}"><a href="/issues/{{ issue.id }}">{{ issue.id }}</a> {{ issue.title }}
-    <span class="meta">{{ issue.stage }}{% if issue.queue %}, {{ issue.queue }}{% endif %}{% for l in issue.labels %} &middot; {{ l }}{% endfor %}</span></li>
+    <span class="meta">{{ issue.stage }}{% if issue.queue %}, {{ issue.queue }}{% endif %}{% for l in issue.labels %} &middot; {{ l }}{% endfor %} &middot; <time datetime="{{ issue.updated_at }}">updated {{ issue.updated_at|localtime(tz) }}</time></span></li>
 {% endfor %}
 </ol>
 {% elif searched %}

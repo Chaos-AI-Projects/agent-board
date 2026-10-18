@@ -1266,6 +1266,23 @@ def test_the_search_page_is_titled_advanced_search(client, board):
     assert re.search(r"<h1[^>]*>Advanced search</h1>", main_of(html))
 
 
+def test_ab72_search_lists_the_newest_updated_first_with_its_updated_time(client, board):
+    old, new, mid = ready(board, "Quokka old"), ready(board, "Quokka new"), ready(board, "Quokka mid")
+    for issue_id, at in ((old, "2026-10-01T09:00:00+00:00"), (new, "2026-10-18T10:13:00+00:00"),
+                         (mid, "2026-10-10T23:30:00+00:00")):
+        with store.session(board) as s, s.begin():
+            s.execute(store.Issue.__table__.update().where(store.Issue.id == issue_id)
+                      .values(updated_at=datetime.fromisoformat(at)))
+    html = client.get("/search", params={"q": "quokka"}).text
+    assert hits(html) == [new, mid, old]
+    item = re.search(r'<li class="hit"[^>]*data-id="%s".*?</li>' % new, html, re.S).group(0)
+    assert re.search(r'<time datetime="2026-10-18T10:13:00\+00:00"[^>]*>updated 2026-10-18 10:13 UTC</time>',
+                     item)
+    sydney = local_client(board)
+    sydney.cookies.set(web.PREFS_COOKIE, quote(json.dumps({"timezone": "Australia/Sydney"}), safe=""))
+    assert "updated 2026-10-18 21:13 AEDT" in sydney.get("/search", params={"q": "quokka"}).text
+
+
 def test_search_lists_hits_by_q_linking_to_their_issue_pages(client, board):
     hit = ready(board, "Search box", body="filter the board")
     miss = ready(board, "Lease expiry")

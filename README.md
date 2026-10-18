@@ -72,7 +72,7 @@ case-insensitive substring of the id, title, body or any label, matched with pla
 neither engine needs a full-text extension. The flags match exactly, and everything given must match. Nothing
 writes an issue's `assignee` yet, so `--assignee` also matches the card's lease holder.
 `--involved EMAIL` matches the cards that person created, had an agent create for them, or acted on
-as a human (AB-70).
+as a human (AB-70). Hits come newest updated first, not in board order (AB-72).
 The web board's search page takes the same filters as `GET /search?q=&project=&label=&assignee=&involved=`.
 
 ```bash
@@ -125,8 +125,8 @@ The board at `/` is a view only. Every page's header has a search box, which sen
 project, label, assignee, creator and involved filters, plus an `unseen=1` box that keeps only the
 viewer's finished cards they have not opened. The header's "N finished" count links to
 `/search?involved=<viewer>&unseen=1`, so its number is that page's hit count (AB-70). `/search` lists
-matching issues as a flat list linking to each `/issues/<id>`, and shows nothing until a filter is
-given. An unseen card is tinted in the accent colour on the board and in the hit list (AB-71).
+matching issues as a flat list linking to each `/issues/<id>`, newest updated first, each with its
+updated time in the viewer's zone (AB-72). It shows nothing until a filter is given. An unseen card is tinted in the accent colour on the board and in the hit list (AB-71).
 
 Three controls pick what the board shows, and all three save to one per-browser cookie:
 

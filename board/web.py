@@ -1230,8 +1230,9 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
                     unseen_only: str = Query("", alias="unseen")):
         filters = {"q": q.strip(), "project": project, "label": label, "assignee": assignee,
                    "creator": creator, "involved": involved}
-        view = core.overview(engine, **filters)
-        results = view["issues"]
+        view = core.overview(engine)
+        # AB-72: hits come newest updated first, unlike the board's rank order.
+        results = core.search(engine, **filters)
         # AB-70: `unseen` keeps only the viewer's unseen finished cards, so the
         # header's count and this page agree. It is the viewer's own, so it is
         # read here rather than passed to core as a person.

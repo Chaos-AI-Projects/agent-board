@@ -795,6 +795,19 @@ def test_search_q_matches_id_title_body_and_labels(searchable, q, which):
     assert ids(core.search(board, q=q)) == expected
 
 
+def test_ab72_search_lists_the_newest_updated_first(searchable):
+    board, a, b, c = searchable
+    for issue_id, hours in ((a, 3), (b, 1), (c, 2)):
+        with store.session(board) as s, s.begin():
+            then = store.db_now(s) - timedelta(hours=hours)
+            s.execute(store.Issue.__table__.update().where(store.Issue.id == issue_id)
+                      .values(updated_at=then))
+    assert ids(core.search(board)) == [b, c, a]
+    assert ids(core.search(board, q="e")) == [b, c, a]
+    # The board itself keeps rank order: only search sorts by time.
+    assert ids(core.overview(board)["issues"]) == [a, b, c]
+
+
 def test_search_q_treats_like_wildcards_as_literals(searchable):
     board, a, b, c = searchable
     assert ids(core.search(board, q="100%")) == [b]

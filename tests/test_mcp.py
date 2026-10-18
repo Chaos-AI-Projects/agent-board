@@ -7,11 +7,12 @@ result with isError set and the CLI's error class and exit code in its JSON.
 """
 
 import json
+from datetime import timedelta
 
 import anyio
 from mcp.shared.memory import create_connected_server_and_client_session
 
-from board import core
+from board import core, store
 from board.brain import BRAIN_DIR_ENV, Brain
 from board.mcp_server import build_server
 
@@ -281,7 +282,12 @@ def test_search_finds_issues_by_query_and_project(migrated):
     hit = ready(migrated, "fix the lease bug")
     ready(migrated, "unrelated")
     other = core.create(migrated, "AB", "lease docs", actor=CHAOS, actor_kind="human")["id"]
-    assert [i["id"] for i in ok(migrated, "search", q="LEASE")["issues"]] == [hit, other]
+    # Newest updated first (AB-72), pinned so the order does not hang on the clock.
+    with store.session(migrated) as s, s.begin():
+        for issue_id, hours in ((hit, 2), (other, 1)):
+            s.execute(store.Issue.__table__.update().where(store.Issue.id == issue_id)
+                      .values(updated_at=store.db_now(s) - timedelta(hours=hours)))
+    assert [i["id"] for i in ok(migrated, "search", q="LEASE")["issues"]] == [other, hit]
     assert [i["id"] for i in ok(migrated, "search", q="lease", project="MS")["issues"]] == [hit]
 
 

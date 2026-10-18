@@ -499,7 +499,7 @@ def workflow(engine, workflow_id: int) -> dict:
 def search(engine, *, q: str | None = None, project: str | None = None,
            label: str | None = None, assignee: str | None = None,
            creator: str | None = None, involved: str | None = None) -> list[dict]:
-    """Issues matching every filter given, in board order.
+    """Issues matching every filter given, the newest updated first (AB-72).
 
     `q` is a case-insensitive substring of the id, title, body or any label,
     matched with plain `lower() LIKE` so the schema needs no full-text
@@ -510,10 +510,10 @@ def search(engine, *, q: str | None = None, project: str | None = None,
     actor of the issue's create event (AB-27), or the person an agent named
     on it (AB-63). `involved` is a person who created the issue, had it
     created for them, or wrote any event on it as a human (AB-70). An empty
-    filter is no filter.
+    filter is no filter. Cards updated in the same instant keep board order.
     """
     with store.session(engine) as s:
-        return _search(s, q, project, label, assignee, creator, involved)
+        return _search(s, q, project, label, assignee, creator, involved, newest_first=True)
 
 
 def _creator_col():
@@ -521,8 +521,11 @@ def _creator_col():
     return func.coalesce(Event.on_behalf_of, Event.actor)
 
 
-def _search(s, q, project, label, assignee, creator=None, involved=None):
-    stmt = select(Issue).order_by(Issue.rank, Issue.id)
+def _search(s, q, project, label, assignee, creator=None, involved=None, newest_first=False):
+    stmt = select(Issue)
+    if newest_first:
+        stmt = stmt.order_by(Issue.updated_at.desc())
+    stmt = stmt.order_by(Issue.rank, Issue.id)
     q = (q or "").strip()
     if q:
         # Folded by the database on both sides: SQLite's lower() folds only

@@ -116,7 +116,7 @@ def build_server(engine, actor: str | Callable[[], str], brain=_FROM_ENV,
     def search(q: str | None = None, project: str | None = None, label: str | None = None,
                assignee: str | None = None, creator: str | None = None,
                involved: str | None = None) -> CallToolResult:
-        """Issues matching every filter given, in board order, without bodies.
+        """Issues matching every filter given, newest updated first, without bodies.
 
         `q` is a case-insensitive substring of the id, title, body or any
         label. `project`, `label`, `assignee` and `creator` match exactly;
