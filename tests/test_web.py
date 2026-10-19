@@ -1768,7 +1768,7 @@ def test_ms637_the_hidden_attribute_beats_label_display_block(board, client):
 
 
 def history_times(html):
-    return re.findall(r"<li>(\S+ \S+ \S+) &middot;", html)
+    return re.findall(r'<span class="when">(\S+ \S+ \S+)</span>', html)
 
 
 def tz_client(board, monkeypatch, env=None):
@@ -1987,7 +1987,7 @@ def test_a_notes_file_shows_under_that_note(board, attach_dir, client):
     [a] = issue["attachments"]
     html = client.get(f"/issues/{iid}").text
     history = html.split("<h2>History</h2>", 1)[1]
-    item = re.search(r"<li>(?:(?!</li>).)*the log.*?</li>", history, re.S).group(0)
+    item = re.search(r"<li[^>]*>(?:(?!</li>).)*the log.*?</li>", history, re.S).group(0)
     assert f'href="/attachments/{a["id"]}"' in item and "run.log" in item
 
 
@@ -2634,12 +2634,97 @@ def history(html):
     return html.split("<h2>History</h2>", 1)[1]
 
 
-def test_ab2_history_lists_the_newest_event_first(board, client):
+def events_list(html):
+    """The history list itself, without the forms that follow it (AB-75)."""
+    return re.search(r'<ol class="events">.*?</ol>', history(html), re.S).group(0)
+
+
+def test_ab75_history_lists_the_oldest_event_first(board, client):
+    """AB-75 reverses AB-2: the page reads as a conversation, top-down."""
     iid = ready(board)
     core.annotate(board, iid, "first note", actor=CHAOS, actor_kind=HUMAN)
     core.annotate(board, iid, "second note", actor=CHAOS, actor_kind=HUMAN)
-    events = history(client.get(f"/issues/{iid}").text)
-    assert events.index("second note") < events.index("first note") < events.index("create")
+    events = events_list(client.get(f"/issues/{iid}").text)
+    assert events.index("create") < events.index("first note") < events.index("second note")
+
+
+def bubbles(html):
+    """Each history item's class attribute, with its text, in page order."""
+    return [(m.group(1), unescape(re.sub(r"<[^>]+>", " ", m.group(2))))
+            for m in re.finditer(r'<li class="([^"]*)"[^>]*>(.*?)</li>', events_list(html), re.S)]
+
+
+def test_ab75_an_agent_note_sits_left_and_a_human_note_right(board, client):
+    iid = ready(board)
+    core.annotate(board, iid, "agent says", actor="bot@agents.example", actor_kind=AGENT)
+    core.annotate(board, iid, "human says", actor=CHAOS, actor_kind=HUMAN)
+    core.annotate(board, iid, "board says", actor="board", actor_kind="system")
+    items = bubbles(client.get(f"/issues/{iid}").text)
+    side = {next(n for n in ("agent says", "human says", "board says") if n in text): cls
+            for cls, text in items if "says" in text}
+    assert "bubble-agent" in side["agent says"].split()
+    assert "bubble-human" in side["human says"].split()
+    assert "bubble-agent" in side["board says"].split(), "a system actor counts as agent"
+
+
+def test_ab75_an_event_without_a_note_is_a_system_line(board, client):
+    iid = ready(board)
+    items = bubbles(client.get(f"/issues/{iid}").text)
+    assert len(items) == 1
+    cls, text = items[0]
+    assert "system-line" in cls.split() and "bubble" not in cls.split()
+    assert "create" in text
+
+
+def test_ab75_an_agent_bubble_shows_its_name_not_its_address(board, client):
+    iid = ready(board)
+    core.annotate(board, iid, "agent says", actor="bot@agents.example", actor_kind=AGENT)
+    core.annotate(board, iid, "human says", actor=CHAOS, actor_kind=HUMAN)
+    events = events_list(client.get(f"/issues/{iid}").text)
+    assert "agents.example" not in events
+    assert "bot" in events
+    assert CHAOS in events, "a human keeps the name it has today"
+
+
+def test_ab75_a_generated_note_is_a_system_line_not_a_bubble(board, client):
+    """A link writes its own note; only what a person types is a bubble."""
+    iid = ready(board)
+    core.link(board, iid, "https://example.com/pr/1", kind="url", actor=CHAOS, actor_kind=HUMAN)
+    items = bubbles(client.get(f"/issues/{iid}").text)
+    [(cls, text)] = [(c, t) for c, t in items if "example.com/pr/1" in t]
+    assert "system-line" in cls.split() and "bubble" not in cls.split()
+
+
+def test_ab75_an_agent_bubble_with_a_file_hides_the_address(board, attach_dir, client):
+    iid = ready(board)
+    core.annotate(board, iid, "agent says", actor="bot@agents.example", actor_kind=AGENT,
+                  attachments=files.store([("run.log", "text/plain", b"boom")]))
+    events = events_list(client.get(f"/issues/{iid}").text)
+    assert "run.log" in events
+    assert "agents.example" not in events
+
+
+def test_ab75_the_note_form_sits_after_the_history(board, client):
+    iid = ready(board)
+    page = client.get(f"/issues/{iid}").text
+    assert page.index('<ol class="events">') < page.index("<h2>Note</h2>")
+    assert page.index('<ol class="events">') < page.index(f'action="/issues/{iid}/note')
+
+
+def test_ab75_reopen_sits_after_the_history(board, client):
+    iid = ready(board)
+    core.move(board, iid, "done", actor=CHAOS, actor_kind=HUMAN)
+    page = client.get(f"/issues/{iid}").text
+    assert page.index('<ol class="events">') < page.index("<h2>Reopen</h2>")
+
+
+def test_ab75_the_body_is_in_an_open_description_details(board, client):
+    iid = ready(board, body="the zqxbody text")
+    page = client.get(f"/issues/{iid}").text
+    m = re.search(r'<details[^>]*class="description"[^>]*>\s*<summary>Description</summary>(.*?)</details>',
+                  page, re.S)
+    assert m and "zqxbody" in m.group(1)
+    assert " open" in re.search(r'<details[^>]*class="description"[^>]*>', page).group(0)
 
 
 @pytest.mark.parametrize("text", [

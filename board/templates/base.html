@@ -33,14 +33,16 @@
           --accent: #0969da; --accent-fg: #fff; --brand: #0891b2;
           --input-bg: #fff; --panel-bg: #fff; --shadow: 0 2px 8px rgba(31, 35, 40, 0.12);
           --live: #0969da; --expired: #bc4c00; --expired-bg: #fff8c5; --held: #8250df;
-          --ok: #1a7f37; --err: #cf222e; --err-bg: #ffebe9; --warn-bg: #fff8c5; --warn: #bc4c00; }
+          --ok: #1a7f37; --err: #cf222e; --err-bg: #ffebe9; --warn-bg: #fff8c5; --warn: #bc4c00;
+          --bubble-human: #ddf4ff; }
   :root[data-theme="dark"] { color-scheme: dark;
           --bg: #0d0d0f; --surface: #121215; --card: #1a1a1d; --card-hover: #202024;
           --text: #e6e6e8; --muted: #8b8d94; --border: #2a2a2f; --border-strong: #3a3a40;
           --accent: #22d3ee; --accent-fg: #0d0d0f; --brand: #22d3ee;
           --input-bg: #151518; --panel-bg: #121215; --shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
           --live: #58a6ff; --expired: #f0883e; --expired-bg: #2a1f12; --held: #b392f0;
-          --ok: #3fb950; --err: #f85149; --err-bg: #2d1416; --warn-bg: #2a2412; --warn: #e3b341; }
+          --ok: #3fb950; --err: #f85149; --err-bg: #2d1416; --warn-bg: #2a2412; --warn: #e3b341;
+          --bubble-human: #0f2a33; }
   body { font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0;
          background: var(--bg); color: var(--text); }
   a { color: var(--accent); }
@@ -191,7 +193,15 @@
   label { display: block; margin-top: 8px; }
   [hidden] { display: none !important; }
   textarea { width: 100%; min-height: 8em; box-sizing: border-box; }
-  .events li { margin-bottom: 4px; }
+  /* AB-75: history as a conversation. Agents left, humans right, events without a note centred. */
+  .events { list-style: none; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+  .events .bubble { max-width: 80%; border: 1px solid var(--border); border-radius: 10px; padding: 6px 10px; }
+  .events .bubble-agent { align-self: flex-start; background: var(--surface); border-bottom-left-radius: 2px; }
+  .events .bubble-human { align-self: flex-end; background: var(--bubble-human); border-color: var(--border-strong);
+                          border-bottom-right-radius: 2px; }
+  .events .bubble .meta { font-size: 12px; color: var(--muted); }
+  .events .bubble .markdown { background: none; border: 0; padding: 0; }
+  .events .system-line { align-self: center; font-size: 12px; color: var(--muted); text-align: center; }
   details { margin-bottom: 16px; }
   /* AB-30: a bare summary did not read as clickable, so New issue is a button. */
   summary.new-issue { display: inline-block; cursor: pointer; background: var(--accent); color: var(--accent-fg);

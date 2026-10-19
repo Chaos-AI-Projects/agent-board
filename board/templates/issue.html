@@ -78,7 +78,12 @@
 {% endif %}
 {% endif %}
 
-{% if issue.body %}<div class="markdown">{{ issue.body|markdown }}</div>{% endif %}
+{% if issue.body %}
+<details class="description" open>
+<summary>Description</summary>
+<div class="markdown">{{ issue.body|markdown }}</div>
+</details>
+{% endif %}
 
 {% if not wf and issue.stage not in ("done", "cancelled") %}
 <details>
@@ -126,6 +131,46 @@
 </form>
 </details>
 
+
+{# An event's files leave out who added them: the bubble or line already says (AB-75). #}
+{% macro files(list, by=True) %}{% if list %}
+<ul class="attachments">{% for a in list %}
+<li>{% if a.content_type in inline_types %}<a href="/attachments/{{ a.id }}"><img src="/attachments/{{ a.id }}" alt="{{ a.filename }}" class="thumb"></a><br>{% endif %}<a href="/attachments/{{ a.id }}">{{ a.filename }}</a> &middot; {{ a.size|filesize }}{% if by %} &middot; {{ a.added_by }}{% endif %}</li>
+{% endfor %}</ul>
+{% endif %}{% endmacro %}
+{% set issue_files = issue.attachments|selectattr("event_id", "none")|list %}
+{% if issue_files %}
+<h2>Attachments</h2>
+{{ files(issue_files) }}
+{% endif %}
+
+<h2>Artifacts</h2>
+<ul>{% for a in issue.artifacts %}<li>{{ a.kind }} {% if a.ref.startswith(("https://", "http://")) %}<a href="{{ a.ref }}" target="_blank" rel="noopener" title="{{ a.ref }}">{{ a.name or a.ref }}</a>{% elif a.name %}{{ a.name }} {{ a.ref }}{% else %}{{ a.ref }}{% endif %}{% if a.closes %} (closes){% endif %} &middot; {{ a.added_by }}</li>{% endfor %}</ul>
+<form autocomplete="off" method="post" action="/issues/{{ issue.id }}/link{{ embed_q }}">
+  <select name="kind"><option>pr</option><option>commit</option><option>path</option><option>url</option></select>
+  <input name="ref" required> <input name="name" placeholder="name (url only)" maxlength="200"> <label class="inline"><input type="checkbox" name="closes" value="1"> closes the issue</label>
+  <button class="primary">Link</button>
+</form>
+
+<h2>History</h2>
+{# AB-75: a conversation, oldest first, read top-down to the note form under it.
+   A note a person writes (annotate, or the reason on a transition) is a bubble,
+   an agent's (system counts as agent) on the left and a human's on the right;
+   an agent shows only the name before its @. Every other event, including one
+   whose note the board generated, such as a link, is a small centred line. #}
+<ol class="events">{% for e in issue.events %}
+{% set side = "human" if e.actor_kind == "human" else "agent" %}
+{% set who = e.actor if side == "human" else e.actor.split("@")[0] %}
+{% set what %}{% if e.kind == "create" and e.on_behalf_of %}created this for {{ e.on_behalf_of }}{% else %}{{ e.kind }}{% endif %}{% if e.from_stage or e.to_stage %} {{ [e.from_stage, e.from_queue]|select|join(" ") }} &rarr; {{ [e.to_stage, e.to_queue]|select|join(" ") }}{% endif %}{% endset %}
+{% if e.note and e.kind in ("annotate", "transition") %}
+<li class="event bubble bubble-{{ side }}" title="{{ e.actor_kind }}">
+<div class="meta"><b>{{ who }}</b> &middot; <span class="when">{{ e.at|localtime(tz) }}</span> &middot; {{ what }}</div>
+<div class="markdown">{{ e.note|markdown }}</div>{{ files(e.attachments, by=False) }}</li>
+{% else %}
+<li class="event system-line" title="{{ e.actor_kind }}"><span class="when">{{ e.at|localtime(tz) }}</span> &middot; {{ who }} ({{ e.actor_kind }}) &middot; {{ what }}{% if e.note %}: {{ e.note }}{% endif %}{{ files(e.attachments, by=False) }}</li>
+{% endif %}
+{% endfor %}</ol>
+
 {% if issue.stage == "done" %}
 <h2>Reopen</h2>
 <form autocomplete="off" method="post" action="/issues/{{ issue.id }}/reopen{{ embed_q }}">
@@ -167,30 +212,6 @@
     sync();
   })();
 </script>
-
-{% macro files(list) %}{% if list %}
-<ul class="attachments">{% for a in list %}
-<li>{% if a.content_type in inline_types %}<a href="/attachments/{{ a.id }}"><img src="/attachments/{{ a.id }}" alt="{{ a.filename }}" class="thumb"></a><br>{% endif %}<a href="/attachments/{{ a.id }}">{{ a.filename }}</a> &middot; {{ a.size|filesize }} &middot; {{ a.added_by }}</li>
-{% endfor %}</ul>
-{% endif %}{% endmacro %}
-{% set issue_files = issue.attachments|selectattr("event_id", "none")|list %}
-{% if issue_files %}
-<h2>Attachments</h2>
-{{ files(issue_files) }}
-{% endif %}
-
-<h2>Artifacts</h2>
-<ul>{% for a in issue.artifacts %}<li>{{ a.kind }} {% if a.ref.startswith(("https://", "http://")) %}<a href="{{ a.ref }}" target="_blank" rel="noopener" title="{{ a.ref }}">{{ a.name or a.ref }}</a>{% elif a.name %}{{ a.name }} {{ a.ref }}{% else %}{{ a.ref }}{% endif %}{% if a.closes %} (closes){% endif %} &middot; {{ a.added_by }}</li>{% endfor %}</ul>
-<form autocomplete="off" method="post" action="/issues/{{ issue.id }}/link{{ embed_q }}">
-  <select name="kind"><option>pr</option><option>commit</option><option>path</option><option>url</option></select>
-  <input name="ref" required> <input name="name" placeholder="name (url only)" maxlength="200"> <label class="inline"><input type="checkbox" name="closes" value="1"> closes the issue</label>
-  <button class="primary">Link</button>
-</form>
-
-<h2>History</h2>
-<ul class="events">{% for e in issue.events|reverse %}
-<li>{{ e.at|localtime(tz) }} &middot; {{ e.actor }} ({{ e.actor_kind }}) &middot; {% if e.kind == "create" and e.on_behalf_of %}created this for {{ e.on_behalf_of }}{% else %}{{ e.kind }}{% endif %}{% if e.from_stage or e.to_stage %} {{ [e.from_stage, e.from_queue]|select|join(" ") }} &rarr; {{ [e.to_stage, e.to_queue]|select|join(" ") }}{% endif %}{% if e.note and e.kind in ("annotate", "transition") %}<div class="markdown">{{ e.note|markdown }}</div>{% elif e.note %}: {{ e.note }}{% endif %}{{ files(e.attachments) }}</li>
-{% endfor %}</ul>
 
 <dialog id="write-error" class="error">
   <p></p>
