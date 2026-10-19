@@ -21,7 +21,7 @@ from fastapi.testclient import TestClient
 
 from sqlalchemy import update
 
-from board import core, store, web
+from board import core, files, store, web
 from board.store import Issue
 
 
@@ -2045,7 +2045,7 @@ def test_a_png_shows_inline_with_its_type(board, attach_dir, client):
     ("", "file"),
 ])
 def test_filenames_lose_their_path_and_control_characters(raw, clean):
-    assert web.safe_filename(raw) == clean
+    assert files.safe_filename(raw) == clean
 
 
 def test_an_upload_without_an_attachment_dir_is_refused(board, client, monkeypatch):
@@ -2105,7 +2105,7 @@ def test_a_path_in_an_uploaded_filename_is_stripped_on_the_route(board, attach_d
 @pytest.mark.parametrize("raw", ["lots", "-1", "nan", "inf", "0"])
 def test_a_bad_upload_cap_falls_back_to_the_default(monkeypatch, raw):
     monkeypatch.setenv(web.MAX_UPLOAD_ENV, raw)
-    assert web._max_upload_bytes() == web.DEFAULT_MAX_UPLOAD_MB * 1024 * 1024
+    assert files.max_upload_bytes() == files.DEFAULT_MAX_UPLOAD_MB * 1024 * 1024
 
 
 # --- MS-644: plan an issue as a workflow ------------------------------------------

@@ -23,6 +23,12 @@ Code 4 is lease lost and 5 a conflict, `LeaseHeld` included. Everything
 else is 1, as it is in the CLI. An argument that fails the tool's schema
 is the SDK's own error text, the counterpart of the CLI's usage error.
 
+`create`, `annotate`, `move` and `queue` take `attachments` (AB-74), each
+{filename, content_type, content_base64}. Base64 is the one shape every
+client can send, because a client such as Claude Desktop shares no
+filesystem with the board. board.files stores them as the web board does,
+and with BOARD_ATTACHMENT_DIR unset a call carrying any is refused.
+
 With BOARD_BRAIN_DIR set, three read-only tools reach a brain checkout's
 KB and docs (AB-22): `brain_search`, `brain_read` and `brain_list`. They
 carry a `brain_` prefix because `search` already finds issues. Unset, the
@@ -39,11 +45,25 @@ from typing import Callable
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent
+from pydantic import BaseModel, ConfigDict
 
-from board import cli, core, store
+from board import cli, core, files, store
 from board.brain import Brain
 
 DEFAULT_TTL_MINUTES = core.DEFAULT_TTL.total_seconds() / 60
+
+
+class Upload(BaseModel):
+    """One file for `attachments`: its name, its type, and its bytes as base64."""
+    model_config = ConfigDict(extra="forbid")
+    filename: str
+    content_type: str | None = None
+    content_base64: str
+
+
+def _stored(attachments: list[Upload] | None) -> list[dict]:
+    """Write the uploads to BOARD_ATTACHMENT_DIR and describe them for core."""
+    return files.store_base64([u.model_dump() for u in attachments or ()])
 
 
 def _result(payload: dict, error: bool = False) -> CallToolResult:
@@ -137,34 +157,41 @@ def build_server(engine, actor: str | Callable[[], str], brain=_FROM_ENV,
 
     @mcp.tool()
     def move(id: str, stage: str, token: str | None = None, note: str | None = None,
-             request_id: str | None = None, preempt: bool = False) -> CallToolResult:
+             request_id: str | None = None, preempt: bool = False,
+             attachments: list[Upload] | None = None) -> CallToolResult:
         """Set an issue's stage: backlog, planning, implement, done or cancelled.
 
         Entering planning or implement queues the card as ready and releases
         the lease. An agent's `done` needs a note; a human may close without
         one. A `done` card reopens to implement with a note giving the
-        reason, no lease needed.
+        reason, no lease needed. `attachments` hang off the move's event.
         """
-        return run(core.move, engine, id, stage, note=note, token=token,
-                   request_id=request_id, preempt=preempt, **who())
+        return run(lambda: core.move(engine, id, stage, note=note, token=token,
+                                     request_id=request_id, preempt=preempt,
+                                     attachments=_stored(attachments), **who()))
 
     @mcp.tool()
     def queue(id: str, status: str | None, token: str | None = None,
               note: str | None = None, request_id: str | None = None,
-              preempt: bool = False) -> CallToolResult:
+              preempt: bool = False,
+              attachments: list[Upload] | None = None) -> CallToolResult:
         """Set a planning or implement card's queue status: ready, on-hold, or null.
 
         Null takes the card out of the queue and needs a note, as when it
-        waits on a question. Only `next` sets processing.
+        waits on a question. Only `next` sets processing. `attachments` hang
+        off the change's event.
         """
-        return run(core.queue, engine, id, status, note=note, token=token,
-                   request_id=request_id, preempt=preempt, **who())
+        return run(lambda: core.queue(engine, id, status, note=note, token=token,
+                                      request_id=request_id, preempt=preempt,
+                                      attachments=_stored(attachments), **who()))
 
     @mcp.tool()
     def annotate(id: str, note: str, token: str | None = None,
-                 request_id: str | None = None) -> CallToolResult:
-        """Append a note to an issue."""
-        return run(core.annotate, engine, id, note, token=token, request_id=request_id, **who())
+                 request_id: str | None = None,
+                 attachments: list[Upload] | None = None) -> CallToolResult:
+        """Append a note to an issue, with `attachments` hanging off it."""
+        return run(lambda: core.annotate(engine, id, note, token=token, request_id=request_id,
+                                         attachments=_stored(attachments), **who()))
 
     @mcp.tool()
     def link(id: str, artifact: str, kind: str, closes: bool = False, name: str | None = None,
@@ -180,7 +207,8 @@ def build_server(engine, actor: str | Callable[[], str], brain=_FROM_ENV,
                workflow_id: int | None = None, position: int | None = None,
                request_id: str | None = None,
                queue: str | None = None, schedule: str | None = None,
-               timezone: str | None = None, creator: str | None = None) -> CallToolResult:
+               timezone: str | None = None, creator: str | None = None,
+               attachments: list[Upload] | None = None) -> CallToolResult:
         """A new issue in `stage`: backlog, planning or implement.
 
         Planning and implement start queued as ready.
@@ -189,12 +217,14 @@ def build_server(engine, actor: str | Callable[[], str], brain=_FROM_ENV,
         Runs must fall at least 5 minutes apart.
         `creator` is the person's email when an agent enters the card for
         someone; the agent stays the actor of the create event (AB-63).
+        `attachments` are files on the new issue (AB-74).
         """
-        return run(core.create, engine, project, title, body=body, stage=stage,
-                   queue=queue, rank=rank,
-                   labels=labels or [], workflow_id=workflow_id, position=position,
-                   request_id=request_id, schedule=schedule,
-                   timezone=_zone(schedule, timezone), creator=creator, **who())
+        return run(lambda: core.create(engine, project, title, body=body, stage=stage,
+                                       queue=queue, rank=rank, labels=labels or [],
+                                       workflow_id=workflow_id, position=position,
+                                       request_id=request_id, schedule=schedule,
+                                       timezone=_zone(schedule, timezone), creator=creator,
+                                       attachments=_stored(attachments), **who()))
 
     @mcp.tool()
     def schedule(id: str, schedule: str | None, timezone: str | None = None,

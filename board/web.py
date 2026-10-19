@@ -61,8 +61,6 @@ import json
 import logging
 import os
 import re
-import tempfile
-import unicodedata
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit
@@ -78,7 +76,8 @@ from markdown_it.token import Token
 from markupsafe import Markup
 from mcp.server.auth.provider import construct_redirect_uri
 
-from board import auth, core, oauth, remote, signin, store
+from board import auth, core, files, oauth, remote, signin, store
+from board.files import ATTACH_DIR_ENV, MAX_UPLOAD_ENV
 
 ACTOR_HEADER = "Cf-Access-Authenticated-User-Email"
 ACTOR_ENV = "BOARD_WEB_ACTOR"
@@ -92,10 +91,7 @@ HOSTS_ENV = "BOARD_WEB_HOSTS"
 PREFS_COOKIE = "board_prefs"
 PREFS_MAX_AGE = 365 * 24 * 3600
 TZ_ENV = "BOARD_TIMEZONE"
-ATTACH_DIR_ENV = "BOARD_ATTACHMENT_DIR"
-MAX_UPLOAD_ENV = "BOARD_MAX_UPLOAD_MB"
 LINK_DOMAINS_ENV = "BOARD_LINK_DOMAINS"
-DEFAULT_MAX_UPLOAD_MB = 25
 DEFAULT_LINK_DOMAINS = ("github.com", "chaoseternal.net")
 # Raster images only: an SVG can carry script, so it downloads like HTML does.
 INLINE_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
@@ -752,67 +748,23 @@ def _same_origin(request: Request) -> bool:
     return origin is None or urlsplit(origin).netloc == request.headers.get("host")
 
 
-class TooLarge(Exception):
-    pass
-
-
-def safe_filename(name: str | None) -> str:
-    """A client's filename cut to its last path component, without control characters."""
-    name = (name or "").replace("\\", "/").rsplit("/", 1)[-1]
-    name = "".join(c for c in name if unicodedata.category(c)[0] != "C").strip()
-    return name[:255] if name not in ("", ".", "..") else "file"
-
-
-def _max_upload_bytes() -> int:
-    """The cap in bytes. A value that is not a positive finite number means the default."""
-    try:
-        mb = float(os.environ.get(MAX_UPLOAD_ENV, "").strip() or DEFAULT_MAX_UPLOAD_MB)
-    except ValueError:
-        mb = DEFAULT_MAX_UPLOAD_MB
-    if not (0 < mb < float("inf")):
-        mb = DEFAULT_MAX_UPLOAD_MB
-    return int(mb * 1024 * 1024)
-
-
 async def save_uploads(form) -> list[dict]:
-    """Write the form's `files` to BOARD_ATTACHMENT_DIR and describe them for `core`.
+    """Store the form's `files` through `board.files` and describe them for `core`.
 
-    Every file is checked against the cap before any is kept, so a refused
-    upload leaves nothing behind. A file is stored under its SHA-256, so the
-    same bytes uploaded twice take one file.
+    A read stops one byte past the cap, so an oversize upload is refused
+    without being held whole in memory.
     """
     uploads = [f for f in form.getlist("files")
                if not isinstance(f, str) and f.filename]
     if not uploads:
         return []
-    root = os.environ.get(ATTACH_DIR_ENV, "").strip()
-    if not root:
-        raise core.BoardError(f"{ATTACH_DIR_ENV} is not set, so this board takes no files")
-    cap = _max_upload_bytes()
+    files.attachment_dir()
+    cap = files.max_upload_bytes()
     for up in uploads:
         if up.size is not None and up.size > cap:
-            raise TooLarge(safe_filename(up.filename))
-    blobs = []
-    for up in uploads:
-        data = await up.read(cap + 1)
-        if len(data) > cap:
-            raise TooLarge(safe_filename(up.filename))
-        blobs.append((up, data))
-    root = Path(root)
-    root.mkdir(parents=True, exist_ok=True)
-    described = []
-    for up, data in blobs:
-        digest = hashlib.sha256(data).hexdigest()
-        target = root / digest
-        if not target.exists():
-            fd, tmp = tempfile.mkstemp(dir=root)
-            with os.fdopen(fd, "wb") as out:
-                out.write(data)
-            os.replace(tmp, target)
-        described.append({"filename": safe_filename(up.filename),
-                          "content_type": (up.content_type or "application/octet-stream")[:200],
-                          "size": len(data), "sha256": digest})
-    return described
+            raise files.TooLarge(files.safe_filename(up.filename))
+    blobs = [(up.filename, up.content_type, await up.read(cap + 1)) for up in uploads]
+    return files.store(blobs)
 
 
 def embedded(request: Request) -> bool:
@@ -1086,11 +1038,9 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         return error(request, 401, f"No {ACTOR_HEADER} header and no {ACTOR_ENV} set: "
                      "writes need Cloudflare Access or a local actor.")
 
-    @app.exception_handler(TooLarge)
+    @app.exception_handler(files.TooLarge)
     async def too_large(request, exc):
-        mb = _max_upload_bytes() / (1024 * 1024)
-        return error(request, 413, f"{exc} is over the {mb:g} MB limit for one file. "
-                     "Nothing was saved.")
+        return error(request, 413, f"{exc}. Nothing was saved.")
 
     @app.exception_handler(core.NotFound)
     async def not_found(request, exc):

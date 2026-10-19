@@ -6,10 +6,13 @@ same serialisation a stdio client gets. An error comes back as a tool
 result with isError set and the CLI's error class and exit code in its JSON.
 """
 
+import base64
+import hashlib
 import json
 from datetime import timedelta
 
 import anyio
+import pytest
 from mcp.shared.memory import create_connected_server_and_client_session
 
 from board import core, store
@@ -523,3 +526,105 @@ def test_ab69_instantiate_and_create_batch_take_a_creator(migrated):
                creator=CHAOS)
     made = [wf["steps"][0]["id"], *batch["ids"]]
     assert sorted(i["id"] for i in core.search(migrated, creator=CHAOS)) == sorted(made)
+
+
+# --- AB-74: attachments over MCP ----------------------------------------------
+
+
+@pytest.fixture
+def attach_dir(tmp_path, monkeypatch):
+    d = tmp_path / "attachments"
+    monkeypatch.setenv("BOARD_ATTACHMENT_DIR", str(d))
+    monkeypatch.delenv("BOARD_MAX_UPLOAD_MB", raising=False)
+    return d
+
+
+def upload(name, data, content_type="text/plain"):
+    return {"filename": name, "content_type": content_type,
+            "content_base64": base64.b64encode(data).decode()}
+
+
+def test_ab74_create_with_a_file_stores_the_bytes_and_the_row(migrated, attach_dir):
+    board(migrated)
+    out = ok(migrated, "create", project="MS", title="t",
+             attachments=[upload("../notes.txt", b"hello")])
+    [a] = core.show(migrated, out["id"])["attachments"]
+    assert (a["filename"], a["content_type"], a["size"]) == ("notes.txt", "text/plain", 5)
+    assert (attach_dir / hashlib.sha256(b"hello").hexdigest()).read_bytes() == b"hello"
+
+
+def test_ab74_annotate_move_and_queue_hang_files_off_their_event(migrated, attach_dir):
+    issue_id, token = claimed(board(migrated))
+    ok(migrated, "annotate", id=issue_id, note="n", token=token,
+       attachments=[upload("a.txt", b"a")])
+    ok(migrated, "queue", id=issue_id, status="on-hold", token=token, note="wait",
+       attachments=[upload("b.txt", b"b")])
+    issue = core.show(migrated, issue_id)
+    by_event = {e["note"]: [f["filename"] for f in e["attachments"]] for e in issue["events"]}
+    assert by_event["n"] == ["a.txt"] and by_event["wait"] == ["b.txt"]
+
+
+def test_ab74_move_attaches_to_its_transition(migrated, attach_dir):
+    issue_id, token = claimed(board(migrated))
+    ok(migrated, "move", id=issue_id, stage="done", token=token, note="shipped",
+       attachments=[upload("log.txt", b"log")])
+    [ev] = [e for e in core.show(migrated, issue_id)["events"] if e["note"] == "shipped"]
+    assert [f["filename"] for f in ev["attachments"]] == ["log.txt"]
+
+
+def test_ab74_an_oversize_file_leaves_nothing_behind(migrated, attach_dir, monkeypatch):
+    monkeypatch.setenv("BOARD_MAX_UPLOAD_MB", "0.001")  # 1048 bytes
+    board(migrated)
+    out = failed(migrated, "create", project="MS", title="big",
+                 attachments=[upload("small.txt", b"ok"), upload("big.bin", b"x" * 2000)])
+    assert out["code"] == 1 and "big.bin" in out["message"]
+    assert core.search(migrated, project="MS") == []
+    assert not attach_dir.exists() or list(attach_dir.iterdir()) == []
+
+
+def test_ab74_bad_base64_is_refused(migrated, attach_dir):
+    board(migrated)
+    bad = {"filename": "x.txt", "content_type": "text/plain", "content_base64": "not base64!"}
+    out = failed(migrated, "create", project="MS", title="t", attachments=[bad])
+    assert out["code"] == 1 and "x.txt" in out["message"]
+    assert core.search(migrated, project="MS") == []
+
+
+def test_ab74_files_without_an_attachment_dir_are_refused(migrated, monkeypatch):
+    monkeypatch.delenv("BOARD_ATTACHMENT_DIR", raising=False)
+    board(migrated)
+    out = failed(migrated, "create", project="MS", title="t",
+                 attachments=[upload("a.txt", b"a")])
+    assert "BOARD_ATTACHMENT_DIR" in out["message"]
+    assert core.search(migrated, project="MS") == []
+
+
+def test_ab74_a_retry_with_the_same_file_replays(migrated, attach_dir):
+    board(migrated)
+    first = ok(migrated, "create", project="MS", title="t", request_id="r1",
+               attachments=[upload("a.txt", b"a")])
+    again = ok(migrated, "create", project="MS", title="t", request_id="r1",
+               attachments=[upload("a.txt", b"a")])
+    assert again["id"] == first["id"]
+    assert len(core.show(migrated, first["id"])["attachments"]) == 1
+    other = failed(migrated, "create", project="MS", title="t", request_id="r1",
+                   attachments=[upload("a.txt", b"other bytes")])
+    assert other["code"] == 5
+
+
+def test_ab74_an_attachment_with_an_unknown_field_is_refused(migrated, attach_dir):
+    board(migrated)
+    item = upload("a.txt", b"a") | {"path": "/etc/passwd"}
+    is_error, text = raw_call(migrated, "create", project="MS", title="t", attachments=[item])
+    assert is_error and "path" in text
+
+
+def test_ab74_a_file_at_the_cap_in_wrapped_base64_is_kept(migrated, attach_dir, monkeypatch):
+    monkeypatch.setenv("BOARD_MAX_UPLOAD_MB", "0.001")  # 1048 bytes
+    board(migrated)
+    data = bytes(range(256)) * 4 + b"x" * 24
+    item = {"filename": "edge.bin", "content_base64": base64.encodebytes(data).decode()}
+    out = ok(migrated, "create", project="MS", title="t", attachments=[item])
+    [a] = core.show(migrated, out["id"])["attachments"]
+    assert (a["size"], a["content_type"]) == (1048, "application/octet-stream")
+    assert (attach_dir / hashlib.sha256(data).hexdigest()).read_bytes() == data
