@@ -68,10 +68,28 @@ def test_moving_a_backlog_card_into_planning_queues_it(board):
     i = core.create(board, "MS", "x", actor=CHAOS, actor_kind=HUMAN)["id"]
     view = core.move(board, i, "planning", actor=CHAOS, actor_kind=HUMAN)
     assert where(view) == ("planning", "ready")
-    with pytest.raises(core.InvalidTransition):
-        core.move(board, i, "done", actor=CHAOS, actor_kind=HUMAN, note="no")
     view = core.move(board, i, "backlog", actor=CHAOS, actor_kind=HUMAN)
     assert where(view) == ("backlog", None)
+
+
+@pytest.mark.parametrize("stage", ["backlog", "planning"])
+def test_a_backlog_or_planning_card_moves_straight_to_done(board, stage):
+    """AB-73: a card finished or overtaken before implement closes from its lane."""
+    i = core.create(board, "MS", "x", actor=CHAOS, actor_kind=HUMAN, stage=stage)["id"]
+    view = core.move(board, i, "done", actor=CHAOS, actor_kind=HUMAN)
+    assert where(view) == ("done", None)
+    assert stored(board, i) == ("done", None)
+
+
+def test_an_agent_closes_a_claimed_planning_card_with_a_note(board):
+    core.create(board, "MS", "x", actor=CHAOS, actor_kind=HUMAN, stage="planning")
+    i, token = claim(board)
+    with pytest.raises(core.NoteRequired):
+        core.move(board, i, "done", actor=AGENT, actor_kind="agent", token=token)
+    view = core.move(board, i, "done", actor=AGENT, actor_kind="agent", token=token,
+                     note="already shipped")
+    assert where(view) == ("done", None)
+    assert view["lease_holder"] is None
 
 
 def test_an_agent_releases_a_planning_card_to_wait_in_its_lane(board):

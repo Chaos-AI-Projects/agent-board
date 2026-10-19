@@ -40,8 +40,8 @@ STAGES = ("backlog", "planning", "implement", "done", "cancelled")
 WORK_STAGES = {"planning", "implement"}
 QUEUES = ("ready", "processing", "on-hold")
 STAGE_MOVES: dict[str, set[str]] = {
-    "backlog": {"planning", "implement", "cancelled"},
-    "planning": {"implement", "backlog", "cancelled"},
+    "backlog": {"planning", "implement", "done", "cancelled"},
+    "planning": {"implement", "done", "backlog", "cancelled"},
     "implement": {"planning", "done", "backlog", "cancelled"},
     "done": {"implement"},
     "cancelled": set(),

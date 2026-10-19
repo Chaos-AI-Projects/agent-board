@@ -161,6 +161,7 @@ def test_need_input_requires_a_note_and_clears_the_lease(board):
 
 def test_an_undeclared_transition_is_refused(board):
     iid = core.create(board, "MS", "x", actor=CHAOS, actor_kind=HUMAN)["id"]
+    core.move(board, iid, "cancelled", actor=CHAOS, actor_kind=HUMAN)
     with pytest.raises(core.InvalidTransition):
         core.move(board, iid, "done", note="n", actor=CHAOS, actor_kind=HUMAN)
 

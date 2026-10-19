@@ -4294,11 +4294,22 @@ def test_ab53_a_stale_drag_is_refused_and_moves_nothing(board, client):
 
 
 def test_ab53_a_drag_the_stage_rules_refuse_is_422(board, client):
-    issue = core.show(board, queued_and_waiting(board)["backlog"])
+    iid = queued_and_waiting(board)["backlog"]
+    issue = core.move(board, iid, "cancelled", actor=CHAOS, actor_kind=HUMAN)
     r = client.post(f"/issues/{issue['id']}/move",
                     data={"version": issue["version"], "stage": "done"}, headers=AS_CHAOS)
     assert r.status_code == 422 and "error" in r.json()
-    assert core.show(board, issue["id"])["stage"] == "backlog"
+    assert core.show(board, issue["id"])["stage"] == "cancelled"
+
+
+@pytest.mark.parametrize("role", ["backlog", "planning"])
+def test_ab73_chaos_drags_a_backlog_or_planning_card_to_done(board, client, role):
+    issue = core.show(board, queued_and_waiting(board)[role])
+    r = client.post(f"/issues/{issue['id']}/move",
+                    data={"version": issue["version"], "stage": "done"}, headers=AS_CHAOS)
+    assert r.status_code == 200
+    assert (core.show(board, issue["id"])["stage"], core.show(board, issue["id"])["queue"]) \
+        == ("done", None)
 
 
 def test_ab53_the_queue_button_shows_on_unqueued_work_cards_only(board, client):
