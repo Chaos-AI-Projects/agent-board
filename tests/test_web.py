@@ -5722,7 +5722,7 @@ def test_ab77_an_x_type_drops_its_prefix_in_the_extension(client):
 
 @pytest.mark.parametrize("email, short", [
     ("jun.sheng@example.com", "JS"),
-    ("owner@example.com", "CH"),
+    ("owner@example.com", "OW"),
     ("overlord", "OV"),
     ("a.b.c@example.com", "AB"),
     ("x@example.com", "X"),
