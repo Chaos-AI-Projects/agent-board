@@ -549,7 +549,22 @@ def _search(s, q, project, label, assignee, creator=None, involved=None, newest_
                                          _creator_col() == creator))
     if involved:
         stmt = stmt.where(_involves(involved))
-    return [_row(i) for i in s.scalars(stmt)]
+    issues = list(s.scalars(stmt))
+    return [_row(i) | {"creator": c} for i, c in zip(issues, _creators(s, issues))]
+
+
+def _creators(s, issues):
+    """Each issue's creator by `_creator_view`'s rule, in one query (AB-79).
+
+    Every create event, not just these issues': there is one per issue, and
+    an IN list of every id would meet SQLite's bound-parameter limit.
+    """
+    first = {}
+    for issue_id, who in s.execute(
+            select(Event.issue_id, _creator_col())
+            .where(Event.kind == "create").order_by(Event.id.desc())):
+        first[issue_id] = who
+    return [first.get(i.id) for i in issues]
 
 
 STATS_DAYS = 14

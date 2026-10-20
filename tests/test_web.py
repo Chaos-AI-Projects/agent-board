@@ -2395,7 +2395,7 @@ def test_a_mixed_project_workflow_card_keeps_the_workflow_green(board, client):
     wf = core.create_batch(board, [{"project": "MS", "title": "a"}, {"project": "BR", "title": "b"}],
                            actor=CHAOS, actor_kind=HUMAN, workflow_title="mixed")
     c = wf_card(client.get("/").text, wf["workflow_id"])
-    assert "hsl(" not in c and "workflow-card" in c
+    assert "--proj-bg" not in c and "workflow-card" in c
 
 
 def test_the_issue_page_and_projects_list_show_the_key_in_its_colour(board, client):
@@ -5715,3 +5715,58 @@ def test_ab77_an_x_type_drops_its_prefix_in_the_extension(client):
       return a.input.files.map(function (x) { return x.name; });
     })()""")
     assert got == ["pasted-20261020-090507.icon", "pasted-20261020-090507-2.svg"]
+
+
+# AB-79: a round badge, bottom right of a card, with the creator's initials
+# on a colour hashed from their email.
+
+@pytest.mark.parametrize("email, short", [
+    ("jun.sheng@example.com", "JS"),
+    ("owner@example.com", "CH"),
+    ("overlord", "OV"),
+    ("a.b.c@example.com", "AB"),
+    ("x@example.com", "X"),
+    ("jun.@example.com", "JU"),
+    (".sheng@example.com", "SH"),
+])
+def test_ab79_initials(email, short):
+    assert web.initials(email) == short
+
+
+def test_ab79_a_creator_colour_uses_the_project_buckets_keyed_on_the_email():
+    email = "jun.sheng@example.com"
+    c = web.creator_colour(email)
+    assert c == web.creator_colour(email)
+    base = 80 + core.key_bucket(email) * 25
+    assert abs(hue(c) - base) <= 5
+    # Dark enough for white initials on every bucket's hue.
+    assert lightness(c) <= 40
+    assert c != web.creator_colour("owner@example.com")
+
+
+def badge(markup):
+    m = re.search(r'<span class="creator-badge"[^>]*>[^<]*</span>', markup)
+    assert m, "no creator badge"
+    return m.group(0)
+
+
+def test_ab79_a_card_shows_its_creators_badge(board, client):
+    issue_id = idea(board)
+    b = badge(card(client.get("/").text, issue_id))
+    assert f">{web.initials(CHAOS)}<" in b
+    assert f'title="Created by {CHAOS}"' in b
+    assert f"background: {web.creator_colour(CHAOS)}" in b
+
+
+def test_ab79_an_entered_card_shows_the_person_it_was_entered_for(board, client):
+    issue_id = core.create(board, "MS", "asked", actor="overlord", actor_kind=AGENT,
+                           creator="jun.sheng@example.com")["id"]
+    b = badge(card(client.get("/").text, issue_id))
+    assert ">JS<" in b and "jun.sheng@example.com" in b
+
+
+def test_ab79_a_workflow_card_shows_its_first_steps_creator(board, client):
+    wf = release(board)
+    core.create(board, "MS", "unrelated", actor="overlord", actor_kind=AGENT)
+    b = badge(wf_card(client.get("/").text, wf["id"]))
+    assert f">{web.initials(CHAOS)}<" in b

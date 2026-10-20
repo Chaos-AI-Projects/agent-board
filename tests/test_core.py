@@ -2422,3 +2422,13 @@ def test_ab70_the_overview_lists_every_person_for_the_involved_filter(board):
                       creator="third@example.com")["id"]
     core.annotate(board, iid, "hi", actor=OTHER, actor_kind=HUMAN)
     assert core.overview(board)["people"] == sorted([CHAOS, OTHER, "third@example.com"])
+
+
+def test_ab79_overview_cards_carry_their_creator(board):
+    mine = core.create(board, "MS", "mine", actor="overlord", actor_kind="agent")["id"]
+    theirs = core.create(board, "MS", "theirs", actor="overlord", actor_kind="agent",
+                         creator="jun.sheng@example.com")["id"]
+    core.annotate(board, theirs, actor="someone@example.com", actor_kind="human", note="hi")
+    by_id = {i["id"]: i for i in core.overview(board)["issues"]}
+    assert by_id[mine]["creator"] == "overlord"
+    assert by_id[theirs]["creator"] == "jun.sheng@example.com"

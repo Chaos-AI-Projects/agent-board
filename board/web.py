@@ -383,15 +383,44 @@ def project_colour(key: str, bucket: int | None = None) -> dict:
     on every tint. AB-32: the buckets span 75-315 deg only, so no project is
     red or orange, the colours that mean trouble.
     """
-    if bucket is None:
-        bucket = core.key_bucket(key)
-    shade = int.from_bytes(hashlib.sha256(key.encode()).digest()[4:8], "big")
-    h = HUE_START + bucket * HUE_STEP + shade % 11 - 5
-    step = (shade // 21) % 3 - 1
+    h, step = _hue(key, bucket)
     return {"bg": f"hsl({h} 70% {92 + 3 * step}%)", "border": f"hsl({h} 65% {45 + 4 * step}%)"}
 
 
+def _hue(key: str, bucket: int | None) -> tuple[int, int]:
+    """A key's hue and its -1/0/1 lightness step, by project_colour's rule."""
+    if bucket is None:
+        bucket = core.key_bucket(key)
+    shade = int.from_bytes(hashlib.sha256(key.encode()).digest()[4:8], "big")
+    return HUE_START + bucket * HUE_STEP + shade % 11 - 5, (shade // 21) % 3 - 1
+
+
+def creator_colour(email: str) -> str:
+    """A creator badge's background (AB-79): a project's hue, keyed on the email.
+
+    The hash bucket, as for a project with no stored bucket. Darker than a
+    project border, so white initials read on every hue.
+    """
+    h, step = _hue(email, None)
+    return f"hsl({h} 60% {33 + 3 * step}%)"
+
+
+def initials(email: str) -> str:
+    """A creator badge's letters (AB-79, Chaos 10-20).
+
+    From the part before the @, since every domain has a dot: the first
+    letter of each dotted part, two at most, or with no dot the first two
+    letters. Empty parts, as in `jun.@x`, do not count.
+    """
+    parts = [p for p in email.split("@", 1)[0].split(".") if p]
+    if len(parts) >= 2:
+        return (parts[0][0] + parts[1][0]).upper()
+    return (parts[0] if parts else email)[:2].upper()
+
+
 templates.env.globals["project_colour"] = project_colour
+templates.env.globals["creator_colour"] = creator_colour
+templates.env.globals["initials"] = initials
 templates.env.globals["new_project"] = NEW_PROJECT
 templates.env.globals["lane_age"] = lane_age
 templates.env.filters["markdown"] = markdown
@@ -1088,12 +1117,18 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
                 # AB-17: a workflow card is dated by its latest step.
                 wf_updated[i["workflow_id"]] = max(wf_updated.get(i["workflow_id"], ""),
                                                    i["updated_at"])
+        # AB-79: a workflow card's badge is its first step's creator.
+        wf_creator = {}
+        for i in sorted((i for i in view["issues"] if i["workflow_id"] is not None),
+                        key=lambda i: i["position"], reverse=True):
+            wf_creator[i["workflow_id"]] = i["creator"]
         workflows = []
         for wf in view["workflows"]:
             if wf_projects.get(wf["id"], set()) & tracked:
                 current = next((st for st in wf["steps"] if st["stage"] != "done"), None)
                 projects = wf_projects[wf["id"]]
                 workflows.append(wf | {"current": current, "target": workflow_target(wf),
+                                       "creator": wf_creator.get(wf["id"]),
                                        "project": next(iter(projects)) if len(projects) == 1 else None,
                                        "sort_project": min(projects & tracked),
                                        "updated_at": wf_updated[wf["id"]]})
