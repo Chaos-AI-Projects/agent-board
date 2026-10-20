@@ -786,14 +786,17 @@ def _form_labels(value):
 
 
 # The `board_prefs` keys that are plain on/off switches.
-PREF_FLAGS = ("hide_old_done", "mine", "queue_collapsed", "scheduled_collapsed",
+PREF_FLAGS = ("hide_old_done", "involved", "queue_collapsed", "scheduled_collapsed",
               "schedule_fields", "schedule_warning_accepted")
+# The flags that are on until the cookie says otherwise (AB-78).
+PREF_DEFAULT_ON = frozenset({"involved"})
 
 
 def read_prefs(raw: str | None) -> dict:
     """The saved view from a `board_prefs` cookie: projects, lanes, timezone,
     whether the done lane hides cards finished over two weeks ago (AB-13),
-    whether the board shows only the cards the viewer created (AB-42),
+    whether the board shows only the cards the viewer interacted with
+    (AB-42, AB-78),
     whether the queue strip is collapsed to its counts (AB-57), whether
     the scheduled lane is collapsed to its count (AB-62), and whether the New
     issue form shows its schedule fields and their warning was accepted (AB-64).
@@ -802,7 +805,10 @@ def read_prefs(raw: str | None) -> dict:
     Anything unreadable, and any other key, is ignored. A list key that is
     absent or not a list of strings comes back as [], which means all; a
     timezone that is not a string comes back as "", which means the default.
-    Every flag in `PREF_FLAGS` is True only when the cookie says exactly true.
+    Every flag in `PREF_FLAGS` is True only when the cookie says exactly true,
+    except those in `PREF_DEFAULT_ON`, which are False only when it says exactly
+    false. `involved` replaced AB-42's `mine` key, so a `mine: false` saved
+    before AB-78 is ignored rather than keeping the filter off.
     """
     try:
         data = json.loads(unquote(raw or ""))
@@ -817,7 +823,8 @@ def read_prefs(raw: str | None) -> dict:
     tz = data.get("timezone")
     prefs["timezone"] = tz if isinstance(tz, str) else ""
     for key in PREF_FLAGS:
-        prefs[key] = data.get(key) is True
+        on = data.get(key)
+        prefs[key] = on is not False if key in PREF_DEFAULT_ON else on is True
     return prefs
 
 
@@ -1092,16 +1099,17 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
                                        "updated_at": wf_updated[wf["id"]]})
         loose = [i for i in view["issues"]
                  if i["workflow_id"] is None and i["project"] in tracked]
-        # AB-42: only what the viewer created, by AB-27's creator rule. A
-        # workflow stays when the viewer created any of its steps. With no
-        # viewer there is nobody to match, so the filter does nothing.
+        # AB-78: only what the viewer interacted with, by AB-70's involved
+        # rule, and on by default. A workflow stays when the viewer is on any
+        # of its steps. With no viewer there is nobody to match, so the
+        # filter does nothing.
         me = who(request)
-        mine = prefs["mine"] and me is not None
+        mine = prefs["involved"] and me is not None
         if mine:
-            created = {i["id"] for i in core.search(engine, creator=me.email)}
+            involved = {i["id"] for i in core.search(engine, involved=me.email)}
             workflows = [w for w in workflows
-                         if any(st["id"] in created for st in w["steps"])]
-            loose = [i for i in loose if i["id"] in created]
+                         if any(st["id"] in involved for st in w["steps"])]
+            loose = [i for i in loose if i["id"] in involved]
         # The workflow is the card: its computed state picks the column, and
         # its steps show on their issue pages rather than as loose cards here.
         old_done = 0
@@ -1299,11 +1307,11 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
 
     @app.post("/preferences/mine/{action}")
     def save_mine_toggle(request: Request, action: str):
-        """The View panel's toggle: show only the cards the viewer created, or all."""
+        """The View panel's toggle: show only the cards the viewer interacted with, or all."""
         if action not in ("on", "off"):
             return error(request, 404, "No such mine action.")
         prefs = read_prefs(request.cookies.get(PREFS_COOKIE))
-        prefs["mine"] = action == "on"
+        prefs["involved"] = action == "on"
         return saved(prefs)
 
     @app.post("/preferences/schedule-fields/{action}")

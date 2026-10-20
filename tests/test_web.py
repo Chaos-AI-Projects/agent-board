@@ -1373,7 +1373,7 @@ def test_saving_preferences_sets_a_lax_year_long_cookie(client, board):
     assert "max-age=31536000" in cookie.lower()
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
         "projects": ["BR"], "lanes": ["implement", "done"], "timezone": "",
-        "hide_old_done": False, "mine": False, "queue_collapsed": False,
+        "hide_old_done": False, "involved": True, "queue_collapsed": False,
         "scheduled_collapsed": False,
         "schedule_fields": False, "schedule_warning_accepted": False}
 
@@ -1451,7 +1451,7 @@ def test_saving_keeps_only_known_projects_and_lanes(client, board):
                                       "lane": ["done", "bogus", "ready", "implement"]})
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
         "projects": ["BR"], "lanes": ["implement", "done"], "timezone": "",
-        "hide_old_done": False, "mine": False, "queue_collapsed": False,
+        "hide_old_done": False, "involved": True, "queue_collapsed": False,
         "scheduled_collapsed": False,
         "schedule_fields": False, "schedule_warning_accepted": False}
 
@@ -1532,7 +1532,7 @@ def test_a_banner_save_keeps_the_saved_lanes_and_timezone(client, board):
     client.post("/preferences/projects", data={"project": ["BR"]})
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
         "projects": ["BR"], "lanes": ["implement", "done"], "timezone": "Asia/Tokyo",
-        "hide_old_done": False, "mine": False, "queue_collapsed": False,
+        "hide_old_done": False, "involved": True, "queue_collapsed": False,
         "scheduled_collapsed": False,
         "schedule_fields": False, "schedule_warning_accepted": False}
     assert lanes(client.get("/").text) == ["implement", "done"]
@@ -1572,7 +1572,7 @@ def test_the_preferences_page_still_saves_every_key(client, board):
     client.post("/preferences/projects", data={"project": ["BR"]})
     client.post("/preferences", data={"project": ["MS"], "lane": ["implement"]})
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
-        "projects": ["MS"], "lanes": ["implement"], "timezone": "", "hide_old_done": False, "mine": False, "queue_collapsed": False,
+        "projects": ["MS"], "lanes": ["implement"], "timezone": "", "hide_old_done": False, "involved": True, "queue_collapsed": False,
         "scheduled_collapsed": False,
         "schedule_fields": False, "schedule_warning_accepted": False}
 
@@ -1701,13 +1701,13 @@ def test_a_lane_save_keeps_projects_and_timezone(client, board):
     client.post("/preferences/lanes/hide", data={"lane": "done"})
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
         "projects": ["BR"], "lanes": [s for s in ALL_LANES if s != "done"],
-        "timezone": "Asia/Tokyo", "hide_old_done": False, "mine": False, "queue_collapsed": False,
+        "timezone": "Asia/Tokyo", "hide_old_done": False, "involved": True, "queue_collapsed": False,
         "scheduled_collapsed": False,
         "schedule_fields": False, "schedule_warning_accepted": False}
     client.post("/preferences/lanes/show", data={"lane": "done"})
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
         "projects": ["BR"], "lanes": [], "timezone": "Asia/Tokyo",
-        "hide_old_done": False, "mine": False, "queue_collapsed": False,
+        "hide_old_done": False, "involved": True, "queue_collapsed": False,
         "scheduled_collapsed": False,
         "schedule_fields": False, "schedule_warning_accepted": False}
 
@@ -3971,7 +3971,7 @@ def test_ab43_the_add_artifact_form_takes_a_name(board, client):
         ("https://example.com/d", "Design doc"), ("https://example.com/e", None)]
 
 
-# --- AB-42: a toggle that shows only the cards the viewer created -----------------
+# --- AB-42 / AB-78: a toggle that shows only the cards the viewer interacted with --
 
 def mine_toggle(html):
     """The View panel's mine toggle: the action it posts to and its button text."""
@@ -3986,66 +3986,82 @@ def by_agent(engine, title="theirs"):
                        stage="implement")["id"]
 
 
-def test_ab42_by_default_every_card_shows_and_the_toggle_offers_mine(board, client):
+def test_ab78_by_default_only_the_viewers_cards_show(board, client):
     mine, theirs = ready(board, "mine"), by_agent(board)
-    html = client.get("/", headers=AS_CHAOS).text
-    assert f'data-id="{mine}"' in html and f'data-id="{theirs}"' in html
-    assert mine_toggle(html) == ("on", "Only cards I created")
-
-
-def test_ab42_on_hides_every_card_the_viewer_did_not_create(board, client):
-    mine, theirs = ready(board, "mine"), by_agent(board)
-    r = client.post("/preferences/mine/on", headers=AS_CHAOS)
-    assert r.status_code == 303 and r.headers["location"] == "/"
     html = client.get("/", headers=AS_CHAOS).text
     assert f'data-id="{mine}"' in html and f'data-id="{theirs}"' not in html
     assert mine_toggle(html) == ("off", "Show everyone's cards")
-    assert "created by me" in re.search(r"<summary>(.*?)</summary>",
-                                        html.split('class="filter-banner"')[1], re.S).group(1)
+    assert "cards I interacted with" in re.search(
+        r"<summary>(.*?)</summary>", html.split('class="filter-banner"')[1], re.S).group(1)
 
 
-def test_ab42_the_creator_is_the_create_event_not_a_later_worker(board, client):
+def test_ab78_off_shows_everyone_and_offers_the_interacted_filter(board, client):
+    mine, theirs = ready(board, "mine"), by_agent(board)
+    r = client.post("/preferences/mine/off", headers=AS_CHAOS)
+    assert r.status_code == 303 and r.headers["location"] == "/"
+    html = client.get("/", headers=AS_CHAOS).text
+    assert f'data-id="{mine}"' in html and f'data-id="{theirs}"' in html
+    assert mine_toggle(html) == ("on", "Only cards I interacted with")
+
+
+def test_ab78_a_card_the_viewer_only_noted_on_shows(board, client):
+    noted, untouched = by_agent(board, "noted"), by_agent(board, "untouched")
+    core.annotate(board, noted, "looks good", actor=CHAOS, actor_kind=HUMAN)
+    html = client.get("/", headers=AS_CHAOS).text
+    assert f'data-id="{noted}"' in html and f'data-id="{untouched}"' not in html
+
+
+def test_ab78_a_card_an_agent_entered_for_the_viewer_shows(board, client):
+    entered = core.create(board, "MS", "for chaos", actor="overlord", actor_kind=AGENT,
+                          stage="implement", creator=CHAOS)["id"]
+    assert f'data-id="{entered}"' in client.get("/", headers=AS_CHAOS).text
+
+
+def test_ab78_an_agent_working_the_card_does_not_make_it_the_agents(board, client):
     mine = ready(board, "mine")
     assert core.next(board, "overlord")["issue"]["id"] == mine
-    client.post("/preferences/mine/on", headers=AS_CHAOS)
     assert f'data-id="{mine}"' in client.get("/", headers=AS_CHAOS).text
-    client.post("/preferences/mine/on", headers={web.ACTOR_HEADER: "overlord"})
-    assert f'data-id="{mine}"' not in client.get("/", headers={web.ACTOR_HEADER: "overlord"}).text
+    agent = {web.ACTOR_HEADER: "overlord"}
+    assert f'data-id="{mine}"' not in client.get("/", headers=agent).text
 
 
-def test_ab42_a_workflow_shows_when_the_viewer_created_its_steps(board, client):
+def test_ab78_an_old_created_by_me_cookie_does_not_keep_the_filter_off(board, client):
+    theirs = by_agent(board)
+    client.cookies.set(web.PREFS_COOKIE, quote('{"mine":false}', safe=""))
+    assert f'data-id="{theirs}"' not in client.get("/", headers=AS_CHAOS).text
+
+
+def test_ab78_a_workflow_shows_when_the_viewer_is_on_any_of_its_steps(board, client):
     wf = release(board)
     core.create_template(board, "solo", "Solo", ["one"])
     other = core.instantiate(board, "solo", "MS", actor="overlord", actor_kind=AGENT)
-    client.post("/preferences/mine/on", headers=AS_CHAOS)
     html = client.get("/", headers=AS_CHAOS).text
     assert f'data-workflow="{wf["id"]}"' in html
     assert f'data-workflow="{other["id"]}"' not in html
 
 
-def test_ab42_off_brings_them_back_and_the_choice_survives_a_reload(board, client):
+def test_ab78_off_survives_a_reload_and_on_brings_the_filter_back(board, client):
     theirs = by_agent(board)
-    client.post("/preferences/mine/on", headers=AS_CHAOS)
-    assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE))["mine"] is True
-    assert f'data-id="{theirs}"' not in client.get("/", headers=AS_CHAOS).text
-    assert f'data-id="{theirs}"' not in client.get("/", headers=AS_CHAOS).text
     client.post("/preferences/mine/off", headers=AS_CHAOS)
+    assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE))["involved"] is False
     assert f'data-id="{theirs}"' in client.get("/", headers=AS_CHAOS).text
-
-
-def test_ab42_other_saves_keep_the_choice(board, client):
-    core.create_project(board, "BR", "brain")
+    assert f'data-id="{theirs}"' in client.get("/", headers=AS_CHAOS).text
     client.post("/preferences/mine/on", headers=AS_CHAOS)
+    assert f'data-id="{theirs}"' not in client.get("/", headers=AS_CHAOS).text
+
+
+def test_ab78_other_saves_keep_the_off_choice(board, client):
+    core.create_project(board, "BR", "brain")
+    client.post("/preferences/mine/off", headers=AS_CHAOS)
     client.post("/preferences/done/hide")
     client.post("/preferences/projects", data={"project": ["MS"]})
     client.post("/preferences/lanes/hide", data={"lane": "planning"})
     client.post("/preferences", data={"project": ["MS", "BR"], "lane": ["implement", "done"]})
-    assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE))["mine"] is True
+    assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE))["involved"] is False
 
 
 def test_ab42_with_no_viewer_the_filter_is_off_and_not_offered(board, client):
     theirs = by_agent(board)
-    client.post("/preferences/mine/on", headers=AS_CHAOS)
     html = client.get("/").text
     assert f'data-id="{theirs}"' in html
     assert 'class="mine-toggle"' not in html
@@ -4055,15 +4071,20 @@ def test_ab42_an_unknown_mine_action_is_404(client):
     assert client.post("/preferences/mine/sideways").status_code == 404
 
 
-@pytest.mark.parametrize("raw", [None, "", '{"mine":"yes"}', '{"mine":1}'])
-def test_ab42_anything_but_true_in_the_cookie_shows_everyone(raw):
-    assert web.read_prefs(raw and quote(raw, safe=""))["mine"] is False
+@pytest.mark.parametrize("raw", [None, "", '{"involved":"no"}', '{"involved":0}',
+                                 '{"mine":false}', '{"involved":true}'])
+def test_ab78_anything_but_false_in_the_cookie_keeps_the_filter_on(raw):
+    assert web.read_prefs(raw and quote(raw, safe=""))["involved"] is True
+
+
+def test_ab78_false_in_the_cookie_turns_the_filter_off():
+    assert web.read_prefs(quote('{"involved":false}', safe=""))["involved"] is False
 
 
 def test_ab42_the_board_stamp_moves_when_the_toggle_does(board, client):
     by_agent(board)
     before = client.get("/stamp", headers=AS_CHAOS).json()["stamp"]
-    client.post("/preferences/mine/on", headers=AS_CHAOS)
+    client.post("/preferences/mine/off", headers=AS_CHAOS)
     assert client.get("/stamp", headers=AS_CHAOS).json()["stamp"] != before
 
 
