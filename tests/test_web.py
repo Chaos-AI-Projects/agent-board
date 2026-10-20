@@ -5496,3 +5496,201 @@ def test_ab76_the_page_scrolls_to_the_newest_entry_unless_a_fragment(board, clie
     assert "if (location.hash) return;" in hook, "a fragment link keeps its anchor"
     assert "note-form" in hook and "scrollTo" in hook
     assert "scrollIntoView" not in hook, "an embedded card must not scroll the board around it"
+
+
+# --- AB-77: paste an image from the clipboard into a form that takes files ------
+
+
+def ab77_script(html):
+    """The page script that attaches pasted images, whole."""
+    return next(s for s in re.findall(r"<script>(.*?)</script>", html, re.S) if "AB-77" in s)
+
+
+def test_ab77_every_page_with_a_files_input_carries_the_paste_script(board, client):
+    iid = ready(board)
+    core.next(board, "run-2")
+    issue = core.show(board, iid)
+    takeover = client.post(f"/issues/{iid}/edit", data=edit_form(issue, body="x"),
+                           headers=AS_CHAOS).text
+    for html in (client.get("/").text, client.get(f"/issues/{iid}").text, takeover):
+        assert 'type="file" name="files"' in html
+        assert 'addEventListener("paste"' in ab77_script(html)
+
+
+# A DOM just big enough for the paste script: forms holding a file input, a
+# textarea in each, and a DataTransfer that builds a plain-array FileList.
+AB77_DOM = """
+function el(tag, attrs) {
+  var e = {tagName: tag.toUpperCase(), children: [], listeners: {}, hidden: false, textContent: "",
+           parent: null, setAttribute: function (k, v) { this[k] = v; },
+           addEventListener: function (ev, fn) { (this.listeners[ev] = this.listeners[ev] || []).push(fn); },
+           appendChild: function (c) { c.parent = this; this.children.push(c); return c; },
+           insertAdjacentElement: function (where, c) { c.parent = this.parent; this.after = c; return c; },
+           closest: function (sel) {
+             var tags = sel.split(",").map(function (s) { return s.trim().toUpperCase(); });
+             for (var n = this; n; n = n.parent) if (tags.indexOf(n.tagName) >= 0) return n;
+             return null; },
+           querySelector: function (sel) { return this.querySelectorAll(sel)[0] || null; },
+           querySelectorAll: function (sel) {
+             var out = [];
+             (function walk(n) { n.children.forEach(function (c) {
+               if (sel === 'input[type="file"][name="files"]' && c.tagName === "INPUT" && c.type === "file") out.push(c);
+               walk(c); }); })(this);
+             return out; }};
+  return Object.assign(e, attrs || {});
+}
+function fire(target, ev, data) {
+  (target.listeners[ev] || []).forEach(function (fn) { fn(data || {target: target}); });
+}
+function DataTransfer() { var list = []; this.items = {add: function (f) { list.push(f); }}; this.files = list; }
+var docListeners = {};
+var body = el("body");
+var document = {
+  createElement: function (tag) { return el(tag); },
+  addEventListener: function (ev, fn) { docListeners[ev] = fn; },
+  querySelectorAll: function (sel) { return body.querySelectorAll(sel); }};
+function form(withLabel) {
+  var f = body.appendChild(el("form"));
+  var area = f.appendChild(el("textarea"));
+  var holder = withLabel ? f.appendChild(el("label")) : f;
+  var input = holder.appendChild(el("input", {type: "file", files: []}));
+  return {form: f, area: area, input: input, label: withLabel ? holder : null};
+}
+function clip(files, types) {
+  return {files: files, types: types || (files.length ? ["Files"] : ["text/plain"])};
+}
+function paste(target, data) {
+  var ev = {target: target, clipboardData: data, stopped: false,
+            preventDefault: function () { this.stopped = true; }};
+  docListeners.paste(ev);
+  return ev;
+}
+var shot = new File(["png bytes"], "image.png", {type: "image/png"});
+var Date0 = Date;
+Date = function () { return new Date0(2026, 9, 20, 9, 5, 7); };
+"""
+
+
+def ab77_run(client, scenario):
+    return run_js(AB77_DOM + ab77_script(client.get("/").text), scenario)
+
+
+def test_ab77_a_pasted_screenshot_joins_the_forms_chosen_files_under_a_made_up_name(client):
+    got = ab77_run(client, """(function () {
+      var a = form(true), chosen = new File(["x"], "spec.pdf", {type: "application/pdf"});
+      a.input.files = [chosen];
+      var ev = paste(a.area, clip([shot]));
+      var f = a.input.files;
+      return [f.map(function (x) { return x.name; }), f[1].type, f[1].size, ev.stopped,
+              a.label.after.textContent.indexOf("pasted-20261020-090507.png") >= 0, a.label.after.hidden];
+    })()""")
+    assert got == [["spec.pdf", "pasted-20261020-090507.png"], "image/png", 9, True, True, False]
+
+
+def test_ab77_a_text_paste_is_left_alone(client):
+    got = ab77_run(client, """(function () {
+      var a = form(true);
+      var ev = paste(a.area, clip([], ["text/plain", "text/html"]));
+      return [a.input.files.length, ev.stopped, !!a.label.after];
+    })()""")
+    assert got == [0, False, False]
+
+
+def test_ab77_a_paste_with_text_and_an_image_keeps_the_text_and_attaches_the_image(client):
+    got = ab77_run(client, """(function () {
+      var a = form(true);
+      var ev = paste(a.area, clip([shot], ["text/plain", "Files"]));
+      return [a.input.files.length, ev.stopped];
+    })()""")
+    assert got == [1, False]
+
+
+def test_ab77_a_non_image_file_on_the_clipboard_is_not_attached(client):
+    got = ab77_run(client, """(function () {
+      var a = form(true), doc = new File(["x"], "a.txt", {type: "text/plain"});
+      var ev = paste(a.area, clip([doc]));
+      return [a.input.files.length, ev.stopped];
+    })()""")
+    assert got == [0, False]
+
+
+def test_ab77_two_pastes_in_one_second_get_different_names(client):
+    got = ab77_run(client, """(function () {
+      var a = form(true);
+      paste(a.area, clip([shot, shot])); paste(a.area, clip([shot]));
+      return a.input.files.map(function (x) { return x.name; });
+    })()""")
+    assert got == ["pasted-20261020-090507.png", "pasted-20261020-090507-2.png",
+                   "pasted-20261020-090507-3.png"]
+
+
+def test_ab77_a_paste_goes_to_its_own_forms_input(client):
+    """The card page has two file forms: edit and note."""
+    got = ab77_run(client, """(function () {
+      var edit = form(true), note = form(true);
+      paste(note.area, clip([shot]));
+      return [edit.input.files.length, note.input.files.length];
+    })()""")
+    assert got == [0, 1]
+
+
+def test_ab77_outside_a_form_only_a_pages_single_file_input_takes_the_paste(client):
+    """The take-over page has no text field, so the paste lands on the body."""
+    got = ab77_run(client, """(function () {
+      var only = form(false);
+      only.input.checkVisibility = function () { return true; };
+      paste(body, clip([shot]));
+      var one = only.input.files.length;
+      var other = form(false);
+      other.input.checkVisibility = function () { return true; };
+      var ev = paste(body, clip([shot]));
+      return [one, only.input.files.length, other.input.files.length, ev.stopped];
+    })()""")
+    assert got == [1, 1, 0, False]
+
+
+def test_ab77_remove_drops_only_the_pasted_files(client):
+    got = ab77_run(client, """(function () {
+      var a = form(true), chosen = new File(["x"], "spec.pdf", {type: "application/pdf"});
+      a.input.files = [chosen];
+      paste(a.area, clip([shot]));
+      var note = a.label.after, button = note.children.filter(function (c) { return c.tagName === "BUTTON"; })[0];
+      fire(button, "click");
+      return [a.input.files.map(function (x) { return x.name; }), note.hidden, button.type];
+    })()""")
+    assert got == [["spec.pdf"], True, "button"]
+
+
+def test_ab77_choosing_files_or_resetting_the_form_clears_the_pasted_notice(client):
+    got = ab77_run(client, """(function () {
+      var a = form(true), b = form(true);
+      paste(a.area, clip([shot])); paste(b.area, clip([shot]));
+      a.input.files = []; fire(a.input, "change");
+      b.input.files = []; fire(b.form, "reset");
+      return [a.label.after.hidden, b.label.after.hidden];
+    })()""")
+    assert got == [True, True]
+
+
+def test_ab77_outside_a_form_a_hidden_file_input_does_not_take_the_paste(client):
+    """The board's only file input is in the closed New issue details."""
+    got = ab77_run(client, """(function () {
+      var hidden = form(true);
+      hidden.input.checkVisibility = function () { return false; };
+      var ev = paste(body, clip([shot]));
+      var shown = form(true);
+      shown.input.checkVisibility = function () { return true; };
+      paste(body, clip([shot]));
+      return [hidden.input.files.length, ev.stopped, shown.input.files.length];
+    })()""")
+    assert got == [0, False, 1]
+
+
+def test_ab77_an_x_type_drops_its_prefix_in_the_extension(client):
+    got = ab77_run(client, """(function () {
+      var a = form(true);
+      paste(a.area, clip([new File(["i"], "f", {type: "image/x-icon"}),
+                          new File(["s"], "g", {type: "image/svg+xml"})]));
+      return a.input.files.map(function (x) { return x.name; });
+    })()""")
+    assert got == ["pasted-20261020-090507.icon", "pasted-20261020-090507-2.svg"]

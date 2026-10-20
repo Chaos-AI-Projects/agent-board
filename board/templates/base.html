@@ -282,6 +282,81 @@
     });
   });
 </script>
+<script>
+  // AB-77: an image pasted into a form that takes files joins that form's file
+  // input and uploads on submit like a chosen file. A clipboard image has no
+  // filename, so it gets pasted-<local time>.<type>. A paste outside any form
+  // goes to the page's visible file input only when there is just one, which
+  // is how the take-over page, with no text field, takes one. The board's input
+  // sits in the closed New issue details, where an attached image would go
+  // unseen. Text still pastes: the paste is stopped only when the clipboard
+  // holds no text.
+  var FILES_INPUT = 'input[type="file"][name="files"]';
+  function pastedName(type, when, n) {
+    function two(x) { return (x < 10 ? "0" : "") + x; }
+    var ext = (String(type).split("/")[1] || "").replace(/^x-/, "").replace(/\W.*$/, "") || "png";
+    return "pasted-" + when.getFullYear() + two(when.getMonth() + 1) + two(when.getDate()) +
+      "-" + two(when.getHours()) + two(when.getMinutes()) + two(when.getSeconds()) +
+      (n ? "-" + (n + 1) : "") + "." + ext;
+  }
+  function pasteInput(target) {
+    var form = target && target.closest ? target.closest("form") : null;
+    if (form) return form.querySelector(FILES_INPUT);
+    var shown = Array.prototype.filter.call(document.querySelectorAll(FILES_INPUT), function (el) {
+      return el.checkVisibility ? el.checkVisibility() : el.offsetParent !== null;
+    });
+    return shown.length === 1 ? shown[0] : null;
+  }
+  function setFiles(input, files) {
+    var dt = new DataTransfer();
+    files.forEach(function (f) { dt.items.add(f); });
+    input.files = dt.files;
+  }
+  // The notice names what was pasted and offers Remove. It sits after the
+  // input's label, so its button is not part of the label.
+  function showPasted(input) {
+    var names = input.pastedNames || [], note = input.pastedNote;
+    if (!note) {
+      if (!names.length) return;
+      note = input.pastedNote = document.createElement("span");
+      note.className = "pasted";
+      note.setAttribute("aria-live", "polite");
+      (input.closest("label") || input).insertAdjacentElement("afterend", note);
+      var forget = function () { input.pastedNames = []; showPasted(input); };
+      // Choosing files replaces the pasted ones; the form's Cancel empties it.
+      input.addEventListener("change", forget);
+      if (input.closest("form")) input.closest("form").addEventListener("reset", forget);
+    }
+    note.hidden = !names.length;
+    note.textContent = names.length ? " Pasted: " + names.join(", ") + " " : "";
+    if (!names.length) return;
+    var remove = document.createElement("button");
+    remove.type = "button";
+    remove.textContent = "Remove";
+    remove.addEventListener("click", function () {
+      setFiles(input, Array.prototype.filter.call(input.files || [], function (f) {
+        return names.indexOf(f.name) < 0;
+      }));
+      input.pastedNames = [];
+      showPasted(input);
+    });
+    note.appendChild(remove);
+  }
+  document.addEventListener("paste", function (ev) {
+    var data = ev.clipboardData, input = pasteInput(ev.target);
+    if (!data || !input) return;
+    var when = new Date(), names = input.pastedNames || [], images = [];
+    Array.prototype.forEach.call(data.files || [], function (f) {
+      if (!/^image\//.test(f.type)) return;
+      images.push(new File([f], pastedName(f.type, when, names.length + images.length), {type: f.type}));
+    });
+    if (!images.length) return;
+    if (Array.prototype.indexOf.call(data.types || [], "text/plain") < 0) ev.preventDefault();
+    input.pastedNames = names.concat(images.map(function (f) { return f.name; }));
+    setFiles(input, Array.prototype.slice.call(input.files || []).concat(images));
+    showPasted(input);
+  });
+</script>
 {% if stamp %}<script>
   // AB-4: the page keeps itself current. Every few seconds it asks for the
   // stamp of what it shows and reloads when the stamp moved. It never reloads
