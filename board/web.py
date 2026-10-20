@@ -96,6 +96,8 @@ DEFAULT_LINK_DOMAINS = ("github.com", "chaoseternal.net")
 # Raster images only: an SVG can carry script, so it downloads like HTML does.
 INLINE_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
 UTC = ZoneInfo("UTC")
+# A card's history shows this many newest entries; older ones fold shut (AB-76).
+HISTORY_SHOWN = 30
 
 log = logging.getLogger(__name__)
 
@@ -1379,7 +1381,11 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
             moves = core.QUEUE_MOVES[here] - {here}
             queues = [here, *(q for q in (*core.QUEUES, None) if q in moves)]
         now = core.now(engine)
+        # AB-76: only the newest entries render open; the rest fold above them.
+        events = issue["events"]
+        older, recent = events[:-HISTORY_SHOWN], events[-HISTORY_SHOWN:]
         return page(request, "issue.html", issue=issue, now=now,
+                    older_events=older, recent_events=recent,
                     stages=stages, queues=queues, wf=wf, stamp_url=f"/issues/{quote(issue['id'], safe='')}/stamp",
                     stamp=issue_stamp(issue, now, core.colour_buckets(engine)),
                     diagram=workflow_diagram(wf, issue["id"]) if wf else None,

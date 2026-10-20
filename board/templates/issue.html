@@ -158,7 +158,7 @@
    an agent's (system counts as agent) on the left and a human's on the right;
    an agent shows only the name before its @. Every other event, including one
    whose note the board generated, such as a link, is a small centred line. #}
-<ol class="events">{% for e in issue.events %}
+{% macro event_item(e) %}
 {% set side = "human" if e.actor_kind == "human" else "agent" %}
 {% set who = e.actor if side == "human" else e.actor.split("@")[0] %}
 {% set what %}{% if e.kind == "create" and e.on_behalf_of %}created this for {{ e.on_behalf_of }}{% else %}{{ e.kind }}{% endif %}{% if e.from_stage or e.to_stage %} {{ [e.from_stage, e.from_queue]|select|join(" ") }} &rarr; {{ [e.to_stage, e.to_queue]|select|join(" ") }}{% endif %}{% endset %}
@@ -169,7 +169,15 @@
 {% else %}
 <li class="event system-line" title="{{ e.actor_kind }}"><span class="when">{{ e.at|localtime(tz) }}</span> &middot; {{ who }} ({{ e.actor_kind }}) &middot; {{ what }}{% if e.note %}: {{ e.note }}{% endif %}{{ files(e.attachments, by=False) }}</li>
 {% endif %}
-{% endfor %}</ol>
+{% endmacro %}
+{# AB-76: a long history keeps its newest entries open and folds the rest above them. #}
+{% if older_events %}
+<details class="history-older">
+<summary>{{ older_events|length }} older entr{{ "y" if older_events|length == 1 else "ies" }}</summary>
+<ol class="events events-older">{% for e in older_events %}{{ event_item(e) }}{% endfor %}</ol>
+</details>
+{% endif %}
+<ol class="events" id="history-newest">{% for e in recent_events %}{{ event_item(e) }}{% endfor %}</ol>
 
 {% if issue.stage == "done" %}
 <h2>Reopen</h2>
@@ -181,7 +189,7 @@
 {% endif %}
 
 <h2>Note</h2>
-<form autocomplete="off" method="post" action="/issues/{{ issue.id }}/note{{ embed_q }}" enctype="multipart/form-data">
+<form id="note-form" autocomplete="off" method="post" action="/issues/{{ issue.id }}/note{{ embed_q }}" enctype="multipart/form-data">
   <input type="hidden" name="version" value="{{ issue.version }}">
   <input type="hidden" name="from_stage" value="{{ issue.stage }}">
   <input type="hidden" name="from_queue" value="{{ issue.queue or "" }}">
@@ -213,6 +221,29 @@
   })();
 </script>
 
+<script>
+  // AB-76: open at the newest entry, with the note box under it in view. A link
+  // to an anchor keeps it. Only this window scrolls: scrolling the element into
+  // view would also scroll the board around an embedded card.
+  (function () {
+    if (location.hash) return;
+    var form = document.getElementById("note-form");
+    if (!form) return;
+    var placed = null;
+    function toNewest() {
+      var last = document.querySelector("#history-newest > li:last-child");
+      var y = window.scrollY + form.getBoundingClientRect().bottom - window.innerHeight;
+      // A window too short for both keeps the newest entry's top in view.
+      if (last) y = Math.min(y, window.scrollY + last.getBoundingClientRect().top);
+      window.scrollTo(0, Math.max(y, 0));
+      placed = window.scrollY;
+    }
+    toNewest();
+    // Thumbnails load later and push the form down; follow them unless the
+    // reader has scrolled away since.
+    window.addEventListener("load", function () { if (window.scrollY === placed) toNewest(); });
+  })();
+</script>
 <dialog id="write-error" class="error">
   <p></p>
   <form autocomplete="off" method="dialog"><button class="primary">OK</button></form>

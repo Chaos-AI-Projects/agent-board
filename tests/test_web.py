@@ -2636,7 +2636,7 @@ def history(html):
 
 def events_list(html):
     """The history list itself, without the forms that follow it (AB-75)."""
-    return re.search(r'<ol class="events">.*?</ol>', history(html), re.S).group(0)
+    return re.search(r'<ol class="events"[ >].*?</ol>', history(html), re.S).group(0)
 
 
 def test_ab75_history_lists_the_oldest_event_first(board, client):
@@ -2707,15 +2707,15 @@ def test_ab75_an_agent_bubble_with_a_file_hides_the_address(board, attach_dir, c
 def test_ab75_the_note_form_sits_after_the_history(board, client):
     iid = ready(board)
     page = client.get(f"/issues/{iid}").text
-    assert page.index('<ol class="events">') < page.index("<h2>Note</h2>")
-    assert page.index('<ol class="events">') < page.index(f'action="/issues/{iid}/note')
+    assert page.index('<ol class="events" ') < page.index("<h2>Note</h2>")
+    assert page.index('<ol class="events" ') < page.index(f'action="/issues/{iid}/note')
 
 
 def test_ab75_reopen_sits_after_the_history(board, client):
     iid = ready(board)
     core.move(board, iid, "done", actor=CHAOS, actor_kind=HUMAN)
     page = client.get(f"/issues/{iid}").text
-    assert page.index('<ol class="events">') < page.index("<h2>Reopen</h2>")
+    assert page.index('<ol class="events" ') < page.index("<h2>Reopen</h2>")
 
 
 def test_ab75_the_body_is_in_an_open_description_details(board, client):
@@ -5427,3 +5427,72 @@ def test_ab71_an_unseen_card_has_a_tinted_background(client, board):
     css = client.get("/", headers=AS_CHAOS).text
     rule = re.search(r'\.card\.unseen\s*\{([^}]*)\}', css).group(1)
     assert "background" in rule
+
+
+def older_entries(html):
+    """The closed details holding the older history entries, or None (AB-76)."""
+    return re.search(r'<details class="history-older">\s*<summary>(.*?)</summary>(.*?)</details>',
+                     history(html), re.S)
+
+
+def with_events(board, n):
+    """A card with exactly n events: its create, then n - 1 notes."""
+    iid = ready(board)
+    for i in range(n - 1):
+        core.annotate(board, iid, f"note {i + 1:02d}", actor=CHAOS, actor_kind=HUMAN)
+    assert len(core.show(board, iid)["events"]) == n
+    return iid
+
+
+def test_ab76_a_31_event_card_folds_the_oldest_into_closed_details(board, client):
+    iid = with_events(board, 31)
+    html = client.get(f"/issues/{iid}").text
+    m = older_entries(html)
+    assert m, "an older-entries details is rendered"
+    assert m.group(1).strip() == "1 older entry"
+    assert len(re.findall(r"<li class=", m.group(2))) == 1
+    assert "create" in m.group(2)
+    shown = events_list(html)
+    assert len(re.findall(r"<li class=", shown)) == 30
+    assert "note 01" in shown and "note 30" in shown
+
+
+def test_ab76_the_older_entries_sit_above_the_newest_and_start_closed(board, client):
+    iid = with_events(board, 33)
+    html = history(client.get(f"/issues/{iid}").text)
+    assert re.search(r'<details class="history-older">\s*<summary>3 older entries</summary>', html)
+    assert html.index('class="history-older"') < html.index('<ol class="events" ')
+
+
+def test_ab76_a_30_event_card_has_no_older_entries(board, client):
+    iid = with_events(board, 30)
+    html = client.get(f"/issues/{iid}").text
+    assert older_entries(html) is None
+    assert "history-older" not in html
+    assert len(re.findall(r"<li class=", events_list(html))) == 30
+
+
+def test_ab76_the_scroll_hook_aims_at_the_newest_entry_not_the_folded_ones(board, client):
+    """A selector that also matches the folded list finds it first, and the
+    newest folded entry is hidden inside the closed details."""
+    iid = with_events(board, 31)
+    html = client.get(f"/issues/{iid}").text
+    m = re.search(r'querySelector\("#([\w-]+) > li:last-child"\)', scroll_hook(html))
+    assert m, "the hook finds the newest entry by the open list's id"
+    lists = re.findall(r"<ol [^>]*>", history(html))
+    assert lists == ['<ol class="events events-older">', f'<ol class="events" id="{m.group(1)}">']
+    assert html.count(f'id="{m.group(1)}"') == 1
+
+
+def scroll_hook(html):
+    m = re.search(r"<script>[^<]*AB-76[^<]*</script>", html, re.S)
+    return m and m.group(0)
+
+
+def test_ab76_the_page_scrolls_to_the_newest_entry_unless_a_fragment(board, client):
+    iid = ready(board)
+    hook = scroll_hook(client.get(f"/issues/{iid}").text)
+    assert hook, "the scroll hook is on the page"
+    assert "if (location.hash) return;" in hook, "a fragment link keeps its anchor"
+    assert "note-form" in hook and "scrollTo" in hook
+    assert "scrollIntoView" not in hook, "an embedded card must not scroll the board around it"
