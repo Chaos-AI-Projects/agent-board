@@ -193,11 +193,13 @@
   <input type="hidden" name="version" value="{{ issue.version }}">
   <input type="hidden" name="from_stage" value="{{ issue.stage }}">
   <input type="hidden" name="from_queue" value="{{ issue.queue or "" }}">
-  <label>Stage <select name="stage" data-current="{{ issue.stage }}">{% for s in stages %}<option title="{{ stage_hints[s] }}"{% if s == issue.stage %} selected{% endif %}>{{ s }}</option>{% endfor %}</select></label>
-  {% if queues %}<label>Queue <select name="queue" data-current="{{ issue.queue or "" }}">{% for q in queues %}<option value="{{ q or "" }}"{% if q == issue.queue %} selected{% endif %}>{{ q or "waiting" }}</option>{% endfor %}</select></label>{% endif %}
   <textarea name="note" required></textarea>
   <label>Files <input type="file" name="files" multiple></label>
-  <button class="primary">Save</button>
+  <div class="note-actions">
+    <label>Stage <select name="stage" data-current="{{ issue.stage }}">{% for s in stages %}<option title="{{ stage_hints[s] }}"{% if s == issue.stage %} selected{% endif %}>{{ s }}</option>{% endfor %}</select></label>
+    {% if queues %}<label>Queue <select name="queue" data-current="{{ issue.queue or "" }}">{% for q in queues %}<option value="{{ q or "" }}"{% if q == issue.queue %} selected{% endif %}>{{ q or "waiting" }}</option>{% endfor %}</select></label>{% endif %}
+    <button class="primary">Save</button>
+  </div>
   <div>A note never needs the lease. A stage or queue change does, and the note becomes its reason; releasing a claimed card needs one, and so does leaving done.</div>
 </form>
 <script>

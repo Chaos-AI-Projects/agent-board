@@ -980,6 +980,24 @@ def test_ms661_the_note_form_carries_the_stage_and_queue_selects(board, client):
     assert script and "Add note" in script.group(1) and "data-current" in script.group(1)
 
 
+def test_ab81_stage_and_queue_share_a_row_with_the_note_button(board, client):
+    """Chaos 2026-10-21: the selects sit on the Add note line, under the note box."""
+    iid = ready(board)
+    html = client.get(f"/issues/{iid}").text
+    form = issue_forms(html)[f"/issues/{iid}/note"]
+    row = re.search(r'<div class="note-actions">(.*?)</div>', form, re.S)
+    assert row, "the note form has an actions row"
+    row = row.group(1)
+    assert row.index('name="stage"') < row.index('name="queue"') < row.index("<button")
+    assert '<button class="primary">Save</button>' in row, "no-JS label unchanged"
+    assert form.index('name="note"') < form.index('class="note-actions"'), "under the note box"
+    assert form.count("<select") == 2, "no stray select outside the row"
+    rule = _css_rule(html, ".note-actions")
+    assert "display: flex" in rule and "flex-wrap: wrap" in rule
+    assert "margin-top: 0" in _css_rule(html, ".note-actions label"), \
+        "the block label margin would stagger the row"
+
+
 def test_ab8_a_review_note_closes_a_waiting_card_as_done(board, client):
     iid = ready(board)
     tok = core.next(board, "w1")["lease_token"]

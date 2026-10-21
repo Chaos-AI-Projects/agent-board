@@ -197,6 +197,9 @@
   .takeover { background: var(--warn-bg); border: 1px solid var(--warn); padding: 12px; border-radius: 6px; }
   form.inline { display: inline; }
   label { display: block; margin-top: 8px; }
+  /* AB-81: the note form's stage and queue sit on the button's line. */
+  .note-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 8px; }
+  .note-actions label { margin-top: 0; }
   [hidden] { display: none !important; }
   textarea { width: 100%; min-height: 8em; box-sizing: border-box; }
   /* AB-75: history as a conversation. Agents left, humans right, events without a note centred. */
