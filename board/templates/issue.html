@@ -193,7 +193,7 @@
   <input type="hidden" name="version" value="{{ issue.version }}">
   <input type="hidden" name="from_stage" value="{{ issue.stage }}">
   <input type="hidden" name="from_queue" value="{{ issue.queue or "" }}">
-  <textarea name="note" required></textarea>
+  <textarea name="note" required placeholder="Ctrl+Enter (Cmd+Enter on a Mac) sends"></textarea>
   <label>Files <input type="file" name="files" multiple></label>
   <div class="note-actions">
     <label>Stage <select name="stage" data-current="{{ issue.stage }}">{% for s in stages %}<option title="{{ stage_hints[s] }}"{% if s == issue.stage %} selected{% endif %}>{{ s }}</option>{% endfor %}</select></label>
@@ -220,6 +220,23 @@
     }
     Array.prototype.forEach.call(selects, function (s) { s.addEventListener("change", sync); });
     sync();
+  })();
+</script>
+
+<script>
+  // AB-82: Ctrl+Enter, or Cmd+Enter on a Mac, in the note box presses the
+  // form's button. requestSubmit validates first, so an empty required note is
+  // refused, and it fires the submit event the fetch handler below listens for.
+  // A held key's repeats are dropped: the fetch guard clears before the
+  // redirect lands, so a repeat in between would post the note twice.
+  (function () {
+    var form = document.getElementById("note-form");
+    if (!form) return;
+    form.querySelector("textarea[name=note]").addEventListener("keydown", function (ev) {
+      if (ev.key !== "Enter" || !(ev.ctrlKey || ev.metaKey) || ev.isComposing || ev.repeat) return;
+      ev.preventDefault();
+      form.requestSubmit(form.querySelector("button"));
+    });
   })();
 </script>
 

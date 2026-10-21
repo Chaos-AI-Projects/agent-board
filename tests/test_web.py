@@ -998,6 +998,70 @@ def test_ab81_stage_and_queue_share_a_row_with_the_note_button(board, client):
         "the block label margin would stagger the row"
 
 
+def _ab82_script(html):
+    """The note box's keyboard shortcut script."""
+    m = re.search(r"<script>((?:(?!</script>).)*AB-82(?:(?!</script>).)*)</script>", html, re.S)
+    assert m, "the issue page carries the AB-82 shortcut script"
+    return m.group(1)
+
+
+# A stand-in page for node: the note form, its box and its button, recording what
+# the shortcut handler did with each key it was given.
+_AB82_PAGE = """
+var calls = [], handler = null, valid = true;
+var button = {tag: "button"};
+var note = {addEventListener: function (type, fn) { if (type === "keydown") handler = fn; }};
+var form = {
+  querySelector: function (sel) { return {button: button, "textarea[name=note]": note}[sel] || null; },
+  requestSubmit: function (b) { calls.push(["requestSubmit", b === button]); },
+};
+var document = {getElementById: function (id) { return id === "note-form" ? form : null; }};
+function press(key, mods) {
+  var ev = Object.assign({key: key, ctrlKey: false, metaKey: false, shiftKey: false,
+                          altKey: false, isComposing: false, repeat: false,
+                          preventDefault: function () { calls.push(["preventDefault"]); }}, mods);
+  calls = [];
+  handler(ev);
+  return calls;
+}
+"""
+
+
+def test_ab82_ctrl_or_cmd_enter_in_the_note_box_submits_the_note_form(board, client):
+    """Chaos 2026-10-21: Ctrl+Enter in the note box is the Add note button."""
+    iid = ready(board)
+    src = _AB82_PAGE + _ab82_script(client.get(f"/issues/{iid}").text)
+    sent = [["preventDefault"], ["requestSubmit", True]]
+    got = run_js(src, "[" + ",".join([
+        'press("Enter", {ctrlKey: true})',
+        'press("Enter", {metaKey: true})',
+        'press("Enter", {})',
+        'press("Enter", {shiftKey: true})',
+        'press("a", {ctrlKey: true})',
+        'press("Enter", {ctrlKey: true, isComposing: true})',
+        'press("Enter", {ctrlKey: true, repeat: true})',
+    ]) + "]")
+    assert got[0] == sent, "Ctrl+Enter submits with the form's own button"
+    assert got[1] == sent, "Cmd+Enter does the same on a Mac"
+    assert got[2] == [] and got[3] == [], "a plain or Shift+Enter is a newline"
+    assert got[4] == [], "Ctrl with another key is left alone"
+    assert got[5] == [], "Enter that ends an IME composition is not a send"
+    assert got[6] == [], "a held key's auto-repeat does not post the note again"
+
+
+def test_ab82_the_shortcut_goes_through_requestsubmit_and_is_hinted(board, client):
+    """requestSubmit runs validation and the submit event, so an empty required
+    note is refused and the fetch handler's double-send guard still applies."""
+    iid = ready(board)
+    html = client.get(f"/issues/{iid}").text
+    script = _ab82_script(html)
+    assert "requestSubmit" in script and ".submit()" not in script
+    form = issue_forms(html)[f"/issues/{iid}/note"]
+    box = re.search(r"<textarea[^>]*name=\"note\"[^>]*>", form).group(0)
+    assert "required" in box, "the no-JS note stays required"
+    assert re.search(r'placeholder="[^"]*Ctrl\+Enter', box), "the box names the shortcut"
+
+
 def test_ab8_a_review_note_closes_a_waiting_card_as_done(board, client):
     iid = ready(board)
     tok = core.next(board, "w1")["lease_token"]
