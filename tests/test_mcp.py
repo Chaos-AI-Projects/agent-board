@@ -81,7 +81,7 @@ def test_the_tools_are_the_cli_operations(migrated, monkeypatch):
     monkeypatch.delenv(BRAIN_DIR_ENV, raising=False)
     names = {t.name for t in list_tools(migrated)}
     assert names == {"next", "show", "annotate", "link", "create",
-                     "instantiate", "heartbeat", "plan", "depend", "undepend",
+                     "instantiate", "heartbeat", "plan", "hold", "resume", "depend", "undepend",
                      "create_batch", "search", "projects", "move", "queue", "schedule"}
 
 
@@ -195,6 +195,24 @@ def test_plan_without_the_lease_is_code_4(migrated):
     issue_id = ready(migrated)
     out = failed(migrated, "plan", id=issue_id, steps=[{"title": "a"}])
     assert (out["error"], out["code"]) == ("LeaseLost", 4)
+
+
+def test_hold_and_resume_take_the_parent_id(migrated):
+    board(migrated)
+    issue_id, token = claimed(migrated)
+    out = ok(migrated, "plan", id=issue_id, token=token, steps=[{"title": "a"}])
+    assert ok(migrated, "hold", id=issue_id)["plan"]["held"] is True
+    assert ok(migrated, "next") == {"issue": None}
+    assert ok(migrated, "resume", id=issue_id)["plan"]["held"] is False
+    assert ok(migrated, "next")["issue"]["id"] == out["plan"]["steps"][0]["id"]
+
+
+def test_hold_on_a_step_is_refused(migrated):
+    board(migrated)
+    issue_id, token = claimed(migrated)
+    out = ok(migrated, "plan", id=issue_id, token=token, steps=[{"title": "a"}])
+    err = failed(migrated, "hold", id=out["plan"]["steps"][0]["id"])
+    assert err["error"] == "BoardError"
 
 
 def test_depend_holds_an_issue_back_until_its_dependency_is_done(migrated):

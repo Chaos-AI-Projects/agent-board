@@ -1248,6 +1248,49 @@ def plan(engine, issue_id: str, steps: list[dict], *, actor: str, actor_kind: st
                   [steps, actor, actor_kind, token, preempt])
 
 
+def hold(engine, issue_id: str, *, actor: str, actor_kind: str,
+         request_id: str | None = None) -> dict:
+    """Hold the plan of parent `issue_id`: `next` hands out none of its steps (AB-83).
+
+    The id is the plan's parent, the issue `plan` broke up, not a step. A
+    step already claimed keeps its lease and can finish; an expired one is
+    not reclaimed. The parent and the steps keep their stage and queue.
+    Holding is planning, not work on the parent, so it needs no lease.
+    Holding a held plan changes nothing.
+    """
+    return _hold(engine, "hold", issue_id, True, actor, actor_kind, request_id)
+
+
+def resume(engine, issue_id: str, *, actor: str, actor_kind: str,
+           request_id: str | None = None) -> dict:
+    """Undo `hold`: `next` hands out the plan's steps again (AB-83)."""
+    return _hold(engine, "resume", issue_id, False, actor, actor_kind, request_id)
+
+
+def _hold(engine, op, issue_id, held, actor, actor_kind, request_id):
+    key = _scoped(op, issue_id, request_id)
+
+    def body(s):
+        issue = _get(s, issue_id, lock=True)
+        wf = issue.plan
+        if wf is None:
+            where = (f"it is step {issue.position} of workflow {issue.workflow_id}"
+                     if issue.workflow_id is not None else "nothing was planned from it")
+            raise BoardError(f"{issue.id} has no plan to {op}: {where}")
+        if wf.held == held:
+            return _view(s, issue)
+        now = store.db_now(s)
+        wf.held = held
+        issue.version += 1
+        issue.updated_at = now
+        note = (f"workflow {wf.id} held: next hands out none of its steps" if held
+                else f"workflow {wf.id} resumed: next hands out its steps again")
+        _event(s, issue.id, now, actor, actor_kind, op, None, None, note, key)
+        return _view(s, issue)
+
+    return _write(engine, key, body, _replay_view, [actor, actor_kind])
+
+
 def depend(engine, issue_id: str, on: str, *, actor: str, actor_kind: str,
            request_id: str | None = None) -> dict:
     """Make `issue_id` wait until `on` is done (MS-646).
@@ -1432,6 +1475,7 @@ def _candidates(now, project):
                      Issue.lease_expires_at < now),
             ),
             ~exists().where(Artifact.issue_id == Issue.id, Artifact.closes.is_(True)),
+            ~exists().where(Workflow.id == Issue.workflow_id, Workflow.held.is_(True)),
             ~exists().where(Dependency.issue_id == Issue.id,
                             blocker.id == Dependency.depends_on_id,
                             blocker.state != "done",
@@ -2013,6 +2057,7 @@ def _workflow_view(s, wf):
         "id": wf.id,
         "title": wf.title,
         "origin_issue_id": wf.origin_issue_id,
+        "held": wf.held,
         "stage": stage,
         "queue": queue,
         "steps": [{"id": st.id, "position": st.position, "title": st.title,

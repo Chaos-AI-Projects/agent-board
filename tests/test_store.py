@@ -510,8 +510,10 @@ def test_ab63_0011_adds_on_behalf_of_to_events_and_downgrade_drops_it(engine):
 def test_ab67_0013_counts_every_finish_before_it_as_seen(engine):
     # A card finished before the feature shipped is not news: the upgrade
     # marks it seen for every person on it, creator or later human actor.
+    # core speaks the head schema, so the cards are built there and the
+    # schema is taken back to 0012 before 0013's backfill runs on them.
     from board import core
-    store.upgrade(engine, "0012")
+    store.upgrade(engine)
     core.create_project(engine, "MS", "m")
     mine = core.create(engine, "MS", "a", actor="chaos@example.com", actor_kind="human",
                        stage="implement")["id"]
@@ -522,6 +524,7 @@ def test_ab67_0013_counts_every_finish_before_it_as_seen(engine):
         claim = core.next(engine, "w1")
         core.move(engine, claim["issue"]["id"], "done", actor="w1", actor_kind="agent",
                   token=claim["lease_token"], note="did it")
+    store.downgrade(engine, "0012")
     store.upgrade(engine, "0013")
     for who in ("chaos@example.com", "other@example.com", "third@example.com"):
         assert core.unseen(engine, who) == set()

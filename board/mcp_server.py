@@ -265,6 +265,22 @@ def build_server(engine, actor: str | Callable[[], str], brain=_FROM_ENV,
         return run(core.plan, engine, id, steps, token=token, request_id=request_id, **who())
 
     @mcp.tool()
+    def hold(id: str, request_id: str | None = None) -> CallToolResult:
+        """Hold the plan made from issue `id`: `next` hands out none of its steps.
+
+        `id` is the plan's parent, the issue `plan` broke up; a step or a card
+        with no plan is refused. A step already claimed keeps its lease and can
+        finish, but no further step starts until `resume`. No card's stage or
+        queue changes, and no lease is needed.
+        """
+        return run(core.hold, engine, id, request_id=request_id, **who())
+
+    @mcp.tool()
+    def resume(id: str, request_id: str | None = None) -> CallToolResult:
+        """Undo `hold` on the plan made from issue `id`: `next` hands out its steps again."""
+        return run(core.resume, engine, id, request_id=request_id, **who())
+
+    @mcp.tool()
     def create_batch(items: list[dict], workflow_title: str | None = None,
                      request_id: str | None = None,
                      creator: str | None = None) -> CallToolResult:

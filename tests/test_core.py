@@ -1185,6 +1185,116 @@ def test_an_origin_moved_off_hold_by_a_human_is_left_alone(board):
     assert place(core.show(board, iid)) == ("backlog", None)
 
 
+# --- AB-83: hold and resume a plan by its parent's id ---------------------------
+
+
+def planned(engine, steps=("design", "build")):
+    iid, token = claimed(engine)
+    view = plan(engine, iid, token, steps=steps)
+    return iid, [s["id"] for s in view["plan"]["steps"]]
+
+
+def test_a_held_workflow_hands_out_none_of_its_steps(board):
+    iid, _ = planned(board)
+    view = core.hold(board, iid, actor=CHAOS, actor_kind=HUMAN)
+    assert view["plan"]["held"] is True
+    assert core.next(board, "w2") is None
+
+
+def test_hold_leaves_other_cards_workable(board):
+    iid, _ = planned(board)
+    other = ready(board, "unrelated")
+    core.hold(board, iid, actor="w9", actor_kind=AGENT)
+    assert core.next(board, "w2")["issue"]["id"] == other
+
+
+def test_resume_hands_the_steps_out_again(board):
+    iid, steps = planned(board)
+    core.hold(board, iid, actor=CHAOS, actor_kind=HUMAN)
+    view = core.resume(board, iid, actor=CHAOS, actor_kind=HUMAN)
+    assert view["plan"]["held"] is False
+    assert core.next(board, "w2")["issue"]["id"] == steps[0]
+
+
+def test_hold_keeps_a_running_steps_lease_and_lets_it_finish(board):
+    iid, steps = planned(board)
+    claim = core.next(board, "w2")
+    assert claim["issue"]["id"] == steps[0]
+    core.hold(board, iid, actor=CHAOS, actor_kind=HUMAN)
+    step = core.show(board, steps[0])
+    assert (step["lease_holder"], place(step)) == ("w2", ("implement", "processing"))
+    core.heartbeat(board, steps[0], "w2", claim["lease_token"])
+    done = core.move(board, steps[0], "done", note="designed", actor="w2",
+                     actor_kind=AGENT, token=claim["lease_token"])
+    assert place(done) == ("done", None)
+    # The next step waits for the resume.
+    assert core.next(board, "w3") is None
+
+
+def test_a_held_workflows_lapsed_step_is_not_reclaimed(board):
+    iid, steps = planned(board)
+    core.next(board, "w2", ttl=timedelta(seconds=-1))
+    core.hold(board, iid, actor=CHAOS, actor_kind=HUMAN)
+    assert core.next(board, "w3") is None
+    core.resume(board, iid, actor=CHAOS, actor_kind=HUMAN)
+    assert core.next(board, "w3")["issue"]["id"] == steps[0]
+
+
+def test_hold_and_resume_are_logged_on_the_parent(board):
+    iid, _ = planned(board)
+    before = core.show(board, iid)["version"]
+    core.hold(board, iid, actor="w9", actor_kind=AGENT)
+    core.resume(board, iid, actor=CHAOS, actor_kind=HUMAN)
+    evs = events(board, iid)[-2:]
+    assert [(e["kind"], e["actor"]) for e in evs] == [("hold", "w9"), ("resume", CHAOS)]
+    assert all(e["note"] for e in evs)
+    assert core.show(board, iid)["version"] == before + 2
+    # The parent itself stays where the plan put it.
+    assert place(core.show(board, iid)) == ("implement", "on-hold")
+
+
+def test_hold_twice_and_resume_unheld_change_nothing(board):
+    iid, _ = planned(board)
+    core.resume(board, iid, actor=CHAOS, actor_kind=HUMAN)
+    core.hold(board, iid, actor=CHAOS, actor_kind=HUMAN)
+    n = len(events(board, iid))
+    again = core.hold(board, iid, actor=CHAOS, actor_kind=HUMAN)
+    assert again["plan"]["held"] is True
+    assert len(events(board, iid)) == n
+    assert [e["kind"] for e in events(board, iid)].count("resume") == 0
+
+
+def test_hold_replays_on_the_same_request_id(board):
+    iid, _ = planned(board)
+    core.hold(board, iid, actor=CHAOS, actor_kind=HUMAN, request_id="h1")
+    core.resume(board, iid, actor=CHAOS, actor_kind=HUMAN)
+    again = core.hold(board, iid, actor=CHAOS, actor_kind=HUMAN, request_id="h1")
+    # A retry of the first hold does not undo the resume that followed it.
+    assert again["plan"]["held"] is False
+    assert core.show(board, iid)["plan"]["held"] is False
+
+
+def test_hold_takes_a_parent_not_a_step_or_a_plain_card(board):
+    iid, steps = planned(board)
+    plain = core.create(board, "MS", "plain", actor=CHAOS, actor_kind=HUMAN)["id"]
+    for target in (steps[0], plain):
+        for op in (core.hold, core.resume):
+            with pytest.raises(core.BoardError, match="no plan"):
+                op(board, target, actor=CHAOS, actor_kind=HUMAN)
+    with pytest.raises(core.NotFound):
+        core.hold(board, "MS-999", actor=CHAOS, actor_kind=HUMAN)
+
+
+def test_a_workflows_view_says_whether_it_is_held(board):
+    iid, steps = planned(board)
+    wf_id = core.show(board, iid)["plan"]["id"]
+    assert core.workflow(board, wf_id)["held"] is False
+    assert core.show(board, steps[0])["workflow"]["held"] is False
+    core.hold(board, iid, actor=CHAOS, actor_kind=HUMAN)
+    assert core.workflow(board, wf_id)["held"] is True
+    assert core.show(board, steps[0])["workflow"]["held"] is True
+
+
 # --- MS-646: dependencies between issues ------------------------------------------
 
 

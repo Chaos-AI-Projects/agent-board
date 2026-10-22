@@ -365,6 +365,16 @@ def test_a_second_plan_exits_5(url):
     assert proc.returncode == 5, proc.stderr
 
 
+def test_hold_and_resume_a_plan_by_its_parent(url):
+    issue_id = ready(url, "big job")
+    token = claim(url)["lease_token"]
+    step = ok(board(url, "plan", issue_id, "--step", "a", "--token", token))["plan"]["steps"][0]
+    assert ok(board(url, "hold", issue_id))["plan"]["held"] is True
+    assert board(url, "next").returncode == 3
+    assert ok(board(url, "resume", issue_id))["plan"]["held"] is False
+    assert claim(url)["issue"]["id"] == step["id"]
+
+
 # --- dependencies (MS-646) ---------------------------------------------------
 
 

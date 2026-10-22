@@ -19,10 +19,13 @@ MCP in `board.oauth` and `board.remote`.
 ## Operations
 
 `board.core` holds `next`, `show`, `search`, `move`, `queue`, `annotate`, `link`, `create`,
-`instantiate`, `create_batch`, `plan`, `depend`, `undepend`, `heartbeat` and `edit`. Each is one transaction, returns a plain dict, and appends at least one event,
+`instantiate`, `create_batch`, `plan`, `hold`, `resume`, `depend`, `undepend`, `heartbeat` and `edit`. Each is one transaction, returns a plain dict, and appends at least one event,
 except `heartbeat`, which only moves a lease expiry, and an `edit` whose form changed nothing.
 `plan` breaks an issue into a workflow of `ready` steps the caller lists. The issue goes `onhold`
 and returns to `ready` when the last step is done, so `next` hands it back to be checked.
+`hold` takes that issue's id, the plan's parent, and `next` hands out none of the plan's steps
+until `resume`. A step already claimed keeps its lease and can finish. Neither changes a stage or
+queue or needs a lease, and holding a held plan writes no event (AB-83).
 An agent closes its own finished card, a plan's origin included (AB-23, which replaced AB-9's
 human-only close). Entering `need-input` drops the lease, so the agent that made the latest move
 into `need-input` may still take that card to `done` or `cancelled` without one, and to nothing else.
@@ -269,7 +272,7 @@ back to `ready`. A note never needs the lease.
 
 `board-mcp` serves the CLI's operations as MCP tools over stdio, for an agent working in a
 conversation. `board-web` serves the same tools remotely, as described under Remote MCP below. The tools are `next`, `show`, `move`, `queue`, `annotate`, `link`, `create`, `schedule`, `instantiate`,
-`create_batch`, `plan`, `depend`, `undepend`, `heartbeat` and `search`, with the CLI's names and arguments. `migrate`,
+`create_batch`, `plan`, `hold`, `resume`, `depend`, `undepend`, `heartbeat` and `search`, with the CLI's names and arguments. `migrate`,
 `create-project` and `edit` are left out. `projects` lists every project's key, name and issue count; it has no CLI
 counterpart, and it is how an agent learns the keys `create` needs.
 

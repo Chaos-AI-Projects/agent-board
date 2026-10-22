@@ -173,6 +173,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--preempt", action="store_true")
     writes(sp)
 
+    for name, what in (("hold", "hand out none of a plan's steps until resumed; a claimed "
+                                "step keeps its lease"),
+                       ("resume", "hand out a held plan's steps again")):
+        sp = op(name, help=f"{what}; the id is the plan's parent, not a step")
+        sp.add_argument("id")
+        writes(sp, token=False)
+
     sp = op("create-batch", help="create several issues together, all or nothing")
     sp.add_argument("file", help="a JSON file, or - for stdin: a list of items, or "
                                  "{\"items\": [...], \"workflow_title\": ...}")
@@ -249,6 +256,10 @@ def _run(engine, a) -> dict | None:
         case "plan":
             return core.plan(engine, a.id, [{"title": t} for t in a.steps], token=a.token,
                              request_id=a.request_id, preempt=a.preempt, **who)
+        case "hold":
+            return core.hold(engine, a.id, request_id=a.request_id, **who)
+        case "resume":
+            return core.resume(engine, a.id, request_id=a.request_id, **who)
         case "create-batch":
             items, workflow_title = _batch_file(a.file)
             return core.create_batch(engine, items, workflow_title=workflow_title,

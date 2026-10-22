@@ -365,6 +365,8 @@ class Workflow(Base):
     template_id: Mapped[int | None] = mapped_column(ForeignKey("template.id"))
     created_at: Mapped[datetime] = mapped_column(Timestamp())
     archived_at: Mapped[datetime | None] = mapped_column(Timestamp())
+    # While held, `next` hands out none of the steps (AB-83).
+    held: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     # Set when the workflow is the plan for one issue (MS-644). `use_alter`
     # because issue.workflow_id already points the other way.
     origin_issue_id: Mapped[str | None] = mapped_column(
