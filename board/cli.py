@@ -97,7 +97,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--assignee")
     sp.add_argument("--creator", help="the actor who created the issue")
     sp.add_argument("--involved", help="a person who created the issue, had it created "
-                                       "for them, or acted on it as a human (AB-70)")
+                                       "for them, acted on it as a human (AB-70), or is "
+                                       "mentioned in its body or a note (AB-87)")
 
     sp = op("move", help="set the stage; planning and implement queue the card as ready, "
                          "done needs a --note, done reopens with a --note and no lease")

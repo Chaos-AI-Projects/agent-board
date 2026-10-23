@@ -927,7 +927,7 @@ def test_ms637_the_issue_page_is_read_only_until_edit_issue_is_opened(board, cli
     for field in ("title", "body", "rank", "labels"):
         assert f'name="{field}"' in inside
         assert f'name="{field}"' not in outside, f"{field} is editable outside the control"
-    assert re.search(r'<textarea name="body">Some \*\*bold\*\* text</textarea>', inside)
+    assert re.search(r'<textarea name="body"[^>]*>Some \*\*bold\*\* text</textarea>', inside)
     assert "Edit body" not in html, "no nested Edit body control"
     assert "<strong>bold</strong>" in outside
     assert re.search(r"<h1>MS-\d+ item</h1>", outside), "the title reads as the heading"
@@ -5852,3 +5852,70 @@ def test_ab79_a_workflow_card_shows_its_first_steps_creator(board, client):
     core.create(board, "MS", "unrelated", actor="overlord", actor_kind=AGENT)
     b = badge(wf_card(client.get("/").text, wf["id"]))
     assert f">{web.initials(CHAOS)}<" in b
+
+
+# --- AB-87: @ in a body or note box offers the board's known people ------------
+
+
+def test_ab87_every_body_and_note_box_offers_mentions(client, board):
+    iid = idea(board)
+    core.annotate(board, iid, "hi", actor="other@example.com", actor_kind=HUMAN)
+    page_ = client.get(f"/issues/{iid}", headers=AS_CHAOS).text
+    boxes = re.findall(r"<textarea[^>]*>", page_)
+    assert all("data-mention" in b for b in boxes if 'name="body"' in b or 'name="note"' in b)
+    assert sum('name="body"' in b or 'name="note"' in b for b in boxes) >= 2
+    people = json.loads(re.search(r'<script type="application/json" id="mention-people">'
+                                  r"(.*?)</script>", page_, re.S).group(1))
+    assert people == sorted([CHAOS, "other@example.com"])
+    new = client.get("/", headers=AS_CHAOS).text
+    assert re.search(r'<textarea name="body" data-mention>', new)
+    assert 'id="mention-people"' in new
+
+
+def test_ab87_the_people_list_cannot_close_its_script_tag(client, board):
+    iid = core.create(board, "MS", "x", actor="overlord", actor_kind="agent",
+                      creator="</script><b>x@example.com")["id"]
+    page_ = client.get(f"/issues/{iid}", headers=AS_CHAOS).text
+    assert "</script><b>" not in page_
+
+
+def test_ab87_the_menu_opens_only_on_an_at_being_typed(client, board):
+    src = js_function(client.get(f"/issues/{idea(board)}", headers=AS_CHAOS).text,
+                      "mentionQuery")
+    cases = [("@", 1), ("hi @ow", 6), ("hi @ow", 4), ("(@ow", 4), ("me@ow", 5),
+             ("@ow x", 5), ("a\n@o.w", 6), ("", 0)]
+    assert run_js(src, "[" + ",".join(f"mentionQuery({json.dumps(t)}, {c})"
+                                      for t, c in cases) + "]") == [
+        {"start": 0, "text": ""}, {"start": 3, "text": "ow"}, {"start": 3, "text": ""},
+        {"start": 1, "text": "ow"}, None, None, {"start": 2, "text": "o.w"}, None]
+
+
+def test_ab87_matches_put_a_prefix_first_and_ignore_case(client, board):
+    src = js_function(client.get(f"/issues/{idea(board)}", headers=AS_CHAOS).text,
+                      "mentionMatches")
+    people = ["alice@x.com", "bob.smith@y.org", "smith@z.net"]
+    assert run_js(src, f"[mentionMatches({json.dumps(people)}, 'SMI'),"
+                       f" mentionMatches({json.dumps(people)}, ''),"
+                       f" mentionMatches({json.dumps(people)}, 'zz')]") == [
+        ["smith@z.net", "bob.smith@y.org"], people, []]
+
+
+def test_ab87_picking_writes_the_full_address_at_the_caret(client, board):
+    src = js_function(client.get(f"/issues/{idea(board)}", headers=AS_CHAOS).text,
+                      "mentionQuery", "mentionPick")
+    assert run_js(src, "[mentionPick('ask @ow about it', 7, 4, 'owner@example.com'),"
+                       " mentionPick('cc @o', 5, 3, 'owner@example.com')]") == [
+        {"text": "ask @owner@example.com about it", "caret": 23},
+        {"text": "cc @owner@example.com ", "caret": 22}]
+
+
+def test_ab87_picking_after_the_caret_moved_off_the_at_changes_nothing(client, board):
+    # The menu remembers where its "@..." started. Clicking, End or an arrow
+    # key moves the caret without an input event, and picking then must not
+    # splice from the old start to the new caret, deleting or duplicating text.
+    page = client.get(f"/issues/{idea(board)}", headers=AS_CHAOS).text
+    src = js_function(page, "mentionQuery", "mentionPick")
+    assert run_js(src, "[mentionPick('hello @ow world', 15, 6, 'owner@example.com'),"
+                       " mentionPick('hello @ow world', 2, 6, 'owner@example.com'),"
+                       " mentionPick('hello @ow world', 9, 6, 'owner@example.com')]") == [
+        None, None, {"text": "hello @owner@example.com world", "caret": 25}]

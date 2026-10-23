@@ -142,7 +142,8 @@ def build_server(engine, actor: str | Callable[[], str], brain=_FROM_ENV,
         label. `project`, `label`, `assignee` and `creator` match exactly;
         `assignee` also matches the lease holder, and `creator` is whoever
         created the issue. `involved` is a person who created the issue,
-        had it created for them, or wrote any event on it as a human. No
+        had it created for them, wrote any event on it as a human, or is
+        mentioned as `@<email>` or `@<local part>` in its body or a note. No
         filter lists every issue. No match is
         {"issues": []}, not an error.
         """

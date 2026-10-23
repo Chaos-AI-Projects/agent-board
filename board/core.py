@@ -234,13 +234,14 @@ def unseen(engine, actor: str) -> set[str]:
     """The ids of finished cards `actor` has not looked at since (AB-67).
 
     A card is theirs when they created it, an agent created it for them, or
-    they wrote any event on it as a human. It is unseen when an agent's run
+    they wrote any event on it as a human, or the body or a note mentions
+    them (AB-87). It is unseen when an agent's run
     on it ended after both their last opening of it and their own last
     event on it, and no agent is working it again now.
     """
     with store.session(engine) as s:
         mine = _by_person(actor)
-        theirs = _involves(actor)
+        theirs = _involves(s, actor)
         finished = (select(func.max(Event.id)).where(Event.issue_id == Issue.id, _finishes())
                     .correlate(Issue).scalar_subquery())
         acted = (select(func.max(Event.id)).where(Event.issue_id == Issue.id, mine)
@@ -259,12 +260,63 @@ def _by_person(actor: str):
     return (Event.actor == actor) & (Event.actor_kind == "human")
 
 
-def _involves(actor: str):
+def _involves(s, actor: str):
     """Whether the issue is `actor`'s (AB-67, AB-70): they created it, an agent
-    created it for them, or they wrote any event on it as a human."""
-    return exists().where(Event.issue_id == Issue.id,
-                          or_(_by_person(actor), (Event.kind == "create")
-                              & (Event.on_behalf_of == actor)))
+    created it for them, they wrote any event on it as a human, or the body
+    or any note mentions them (AB-87)."""
+    return or_(exists().where(Event.issue_id == Issue.id,
+                              or_(_by_person(actor), (Event.kind == "create")
+                                  & (Event.on_behalf_of == actor))),
+               Issue.id.in_(_mentioning(s, actor)))
+
+
+def _mention(actor: str):
+    """`@<email>` or `@<local part>` naming `actor`, in any case (AB-87).
+
+    The `@` must not follow a word or address character, so an address that
+    merely contains the name is no mention, nor a `/`, so a URL path is none
+    either. The name must end there: not run on into a longer name, a `-`, a
+    `+tag`, a `.word` or another `@domain`, each of which is someone else's
+    address. Trailing punctuation is fine.
+    """
+    names = {actor, actor.split("@", 1)[0]} - {""}
+    alt = "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True))
+    return re.compile(rf"(?<![\w.+/-])@(?:{alt})(?![\w@+-]|\.\w)", re.IGNORECASE)
+
+
+def _mentioning(s, actor: str) -> list[str]:
+    """The ids of issues whose body or any note mentions `actor` (AB-87).
+
+    The database narrows to text holding `@<local part>` and `_mention`
+    decides, because LIKE cannot say where a name ends.
+    """
+    local = actor.split("@", 1)[0]
+    if not local:
+        return []
+    pattern = func.lower("%@" + _like_escape(local) + "%")
+    found = _mention(actor).search
+    hits = {i for i, body in s.execute(
+                select(Issue.id, Issue.body)
+                .where(func.lower(Issue.body).like(pattern, escape="\\")))
+            if found(body)}
+    hits |= {i for i, note in s.execute(
+                 select(Event.issue_id, Event.note)
+                 .where(func.lower(Event.note).like(pattern, escape="\\")))
+             if found(note)}
+    return sorted(hits)
+
+
+def people(engine) -> list[str]:
+    """Everyone the involved filter and the @-mention menu offer (AB-70, AB-87)."""
+    with store.session(engine) as s:
+        return _people(s)
+
+
+def _people(s) -> list[str]:
+    return sorted(
+        set(s.scalars(select(Event.actor).distinct().where(Event.actor_kind == "human")))
+        | set(s.scalars(select(Event.on_behalf_of).distinct()
+                        .where(Event.on_behalf_of.is_not(None)))))
 
 
 def mark_seen(engine, actor: str, issue_id: str) -> None:
@@ -465,11 +517,7 @@ def overview(engine, *, q: str | None = None, project: str | None = None,
                                          .where(Event.kind == "create"))),
             "templates": [{"name": t.name, "title": t.title}
                           for t in s.scalars(select(Template).order_by(Template.name))],
-            "people": sorted(
-                set(s.scalars(select(Event.actor).distinct()
-                              .where(Event.actor_kind == "human")))
-                | set(s.scalars(select(Event.on_behalf_of).distinct()
-                                .where(Event.on_behalf_of.is_not(None))))),
+            "people": _people(s),
             "issues": _search(s, q, project, label, assignee, creator, involved),
             "workflows": [_workflow_view(s, wf)
                           for wf in s.scalars(select(Workflow).order_by(Workflow.id))],
@@ -548,7 +596,7 @@ def _search(s, q, project, label, assignee, creator=None, involved=None, newest_
         stmt = stmt.where(exists().where(Event.issue_id == Issue.id, Event.kind == "create",
                                          _creator_col() == creator))
     if involved:
-        stmt = stmt.where(_involves(involved))
+        stmt = stmt.where(_involves(s, involved))
     issues = list(s.scalars(stmt))
     return [_row(i) | {"creator": c} for i, c in zip(issues, _creators(s, issues))]
 

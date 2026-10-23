@@ -934,6 +934,7 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         buckets = core.colour_buckets(engine)
         ctx |= {"me": me.email if me else None, "lease_status": lease_status,
                 "unseen": unseen(request),
+                "people": lambda: core.people(engine),
                 "recent": core.recent_projects(engine, me.email) if me else None,
                 "project_colour": lambda key: project_colour(key, buckets.get(key)),
                 "tz": zone(saved_tz) or default_tz, "inline_types": INLINE_TYPES,

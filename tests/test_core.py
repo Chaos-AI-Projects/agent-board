@@ -2643,3 +2643,53 @@ def test_ab86_a_note_queues_a_held_parent_whose_unfinished_step_was_cancelled(bo
     assert place(core.show(board, iid)) == ("implement", "on-hold")
     issue = core.annotate(board, iid, "wrap it up", actor=CHAOS, actor_kind=HUMAN)
     assert place(issue) == ("implement", "ready")
+
+
+# --- AB-87: a person mentioned in a card's body or notes is involved in it -----
+
+
+def test_ab87_a_mention_in_the_body_by_email_or_local_part_involves_the_person(board):
+    by_email = core.create(board, "MS", "a", actor=OTHER, actor_kind=HUMAN,
+                           body=f"over to @{CHAOS} for this")["id"]
+    by_name = core.create(board, "MS", "b", actor=OTHER, actor_kind=HUMAN,
+                          body="@OWNER, can you look?")["id"]
+    core.create(board, "MS", "c", actor=OTHER, actor_kind=HUMAN, body="no mention here")
+    assert sorted(ids(core.search(board, involved=CHAOS))) == sorted([by_email, by_name])
+
+
+def test_ab87_a_mention_in_any_note_involves_the_person_whoever_wrote_it(board):
+    human = core.create(board, "MS", "a", actor=OTHER, actor_kind=HUMAN)["id"]
+    core.annotate(board, human, "cc @owner", actor=OTHER, actor_kind=HUMAN)
+    agent = core.create(board, "MS", "b", actor=OTHER, actor_kind=HUMAN)["id"]
+    core.annotate(board, agent, f"asking @{CHAOS}.", actor="overlord", actor_kind=AGENT)
+    assert sorted(ids(core.search(board, involved=CHAOS))) == sorted([human, agent])
+
+
+@pytest.mark.parametrize("text", [
+    "mail owner@example.com directly",   # an address, not a mention
+    "@owners meeting",                   # a longer name
+    "@owner-team",
+    "@owner.team",
+    "@owner@elsewhere.org",              # someone else with the same local part
+    "x@owner",                           # inside a word
+    "@owner+tag",                        # a plus address is a different address
+    "@owner+tag@example.com",
+    "see https://m.social/@owner",       # a URL path, not a mention
+])
+def test_ab87_text_that_only_contains_the_name_is_not_a_mention(board, text):
+    core.create(board, "MS", "a", actor=OTHER, actor_kind=HUMAN, body=text)
+    assert ids(core.search(board, involved=CHAOS)) == []
+
+
+def test_ab87_a_mentioned_person_sees_the_finished_card_as_unseen(board):
+    iid = core.create(board, "MS", "x", actor=OTHER, actor_kind=HUMAN, stage="implement",
+                      body="needs @owner's sign-off")["id"]
+    agent_run(board, iid)
+    assert core.unseen(board, CHAOS) == {iid}
+
+
+def test_ab87_people_lists_everyone_the_autocomplete_offers(board):
+    iid = core.create(board, "MS", "y", actor="overlord", actor_kind=AGENT,
+                      creator="third@example.com")["id"]
+    core.annotate(board, iid, "hi", actor=OTHER, actor_kind=HUMAN)
+    assert core.people(board) == sorted([OTHER, "third@example.com"])

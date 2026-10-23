@@ -123,7 +123,7 @@
 <form autocomplete="off" method="post" action="/issues/{{ issue.id }}/edit{{ embed_q }}" enctype="multipart/form-data">
   <input type="hidden" name="version" value="{{ issue.version }}">
   <label>Title <input name="title" value="{{ issue.title }}" size="60"></label>
-  <label>Body <textarea name="body">{{ issue.body }}</textarea></label>
+  <label>Body <textarea name="body" data-mention>{{ issue.body }}</textarea></label>
   <label>Rank <input name="rank" value="{{ issue.rank }}" size="6"></label>
   <label>Labels <input name="labels" value="{{ issue.labels|join(', ') }}"></label>
   <label>Attach files <input type="file" name="files" multiple></label>
@@ -182,7 +182,7 @@
 {% if issue.stage == "done" %}
 <h2>Reopen</h2>
 <form autocomplete="off" method="post" action="/issues/{{ issue.id }}/reopen{{ embed_q }}">
-  <textarea name="note" required placeholder="Why it needs more work"></textarea>
+  <textarea name="note" required placeholder="Why it needs more work" data-mention></textarea>
   <button class="primary">Reopen</button>
   <div>Sends this card back to ready, where board next hands it out again. The reason goes in its history.</div>
 </form>
@@ -193,7 +193,7 @@
   <input type="hidden" name="version" value="{{ issue.version }}">
   <input type="hidden" name="from_stage" value="{{ issue.stage }}">
   <input type="hidden" name="from_queue" value="{{ issue.queue or "" }}">
-  <textarea name="note" required placeholder="Ctrl+Enter (Cmd+Enter on a Mac) sends"></textarea>
+  <textarea name="note" required placeholder="Ctrl+Enter (Cmd+Enter on a Mac) sends" data-mention></textarea>
   <label>Files <input type="file" name="files" multiple></label>
   <div class="note-actions">
     <label>Stage <select name="stage" data-current="{{ issue.stage }}">{% for s in stages %}<option title="{{ stage_hints[s] }}"{% if s == issue.stage %} selected{% endif %}>{{ s }}</option>{% endfor %}</select></label>
@@ -311,4 +311,5 @@
     });
   })();
 </script>
+{% include "_mention.html" %}
 {% endblock %}

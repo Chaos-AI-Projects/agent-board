@@ -8,7 +8,7 @@
   <label>Label <select name="label"><option value="">any</option>{% for l in view.labels %}<option value="{{ l }}"{% if l == filters.label %} selected{% endif %}>{{ l }}</option>{% endfor %}</select></label>
   <label>Assignee <select name="assignee"><option value="">any</option>{% for a in view.assignees %}<option value="{{ a }}"{% if a == filters.assignee %} selected{% endif %}>{{ a }}</option>{% endfor %}</select></label>
   <label>Creator <select name="creator"><option value="">any</option>{% for c in view.creators %}<option value="{{ c }}"{% if c == filters.creator %} selected{% endif %}>{{ c }}</option>{% endfor %}</select></label>
-  <label title="Created it, had it created for them, or acted on it">Involved <select name="involved"><option value="">anyone</option>{% for p in view.people %}<option value="{{ p }}"{% if p == filters.involved %} selected{% endif %}>{{ p }}</option>{% endfor %}</select></label>
+  <label title="Created it, had it created for them, acted on it, or is @-mentioned in it">Involved <select name="involved"><option value="">anyone</option>{% for p in view.people %}<option value="{{ p }}"{% if p == filters.involved %} selected{% endif %}>{{ p }}</option>{% endfor %}</select></label>
   {% if me %}<label><input type="checkbox" name="unseen" value="1"{% if filters.unseen %} checked{% endif %}> Only finished cards I have not opened</label>{% endif %}
   <button>Search</button>{% if searched %} <a href="/search">Clear</a>{% endif %}
 </form>

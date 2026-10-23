@@ -71,7 +71,7 @@
       <label>Project name <input name="new_project_name" size="40"></label>
     </fieldset>
     <label>Title <input name="title" required size="60"></label>
-    <label>Body <textarea name="body"></textarea></label>
+    <label>Body <textarea name="body" data-mention></textarea></label>
     <label>Stage <select name="stage"><option>backlog</option><option>planning</option><option>implement</option></select></label>
     <label>Labels <input name="labels" placeholder="comma, separated"></label>
     {# AB-61: the same cron and zone pair as the card page's schedule form.
@@ -425,4 +425,5 @@
     sync();
   });
 </script>
+{% include "_mention.html" %}
 {% endblock %}

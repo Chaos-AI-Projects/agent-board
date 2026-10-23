@@ -1,0 +1,100 @@
+{# AB-87: @ typed in a textarea marked data-mention offers the board's known
+   people. Choosing one writes @<email>, which core reads as a mention. #}
+<script type="application/json" id="mention-people">{{ people()|tojson }}</script>
+<script>
+  // The "@..." typed just before the caret, or null: the @ must start the
+  // text or follow something that cannot be part of an address.
+  function mentionQuery(text, caret) {
+    var m = /(^|[^\w.+\/-])@([\w.+-]*)$/.exec(text.slice(0, caret));
+    return m ? {start: caret - m[2].length - 1, text: m[2]} : null;
+  }
+  // Addresses starting with the query, then the ones containing it elsewhere.
+  function mentionMatches(people, query) {
+    var q = query.toLowerCase();
+    function at(p) { return p.toLowerCase().indexOf(q); }
+    return people.filter(function (p) { return at(p) === 0; })
+      .concat(people.filter(function (p) { return at(p) > 0; }));
+  }
+  // The text with the "@..." from `start` to the caret replaced by the full
+  // address and one space, and the caret after that space. Null when the
+  // caret has since left that "@...", so a click or arrow key that moved it
+  // cannot splice the wrong span.
+  function mentionPick(text, caret, start, email) {
+    var q = mentionQuery(text, caret);
+    if (!q || q.start !== start) return null;
+    var rest = text.slice(caret), head = text.slice(0, start) + "@" + email;
+    if (/^\s/.test(rest)) return {text: head + rest, caret: head.length + 1};
+    return {text: head + " " + rest, caret: head.length + 1};
+  }
+  (function () {
+    var people = JSON.parse(document.getElementById("mention-people").textContent);
+    if (!people.length) return;
+    var menu = document.createElement("ul"), field = null, found = null, items = [], active = 0;
+    menu.className = "mention-menu";
+    menu.setAttribute("role", "listbox");
+    menu.hidden = true;
+    document.body.appendChild(menu);
+    function close() { menu.hidden = true; field = null; }
+    function highlight() {
+      Array.prototype.forEach.call(menu.children, function (li, i) {
+        li.classList.toggle("active", i === active);
+        li.setAttribute("aria-selected", i === active ? "true" : "false");
+      });
+    }
+    function choose(i) {
+      var ta = field, out = mentionPick(ta.value, ta.selectionStart, found.start, items[i]);
+      if (!out) return close();
+      ta.value = out.text;
+      ta.setSelectionRange(out.caret, out.caret);
+      close();
+      ta.focus();
+    }
+    function update(ta) {
+      var q = ta.selectionStart === ta.selectionEnd && mentionQuery(ta.value, ta.selectionStart);
+      items = q ? mentionMatches(people, q.text).slice(0, 8) : [];
+      if (!items.length) return close();
+      field = ta;
+      found = q;
+      active = 0;
+      menu.textContent = "";
+      items.forEach(function (p, i) {
+        var li = document.createElement("li");
+        li.textContent = p;
+        li.setAttribute("role", "option");
+        // mousedown, not click: a click would blur the box and close the menu first.
+        li.addEventListener("mousedown", function (ev) { ev.preventDefault(); choose(i); });
+        menu.appendChild(li);
+      });
+      highlight();
+      var r = ta.getBoundingClientRect();
+      menu.style.left = (r.left + window.scrollX) + "px";
+      menu.style.top = (r.bottom + window.scrollY) + "px";
+      menu.hidden = false;
+    }
+    document.addEventListener("input", function (ev) {
+      if (ev.target.matches && ev.target.matches("textarea[data-mention]")) update(ev.target);
+    });
+    document.addEventListener("focusout", function (ev) { if (ev.target === field) close(); });
+    // Capture, so Enter and Escape reach the menu before the box's own
+    // handlers. Ctrl+Enter still sends the note (AB-82).
+    document.addEventListener("keydown", function (ev) {
+      if (menu.hidden || ev.target !== field || ev.isComposing) return;
+      // The caret moved off the "@..." without typing: let the key do its
+      // own thing rather than pick into the wrong place.
+      var q = mentionQuery(field.value, field.selectionStart);
+      if (!q || q.start !== found.start) return close();
+      if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
+        active = (active + (ev.key === "ArrowDown" ? 1 : items.length - 1)) % items.length;
+        highlight();
+      } else if ((ev.key === "Enter" && !ev.ctrlKey && !ev.metaKey) || ev.key === "Tab") {
+        choose(active);
+      } else if (ev.key === "Escape") {
+        close();
+      } else {
+        return;
+      }
+      ev.preventDefault();
+      ev.stopPropagation();
+    }, true);
+  })();
+</script>
