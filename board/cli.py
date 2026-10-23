@@ -115,7 +115,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--preempt", action="store_true")
     writes(sp)
 
-    sp = op("annotate", help="append a note")
+    sp = op("annotate", help="append a note; a person's note queues a waiting card, or an "
+                              "on-hold plan parent with a step not done, as ready")
     sp.add_argument("id")
     sp.add_argument("--note", required=True)
     sp.add_argument("--wake", action=argparse.BooleanOptionalAction, default=True,

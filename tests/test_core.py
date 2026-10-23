@@ -2566,3 +2566,80 @@ def test_ab79_overview_cards_carry_their_creator(board):
     by_id = {i["id"]: i for i in core.overview(board)["issues"]}
     assert by_id[mine]["creator"] == "overlord"
     assert by_id[theirs]["creator"] == "jun.sheng@example.com"
+
+
+# --- AB-86: a person's note wakes an on-hold parent with unfinished steps --------
+
+
+def test_ab86_a_persons_note_queues_a_held_parent_ready(board):
+    iid, steps = planned(board)
+    issue = core.annotate(board, iid, "start on the docs now", actor=CHAOS, actor_kind=HUMAN)
+    assert place(issue) == ("implement", "ready")
+    last = issue["events"][-1]
+    assert ((last["from_queue"], last["to_queue"]), last["actor"]) == (
+        ("on-hold", "ready"), CHAOS)
+    assert [place(core.show(board, s)) for s in steps] == [("implement", "ready")] * 2
+
+
+def test_ab86_a_note_with_wake_false_leaves_a_held_parent_on_hold(board):
+    iid, _ = planned(board)
+    issue = core.annotate(board, iid, "see PR #1", actor=CHAOS, actor_kind=HUMAN, wake=False)
+    assert place(issue) == ("implement", "on-hold")
+
+
+def test_ab86_a_note_on_an_on_hold_card_with_no_plan_leaves_it_on_hold(board):
+    iid = ready(board)
+    core.queue(board, iid, "on-hold", actor=CHAOS, actor_kind=HUMAN)
+    issue = core.annotate(board, iid, "a thought", actor=CHAOS, actor_kind=HUMAN)
+    assert place(issue) == ("implement", "on-hold")
+
+
+def test_ab86_a_note_on_a_held_parent_whose_steps_are_done_leaves_it_on_hold(board):
+    iid, _ = planned(board, steps=("a",))
+    claim = core.next(board, "w2")
+    core.move(board, claim["issue"]["id"], "done", note="did a", actor="w2",
+              actor_kind=AGENT, token=claim["lease_token"])
+    core.queue(board, iid, "on-hold", actor=CHAOS, actor_kind=HUMAN)
+    issue = core.annotate(board, iid, "a thought", actor=CHAOS, actor_kind=HUMAN)
+    assert place(issue) == ("implement", "on-hold")
+
+
+def test_ab86_a_note_on_a_step_leaves_its_held_parent_on_hold(board):
+    iid, [first, _] = planned(board)
+    core.annotate(board, first, "a step note", actor=CHAOS, actor_kind=HUMAN)
+    assert place(core.show(board, iid)) == ("implement", "on-hold")
+
+
+def test_ab86_a_replayed_note_queues_the_parent_once(board):
+    iid, _ = planned(board)
+    for _ in range(2):
+        issue = core.annotate(board, iid, "go", actor=CHAOS, actor_kind=HUMAN,
+                              request_id="r1")
+    assert place(issue) == ("implement", "ready")
+    assert sum(e["from_queue"] == "on-hold" for e in issue["events"]) == 1
+
+
+def test_ab86_reopening_a_step_leaves_a_parent_a_persons_note_woke_where_it_is(board):
+    iid, [first, _] = planned(board)
+    claim = core.next(board, "w2")
+    assert claim["issue"]["id"] == first
+    core.move(board, first, "done", note="did design", actor="w2", actor_kind=AGENT,
+              token=claim["lease_token"])
+    core.annotate(board, iid, "start on the docs now", actor=CHAOS, actor_kind=HUMAN)
+    reopen(board, first)
+    origin = core.show(board, iid)
+    assert place(origin) == ("implement", "ready")
+    last = origin["events"][-1]
+    assert (last["kind"], last["actor_kind"]) == ("annotate", "system")
+    assert first in last["note"]
+
+
+def test_ab86_a_note_queues_a_held_parent_whose_unfinished_step_was_cancelled(board):
+    iid, [first, second] = planned(board)
+    claim = core.next(board, "w2")
+    core.move(board, first, "done", note="did design", actor="w2", actor_kind=AGENT,
+              token=claim["lease_token"])
+    core.move(board, second, "cancelled", note="not needed", actor=CHAOS, actor_kind=HUMAN)
+    assert place(core.show(board, iid)) == ("implement", "on-hold")
+    issue = core.annotate(board, iid, "wrap it up", actor=CHAOS, actor_kind=HUMAN)
+    assert place(issue) == ("implement", "ready")

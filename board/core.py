@@ -755,7 +755,8 @@ def annotate(engine, issue_id: str, note: str, *, actor: str, actor_kind: str,
 
     `attachments` are files already stored on disk, as `_attach` describes;
     they hang off this note's event. A human note on a need-input card is
-    the answer, so it sends the card back to ready (AB-10). `wake=False`
+    the answer, so it sends the card back to ready (AB-10), and so does one
+    on an on-hold plan parent whose steps are unfinished (AB-86). `wake=False`
     leaves the queue alone, so a pointer note starts no job (AB-85).
     """
     # A waking note hashes as it did before AB-85, so a retry spanning the
@@ -773,6 +774,7 @@ def annotate(engine, issue_id: str, note: str, *, actor: str, actor_kind: str,
         _attach(s, issue, ev.id, attachments, actor, now)
         if wake:
             _release_answered(s, issue, actor, actor_kind, now)
+            _release_parent(s, issue, actor, actor_kind, now)
         return _view(s, issue)
 
     return _write(engine, key, body, _replay_view,
@@ -1694,8 +1696,9 @@ def _reopen(s, issue, actor, now):
 
     A closing artifact would hide the card from `next`, so it stops closing;
     the artifact stays. A reopened step sends a plan origin that came back
-    to `ready` and nobody has claimed since back to `onhold`, to wait for
-    the step again; any other origin stays where it is, with a note.
+    to `ready` by itself and nobody has claimed since back to `onhold`, to
+    wait for the step again. An origin a person's note woke (AB-86), and any
+    other origin, stays where it is, with a note.
     Dependents need nothing here: `next` judges them, in `_candidates`.
     """
     _unclose(issue)
@@ -1708,8 +1711,9 @@ def _reopen(s, issue, actor, now):
                         .where(Event.issue_id == origin.id, Event.kind == "transition",
                                Event.to_queue == "ready")
                         .order_by(Event.id.desc()).limit(1)).first()
-    # Resumed, not since claimed and handed back by a checkpoint.
-    if origin.queue == "ready" and entered is not None and entered.from_queue == "on-hold":
+    # Resumed by the board, not since claimed and handed back by a checkpoint.
+    if (origin.queue == "ready" and entered is not None and entered.from_queue == "on-hold"
+            and entered.actor_kind == "system"):
         origin.queue = "on-hold"
         origin.version += 1
         origin.updated_at = now
@@ -1745,6 +1749,23 @@ def _release_answered(s, issue, actor, actor_kind, now):
     if actor_kind == "human" and _waiting(issue):
         _set_place(s, issue, issue.state, "ready", None, actor, actor_kind, now, None,
                    key_used=True)
+
+
+def _release_parent(s, issue, actor, actor_kind, now):
+    """A human's note on an on-hold plan parent with a step not done queues it (AB-86).
+
+    Once every step is done the parent comes back by itself, in
+    `_resume_origin`, so a note then changes nothing. The steps keep their
+    queues.
+    """
+    wf = issue.plan
+    if actor_kind != "human" or wf is None or issue.queue != "on-hold":
+        return
+    states = s.scalars(select(Issue.state).where(Issue.workflow_id == wf.id))
+    if all(st == "done" for st in states):
+        return
+    _set_place(s, issue, issue.state, "ready", None, actor, actor_kind, now, None,
+               key_used=True)
 
 
 def _waiting(issue):

@@ -757,7 +757,7 @@ def test_ab84_plan_states_once_only_on_hold_and_undelivered_parent_notes(migrate
     [step] = [st["id"] for st in out["plan"]["steps"]]
     assert place(core.show(migrated, parent)) == ("implement", "on-hold")
     core.annotate(migrated, parent, "context for the steps", actor=CHAOS,
-                  actor_kind="human")
+                  actor_kind="human", wake=False)
     claim = ok(migrated, "next")
     assert claim["issue"]["id"] == step
     seen = json.dumps(claim["issue"])
@@ -786,3 +786,16 @@ def test_ab84_create_states_a_new_card_links_to_no_other(migrated):
         None, None, [], [])
     claimed_view = core.show(migrated, held)
     assert (claimed_view["depends_on"], claimed_view["blocks"]) == ([], [])
+
+
+def test_ab86_annotate_and_queue_state_a_note_wakes_a_held_parent(migrated):
+    board(migrated)
+    docs = descriptions(migrated)
+    assert "a plan's parent that is on-hold while any of its" in docs["annotate"]
+    assert "a person's note on a plan's parent with a step not done" in docs["queue"]
+    assert "A person's note on the parent queues it ready sooner" in docs["plan"]
+
+    parent, [step] = planned(migrated)
+    out = core.annotate(migrated, parent, "start now", actor=CHAOS, actor_kind="human")
+    assert place(out) == ("implement", "ready")
+    assert place(core.show(migrated, step)) == ("implement", "ready")

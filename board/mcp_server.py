@@ -182,8 +182,10 @@ def build_server(engine, actor: str | Callable[[], str], brain=_FROM_ENV,
         `next` sets processing. Within a stage, on-hold returns only through
         null: set null, then ready. An on-hold card holds no lease, so only a
         person can take it out. Other paths back to ready are not `queue`
-        calls: a `move` into another work stage queues the card as ready, and
-        a plan's parent comes back ready by itself when every step is done.
+        calls: a `move` into another work stage queues the card as ready, a
+        person's note on a plan's parent with a step not done queues it as
+        ready, and a plan's parent comes back ready by itself when every step
+        is done.
         Queuing a plan's parent changes the parent alone. Its steps keep
         their queues; `hold` and `resume` stop and restart them.
         `attachments` hang off the change's event.
@@ -200,9 +202,11 @@ def build_server(engine, actor: str | Callable[[], str], brain=_FROM_ENV,
         """Append a note to an issue, with `attachments` hanging off it.
 
         A person's note on a planning or implement card out of the queue
-        (queue null, waiting on an answer) queues it as ready. No other note
-        wakes a queue: an agent's note changes none, and neither does a note
-        on a card that is ready, processing or on-hold. A note never touches
+        (queue null, waiting on an answer) queues it as ready. So does a
+        person's note on a plan's parent that is on-hold while any of its
+        steps is not done. No other note wakes a queue: an agent's note
+        changes none, and neither does a note on a card that is ready or
+        processing, or on any other on-hold card. A note never touches
         another card, so a note on a plan's parent reaches none of its steps.
         `wake=false` leaves every queue alone, so a pointer note starts no job.
         """
@@ -281,10 +285,11 @@ def build_server(engine, actor: str | Callable[[], str], brain=_FROM_ENV,
         for a step. Each step is {"title", "body"?, "project"?}; project
         defaults to the issue's. The issue becomes the steps' parent and
         waits on-hold, releasing the lease, until every step is done. It
-        then comes back ready, for you to check and close. A step's claim
-        does not carry the parent's notes or body. It names the parent's id
-        and title, and only a `show` of that id reads the notes, so put what
-        a step needs in its body. When a person made the issue, the steps
+        then comes back ready, for you to check and close. A person's note
+        on the parent queues it ready sooner, while a step is not done. A
+        step's claim does not carry the parent's notes or body. It names the
+        parent's id and title, and only a `show` of that id reads the notes,
+        so put what a step needs in its body. When a person made the issue, the steps
         name that person as creator.
         """
         return run(core.plan, engine, id, steps, token=token, request_id=request_id, **who())

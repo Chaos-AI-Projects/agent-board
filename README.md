@@ -23,6 +23,7 @@ MCP in `board.oauth` and `board.remote`.
 except `heartbeat`, which only moves a lease expiry, and an `edit` whose form changed nothing.
 `plan` breaks an issue into a workflow of `ready` steps the caller lists. The issue goes `onhold`
 and returns to `ready` when the last step is done, so `next` hands it back to be checked.
+A person's note on that issue queues it as `ready` sooner, while a step is not done (AB-86).
 `hold` takes that issue's id, the plan's parent, and `next` hands out none of the plan's steps
 until `resume`. A step already claimed keeps its lease and can finish. Neither changes a stage or
 queue or needs a lease, and holding a held plan writes no event (AB-83).
@@ -90,7 +91,8 @@ board queue "$id" none --note "PR #600, please review" --token "$token"
 Without `--request-id`, a write under a lease gets the derived key from design section 8, so an
 exact retry collapses to one event.
 
-A person's note on a card waiting out of the queue answers it and queues it as ready.
+A person's note on a card waiting out of the queue answers it and queues it as ready, and so
+does one on an on-hold plan parent with a step not done.
 `annotate --no-wake` (MCP `wake: false`) records the note and leaves the queue alone, so a
 pointer note starts no job.
 
