@@ -177,9 +177,16 @@ def build_server(engine, actor: str | Callable[[], str], brain=_FROM_ENV,
               attachments: list[Upload] | None = None) -> CallToolResult:
         """Set a planning or implement card's queue status: ready, on-hold, or null.
 
-        Null takes the card out of the queue and needs a note, as when it
-        waits on a question. Only `next` sets processing. `attachments` hang
-        off the change's event.
+        Null takes a processing or on-hold card out of the queue, as when it
+        waits on a question; releasing a claim that way needs a note. Only
+        `next` sets processing. Within a stage, on-hold returns only through
+        null: set null, then ready. An on-hold card holds no lease, so only a
+        person can take it out. Other paths back to ready are not `queue`
+        calls: a `move` into another work stage queues the card as ready, and
+        a plan's parent comes back ready by itself when every step is done.
+        Queuing a plan's parent changes the parent alone. Its steps keep
+        their queues; `hold` and `resume` stop and restart them.
+        `attachments` hang off the change's event.
         """
         return run(lambda: core.queue(engine, id, status, note=note, token=token,
                                       request_id=request_id, preempt=preempt,
@@ -189,7 +196,14 @@ def build_server(engine, actor: str | Callable[[], str], brain=_FROM_ENV,
     def annotate(id: str, note: str, token: str | None = None,
                  request_id: str | None = None,
                  attachments: list[Upload] | None = None) -> CallToolResult:
-        """Append a note to an issue, with `attachments` hanging off it."""
+        """Append a note to an issue, with `attachments` hanging off it.
+
+        A person's note on a planning or implement card out of the queue
+        (queue null, waiting on an answer) queues it as ready. No other note
+        wakes a queue: an agent's note changes none, and neither does a note
+        on a card that is ready, processing or on-hold. A note never touches
+        another card, so a note on a plan's parent reaches none of its steps.
+        """
         return run(lambda: core.annotate(engine, id, note, token=token, request_id=request_id,
                                          attachments=_stored(attachments), **who()))
 
@@ -212,6 +226,9 @@ def build_server(engine, actor: str | Callable[[], str], brain=_FROM_ENV,
         """A new issue in `stage`: backlog, planning or implement.
 
         Planning and implement start queued as ready.
+        A new card is linked to no other card: no dependency, workflow or
+        plan, even when created while you hold another card's lease. Pass
+        `workflow_id` and `position` to make it a step, or call `depend`.
         `schedule` is five cron fields read in `timezone`, which defaults to
         $BOARD_TIMEZONE, else UTC; `next` skips the card until each due time.
         Runs must fall at least 5 minutes apart.
@@ -257,10 +274,15 @@ def build_server(engine, actor: str | Callable[[], str], brain=_FROM_ENV,
              request_id: str | None = None) -> CallToolResult:
         """Break a claimed issue into a workflow of ready steps, in the order given.
 
-        Each step is {"title", "body"?, "project"?}; project defaults to the
-        issue's. The issue's queue goes on-hold, releasing the lease, and comes back
-        ready when the last step is done, for you to check and close.
-        When a person made the issue, the steps name that person as creator.
+        An issue is planned once only: a second plan is refused, as is a plan
+        for a step. Each step is {"title", "body"?, "project"?}; project
+        defaults to the issue's. The issue becomes the steps' parent and
+        waits on-hold, releasing the lease, until every step is done. It
+        then comes back ready, for you to check and close. A step's claim
+        does not carry the parent's notes or body. It names the parent's id
+        and title, and only a `show` of that id reads the notes, so put what
+        a step needs in its body. When a person made the issue, the steps
+        name that person as creator.
         """
         return run(core.plan, engine, id, steps, token=token, request_id=request_id, **who())
 

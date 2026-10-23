@@ -646,3 +646,123 @@ def test_ab74_a_file_at_the_cap_in_wrapped_base64_is_kept(migrated, attach_dir, 
     [a] = core.show(migrated, out["id"])["attachments"]
     assert (a["size"], a["content_type"]) == (1048, "application/octet-stream")
     assert (attach_dir / hashlib.sha256(data).hexdigest()).read_bytes() == data
+
+
+def descriptions(engine):
+    """Each tool's description with its whitespace folded, for phrase checks."""
+    return {t.name: " ".join(t.description.split()) for t in list_tools(engine)}
+
+
+def planned(engine, steps=("a",)):
+    """A claimed issue planned into steps: (parent id, [step ids])."""
+    issue_id, token = claimed(engine)
+    out = ok(engine, "plan", id=issue_id, token=token, steps=[{"title": t} for t in steps])
+    return issue_id, [st["id"] for st in out["plan"]["steps"]]
+
+
+def test_ab84_annotate_states_which_queue_a_note_wakes(migrated):
+    board(migrated)
+    doc = descriptions(migrated)["annotate"]
+    assert "A person's note on a planning or implement card out of the queue" in doc
+    assert "queues it as ready" in doc
+    assert "never touches another card" in doc
+
+    busy, _ = claimed(migrated)
+    core.annotate(migrated, busy, "a note while it runs", actor=CHAOS, actor_kind="human")
+    assert place(core.show(migrated, busy)) == ("implement", "processing")
+
+    waiting = ready(migrated, "a question")
+    core.queue(migrated, waiting, "on-hold", actor=CHAOS, actor_kind="human")
+    core.queue(migrated, waiting, None, actor=CHAOS, actor_kind="human")
+    ok(migrated, "annotate", id=waiting, note="an agent's note")
+    assert place(core.show(migrated, waiting)) == ("implement", None)
+    out = core.annotate(migrated, waiting, "the answer", actor=CHAOS, actor_kind="human")
+    assert place(out) == ("implement", "ready")
+
+
+def test_ab84_a_note_on_a_parent_or_step_wakes_only_that_card(migrated):
+    board(migrated)
+    parent, [step] = planned(migrated)
+    human = {"actor": CHAOS, "actor_kind": "human"}
+    core.queue(migrated, parent, None, **human)
+    core.queue(migrated, step, "on-hold", **human)
+    core.queue(migrated, step, None, **human)
+
+    core.annotate(migrated, step, "a step answer", **human)
+    assert place(core.show(migrated, step)) == ("implement", "ready")
+    assert place(core.show(migrated, parent)) == ("implement", None)
+
+    core.queue(migrated, step, "on-hold", **human)
+    core.queue(migrated, step, None, **human)
+    core.annotate(migrated, parent, "a parent answer", **human)
+    assert place(core.show(migrated, parent)) == ("implement", "ready")
+    assert place(core.show(migrated, step)) == ("implement", None)
+
+
+def test_ab84_queue_states_on_hold_leaves_through_null_and_spares_steps(migrated):
+    board(migrated)
+    doc = descriptions(migrated)["queue"]
+    assert "Within a stage, on-hold returns only through null" in doc
+    assert "only a person can take it out" in doc
+    assert "a `move` into another work stage queues the card as ready" in doc
+    assert "Queuing a plan's parent changes the parent alone" in doc
+
+    parent, [step] = planned(migrated)
+    assert failed(migrated, "queue", id=parent, status=None, note="why")["error"] == "LeaseLost"
+    with pytest.raises(core.InvalidTransition):
+        core.queue(migrated, parent, "ready", actor=CHAOS, actor_kind="human")
+    core.queue(migrated, parent, None, actor=CHAOS, actor_kind="human")
+    out = core.queue(migrated, parent, "ready", actor=CHAOS, actor_kind="human")
+    assert place(out) == ("implement", "ready")
+    assert place(core.show(migrated, step)) == ("implement", "ready")
+
+    held = ready(migrated, "held")
+    core.queue(migrated, held, "on-hold", actor=CHAOS, actor_kind="human")
+    out = core.move(migrated, held, "planning", actor=CHAOS, actor_kind="human")
+    assert place(out) == ("planning", "ready")
+
+
+def test_ab84_plan_states_once_only_on_hold_and_undelivered_parent_notes(migrated):
+    board(migrated)
+    doc = descriptions(migrated)["plan"]
+    assert "An issue is planned once only" in doc
+    assert "waits on-hold" in doc
+    assert "until every step is done" in doc
+    assert "A step's claim does not carry the parent's notes or body" in doc
+
+    parent = core.create(migrated, "MS", "the parent", body="the parent's body",
+                         stage="implement", actor=CHAOS, actor_kind="human")["id"]
+    claim = ok(migrated, "next")
+    out = ok(migrated, "plan", id=parent, token=claim["lease_token"], steps=[{"title": "a"}])
+    [step] = [st["id"] for st in out["plan"]["steps"]]
+    assert place(core.show(migrated, parent)) == ("implement", "on-hold")
+    core.annotate(migrated, parent, "context for the steps", actor=CHAOS,
+                  actor_kind="human")
+    claim = ok(migrated, "next")
+    assert claim["issue"]["id"] == step
+    seen = json.dumps(claim["issue"])
+    assert "context for the steps" not in seen
+    assert "the parent's body" not in seen
+    assert claim["issue"]["workflow"]["origin_issue_id"] == parent
+    refused = failed(migrated, "plan", id=step, token=claim["lease_token"],
+                     steps=[{"title": "b"}])
+    assert refused["error"] == "BoardError"
+    ok(migrated, "move", id=step, stage="done", token=claim["lease_token"], note="did it")
+    again = ok(migrated, "next")
+    assert again["issue"]["id"] == parent
+    out = failed(migrated, "plan", id=parent, token=again["lease_token"],
+                 steps=[{"title": "b"}])
+    assert out["error"] == "Conflict"
+
+
+def test_ab84_create_states_a_new_card_links_to_no_other(migrated):
+    board(migrated)
+    doc = descriptions(migrated)["create"]
+    assert "A new card is linked to no other card" in doc
+
+    held, _ = claimed(migrated)
+    out = ok(migrated, "create", project="MS", title="found while working", stage="implement")
+    assert (out["workflow"], out["plan"], out["depends_on"], out["blocks"]) == (
+        None, None, [], [])
+    claimed_view = core.show(migrated, held)
+    assert (claimed_view["depends_on"], claimed_view["blocks"]) == ([], [])
