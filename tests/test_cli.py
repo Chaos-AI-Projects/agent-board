@@ -607,3 +607,14 @@ def test_ab69_instantiate_and_create_batch_take_a_creator(url):
     for i in [wf["steps"][0]["id"], *batch["ids"]]:
         out = ok(board(url, "show", i))
         assert (out["creator"], out["created_by_agent"]) == (CHAOS, "overlord")
+
+
+def test_ab85_annotate_no_wake_leaves_a_waiting_card_out_of_the_queue(url):
+    issue_id = ready(url)
+    token = claim(url)["lease_token"]
+    ok(board(url, "queue", issue_id, "none", "--note", "which option?", "--token", token))
+    human = ("--actor-kind", "human", "annotate", issue_id)
+    out = ok(board(url, *human, "--note", "a pointer", "--no-wake", actor=CHAOS))
+    assert place(out) == ("implement", None)
+    out = ok(board(url, *human, "--note", "the answer", actor=CHAOS))
+    assert place(out) == ("implement", "ready")

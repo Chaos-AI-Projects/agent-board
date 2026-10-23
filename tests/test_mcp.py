@@ -680,6 +680,26 @@ def test_ab84_annotate_states_which_queue_a_note_wakes(migrated):
     assert place(out) == ("implement", "ready")
 
 
+def test_ab85_annotate_takes_wake(migrated):
+    board(migrated)
+    doc = descriptions(migrated)["annotate"]
+    assert "`wake=false` leaves every queue alone" in doc
+
+    waiting = ready(migrated, "a question")
+    core.queue(migrated, waiting, "on-hold", actor=CHAOS, actor_kind="human")
+    core.queue(migrated, waiting, None, actor=CHAOS, actor_kind="human")
+
+    async def note(**arguments):
+        server = build_server(migrated, CHAOS, kind="human")
+        async with create_connected_server_and_client_session(server) as client:
+            result = await client.call_tool("annotate", {"id": waiting, **arguments})
+        assert not result.isError, result.content[0].text
+        return json.loads(result.content[0].text)
+
+    assert place(anyio.run(lambda: note(note="a pointer", wake=False))) == ("implement", None)
+    assert place(anyio.run(lambda: note(note="the answer"))) == ("implement", "ready")
+
+
 def test_ab84_a_note_on_a_parent_or_step_wakes_only_that_card(migrated):
     board(migrated)
     parent, [step] = planned(migrated)

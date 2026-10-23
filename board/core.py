@@ -750,15 +750,19 @@ def _place_op(engine, op, issue_id, place, args, actor, actor_kind, note, token,
 
 def annotate(engine, issue_id: str, note: str, *, actor: str, actor_kind: str,
              token: str | None = None, request_id: str | None = None,
-             attachments: list[dict] = ()) -> dict:
+             attachments: list[dict] = (), wake: bool = True) -> dict:
     """Append a note. A human note needs no lease; it cannot overwrite anything.
 
     `attachments` are files already stored on disk, as `_attach` describes;
     they hang off this note's event. A human note on a need-input card is
-    the answer, so it sends the card back to ready (AB-10).
+    the answer, so it sends the card back to ready (AB-10). `wake=False`
+    leaves the queue alone, so a pointer note starts no job (AB-85).
     """
+    # A waking note hashes as it did before AB-85, so a retry spanning the
+    # upgrade still collapses to one event.
+    quiet = [] if wake else ["no-wake"]
     key = (_scoped("annotate", issue_id, request_id)
-           or _derive(actor, "annotate", issue_id, token, note, *_digests(attachments)))
+           or _derive(actor, "annotate", issue_id, token, note, *_digests(attachments), *quiet))
 
     def body(s):
         issue = _get(s, issue_id, lock=True)
@@ -767,11 +771,12 @@ def annotate(engine, issue_id: str, note: str, *, actor: str, actor_kind: str,
             _check_token(s, issue, actor, token)
         ev = _event(s, issue.id, now, actor, actor_kind, "annotate", None, None, note, key)
         _attach(s, issue, ev.id, attachments, actor, now)
-        _release_answered(s, issue, actor, actor_kind, now)
+        if wake:
+            _release_answered(s, issue, actor, actor_kind, now)
         return _view(s, issue)
 
     return _write(engine, key, body, _replay_view,
-                  [note, actor, actor_kind, token, *_digests(attachments)])
+                  [note, actor, actor_kind, token, *_digests(attachments), *quiet])
 
 
 def attachment(engine, attachment_id: int) -> dict:

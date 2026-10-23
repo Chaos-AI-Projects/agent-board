@@ -118,6 +118,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp = op("annotate", help="append a note")
     sp.add_argument("id")
     sp.add_argument("--note", required=True)
+    sp.add_argument("--wake", action=argparse.BooleanOptionalAction, default=True,
+                    help="--no-wake leaves the queue alone, so a pointer note starts no job")
     writes(sp)
 
     sp = op("link", help="attach a commit, PR, path or URL")
@@ -236,7 +238,7 @@ def _run(engine, a) -> dict | None:
                               request_id=a.request_id, preempt=a.preempt, **who)
         case "annotate":
             return core.annotate(engine, a.id, a.note, token=a.token,
-                                 request_id=a.request_id, **who)
+                                 request_id=a.request_id, wake=a.wake, **who)
         case "link":
             return core.link(engine, a.id, a.artifact, kind=a.kind, closes=a.closes,
                              name=a.name, token=a.token, request_id=a.request_id, **who)

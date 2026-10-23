@@ -248,6 +248,30 @@ def test_ab10_a_human_note_replayed_moves_once(board):
         "the create and one release, not two releases"
 
 
+def test_ab85_a_note_with_wake_false_leaves_a_waiting_card_out_of_the_queue(board):
+    iid, _ = asking(board)
+    issue = core.annotate(board, iid, "see PR #1", actor=CHAOS, actor_kind=HUMAN, wake=False)
+    assert place(issue) == ("implement", None)
+    assert issue["events"][-1]["kind"] == "annotate"
+    assert core.next(board, "w2") is None
+
+
+def test_ab85_wake_defaults_to_true(board):
+    iid, _ = asking(board)
+    assert place(core.annotate(board, iid, "option B", actor=CHAOS,
+                               actor_kind=HUMAN)) == ("implement", "ready")
+
+
+def test_ab85_a_replay_under_one_request_id_must_agree_on_wake(board):
+    iid, _ = asking(board)
+    core.annotate(board, iid, "option B", actor=CHAOS, actor_kind=HUMAN,
+                  request_id="r1", wake=False)
+    with pytest.raises(core.Conflict):
+        core.annotate(board, iid, "option B", actor=CHAOS, actor_kind=HUMAN,
+                      request_id="r1")
+    assert place(core.show(board, iid)) == ("implement", None)
+
+
 def test_an_agent_closes_its_own_card(board):
     """AB-23, superseding AB-9: an agent closes a standalone card under its lease."""
     iid = ready(board)

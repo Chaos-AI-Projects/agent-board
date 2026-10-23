@@ -195,7 +195,8 @@ def build_server(engine, actor: str | Callable[[], str], brain=_FROM_ENV,
     @mcp.tool()
     def annotate(id: str, note: str, token: str | None = None,
                  request_id: str | None = None,
-                 attachments: list[Upload] | None = None) -> CallToolResult:
+                 attachments: list[Upload] | None = None,
+                 wake: bool = True) -> CallToolResult:
         """Append a note to an issue, with `attachments` hanging off it.
 
         A person's note on a planning or implement card out of the queue
@@ -203,9 +204,11 @@ def build_server(engine, actor: str | Callable[[], str], brain=_FROM_ENV,
         wakes a queue: an agent's note changes none, and neither does a note
         on a card that is ready, processing or on-hold. A note never touches
         another card, so a note on a plan's parent reaches none of its steps.
+        `wake=false` leaves every queue alone, so a pointer note starts no job.
         """
         return run(lambda: core.annotate(engine, id, note, token=token, request_id=request_id,
-                                         attachments=_stored(attachments), **who()))
+                                         attachments=_stored(attachments), wake=wake,
+                                         **who()))
 
     @mcp.tool()
     def link(id: str, artifact: str, kind: str, closes: bool = False, name: str | None = None,

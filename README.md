@@ -90,6 +90,10 @@ board queue "$id" none --note "PR #600, please review" --token "$token"
 Without `--request-id`, a write under a lease gets the derived key from design section 8, so an
 exact retry collapses to one event.
 
+A person's note on a card waiting out of the queue answers it and queues it as ready.
+`annotate --no-wake` (MCP `wake: false`) records the note and leaves the queue alone, so a
+pointer note starts no job.
+
 ## Importing brain's backlog
 
 `board import-backlog` copies brain's `backlog/*.md` onto the board once. It reads the files through
