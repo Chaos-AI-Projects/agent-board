@@ -746,7 +746,17 @@ def counted_kind(actor: str, kind: str, agents=frozenset()) -> str:
     return kind
 
 
-def stats(engine, *, days: int = STATS_DAYS, limit: int = 50, agents=frozenset()) -> dict:
+def _counted_human(agents):
+    """`counted_kind(actor, kind, agents) == "human"` as a SQL condition (AB-91)."""
+    who = func.lower(Event.actor)
+    return or_(Event.actor_kind == "human",
+               and_(Event.actor_kind == "agent", who.contains("@", autoescape=True),
+                    ~who.endswith(SERVICE_ACCOUNT_SUFFIX, autoescape=True),
+                    who.not_in(sorted(a.lower() for a in agents))))
+
+
+def stats(engine, *, days: int = STATS_DAYS, limit: int = 50, agents=frozenset(),
+          humans_only: bool = False) -> dict:
     """What each actor did in the last `days` days, read from the event log (AB-29).
 
     Per actor and actor kind: `created` counts the cards each one created,
@@ -758,7 +768,9 @@ def stats(engine, *, days: int = STATS_DAYS, limit: int = 50, agents=frozenset()
     already in records an event but is not a move. `actors` is busiest first.
     `activity` is the newest `limit` events in the window, newest first by
     event id, because imported events share one timestamp. Kinds are as
-    `counted_kind` reads them, with `agents` passed through.
+    `counted_kind` reads them, with `agents` passed through. `humans_only`
+    leaves out every event that does not count as a human's, agent and system
+    alike, before `limit` is applied (AB-91).
     """
     if not 1 <= days <= STATS_DAYS_MAX:
         raise BoardError(f"the window is 1 to {STATS_DAYS_MAX} days, not {days}")
@@ -772,20 +784,23 @@ def stats(engine, *, days: int = STATS_DAYS, limit: int = 50, agents=frozenset()
     with store.session(engine) as s:
         now = store.db_now(s)
         since = now - timedelta(days=days)
+        window = Event.at >= since
+        if humans_only:
+            window = and_(window, _counted_human(agents))
         rows = s.execute(
             select(Event.actor, Event.actor_kind,
                    count(and_(Event.kind == "create", Event.on_behalf_of.is_(None))),
                    count(moved),
                    count(and_(moved, Event.to_state == "done")),
                    count(Event.kind == "annotate"), func.count())
-            .where(Event.at >= since).group_by(Event.actor, Event.actor_kind)).all()
+            .where(window).group_by(Event.actor, Event.actor_kind)).all()
         entered = s.execute(
             select(Event.on_behalf_of, func.count())
             .where(Event.at >= since, Event.kind == "create", Event.on_behalf_of.is_not(None))
             .group_by(Event.on_behalf_of)).all()
         activity = s.execute(
             select(Event, Issue.title).join(Issue, Event.issue_id == Issue.id)
-            .where(Event.at >= since).order_by(Event.id.desc()).limit(limit)).all()
+            .where(window).order_by(Event.id.desc()).limit(limit)).all()
         actors: dict[tuple[str, str], dict] = {}
         for a, k, *counts in rows:
             kind = counted_kind(a, k, agents)

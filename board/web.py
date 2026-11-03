@@ -1263,10 +1263,12 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
                     results=results if searched else [])
 
     @app.get("/stats", response_class=HTMLResponse)
-    def stats_page(request: Request, days: int = core.STATS_DAYS):
+    def stats_page(request: Request, days: int = core.STATS_DAYS, agents: bool = False):
+        # AB-91: agent and system activity stays out unless asked for.
         return page(request, "stats.html",
-                    stats=core.stats(engine, days=days, agents=auth.mapped_agents()),
-                    days_max=core.STATS_DAYS_MAX)
+                    stats=core.stats(engine, days=days, agents=auth.mapped_agents(),
+                                     humans_only=not agents),
+                    days_max=core.STATS_DAYS_MAX, show_agents=agents)
 
     @app.get("/preferences", response_class=HTMLResponse)
     def preferences_page(request: Request):

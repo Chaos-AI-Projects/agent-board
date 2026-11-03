@@ -3799,7 +3799,7 @@ def test_ab29_the_stats_page_counts_each_actors_activity(board, client):
     core.move(board, a, "done", actor="w1", actor_kind=AGENT, note="PR 1",
               token=claim["lease_token"])
     core.annotate(board, a, "nice", actor=CHAOS, actor_kind=HUMAN)
-    r = client.get("/stats")
+    r = client.get("/stats", params={"agents": 1})
     assert r.status_code == 200
     # actor, kind, created, moved, done, noted, events
     assert stats_row(r.text, CHAOS) == [CHAOS, HUMAN, "1", "0", "0", "1", "2"]
@@ -4330,7 +4330,7 @@ def test_ab48_the_stats_page_shows_a_human_emails_agent_events_as_human(board, c
     core.create(board, "MS", "a", actor=CHAOS, actor_kind=AGENT)
     core.create(board, "MS", "b", actor=CHAOS, actor_kind=HUMAN)
     core.create(board, "MS", "c", actor="mapped@example.com", actor_kind=AGENT)
-    html = client.get("/stats").text
+    html = client.get("/stats", params={"agents": 1}).text
     assert stats_row(html, CHAOS) == [CHAOS, HUMAN, "2", "0", "0", "0", "2"]
     assert stats_row(html, "mapped@example.com")[1] == AGENT
 
@@ -6136,3 +6136,40 @@ def test_ab90_following_needs_a_person_and_the_same_origin(client, board, monkey
     r = client.post(f"/profile/{OTHER}/follow", headers=AS_CHAOS | {"origin": "https://evil.example"})
     assert r.status_code == 403
     assert core.following(board, CHAOS) == []
+
+
+# --- AB-91: the stats page hides agent activity -------------------------------------------
+
+
+def _agent_and_human_activity(board):
+    a = ready(board, "worked card")
+    claim = core.next(board, "w1")
+    core.move(board, a, "done", actor="w1", actor_kind=AGENT, note="PR 1",
+              token=claim["lease_token"])
+    core.annotate(board, a, "nice", actor=CHAOS, actor_kind=HUMAN)
+
+
+def test_ab91_the_stats_page_hides_agent_activity_by_default(board, client):
+    _agent_and_human_activity(board)
+    html = client.get("/stats").text
+    assert stats_row(html, CHAOS)[1] == HUMAN
+    assert 'data-actor="w1"' not in html
+    recent = re.search(r'<ol class="activity">(.*?)</ol>', html, re.S).group(1)
+    assert "w1" not in recent and "PR 1" not in recent
+    assert 'href="/stats?days=14&amp;agents=1"' in html
+
+
+def test_ab91_the_stats_page_shows_agent_activity_when_asked(board, client):
+    _agent_and_human_activity(board)
+    html = client.get("/stats", params={"agents": 1}).text
+    assert stats_row(html, "w1") == ["w1", AGENT, "0", "2", "1", "0", "2"]
+    assert "PR 1" in re.search(r'<ol class="activity">(.*?)</ol>', html, re.S).group(1)
+    assert 'href="/stats?days=14"' in html
+
+
+def test_ab91_the_days_form_keeps_the_agent_choice(board, client):
+    html = client.get("/stats", params={"agents": 1, "days": 30}).text
+    form = re.search(r'<form method="get" action="/stats".*?</form>', html, re.S).group(0)
+    assert '<input type="hidden" name="agents" value="1">' in form
+    assert "agents" not in re.search(r'<form method="get" action="/stats".*?</form>',
+                                     client.get("/stats").text, re.S).group(0)

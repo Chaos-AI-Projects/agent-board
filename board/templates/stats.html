@@ -4,8 +4,12 @@
 <h1>Activity, last {{ stats.days }} days</h1>
 <form method="get" action="/stats" class="filters">
   <label>Days <input type="number" name="days" value="{{ stats.days }}" min="1" max="{{ days_max }}"></label>
+  {% if show_agents %}<input type="hidden" name="agents" value="1">{% endif %}
   <button>Show</button>
 </form>
+{% if show_agents %}<p class="meta">Agent and system activity is shown. <a href="/stats?days={{ stats.days }}">Hide it</a></p>
+{% else %}<p class="meta">Agent and system activity is hidden. <a href="/stats?days={{ stats.days }}&amp;agents=1">Show it</a></p>
+{% endif %}
 {% if stats.actors %}
 <table class="projects stats">
   <tr><th>Actor</th><th>Kind</th><th>Created</th><th>Moved</th><th>Done</th><th>Noted</th><th>All events</th></tr>

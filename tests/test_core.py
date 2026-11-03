@@ -2807,3 +2807,43 @@ def test_ab90_followed_by_finds_the_cards_followed_people_created(board):
     assert core.search(board, followed_by=CHAOS) == []
     core.follow(board, CHAOS, OTHER)
     assert sorted(i["id"] for i in core.search(board, followed_by=CHAOS)) == sorted([theirs, entered])
+
+
+# --- AB-91: stats can hide agent activity ----------------------------------------------
+
+
+def test_ab91_stats_for_humans_only_leave_out_agent_and_system_actors(board):
+    a = ready(board, "a")
+    claim = core.next(board, "w1")
+    core.move(board, a, "done", actor="w1", actor_kind=AGENT, note="PR 1",
+              token=claim["lease_token"])
+    core.create(board, "MS", "b", actor="tick", actor_kind="system")
+    core.create(board, "MS", "c", actor="mapped@example.com", actor_kind=AGENT)
+    core.create(board, "MS", "d", actor="Bot@P.iam.gserviceaccount.com", actor_kind=AGENT)
+    core.annotate(board, a, "thanks", actor=CHAOS, actor_kind=HUMAN)
+    view = core.stats(board, agents={"mapped@example.com"}, humans_only=True)
+    assert [(r["actor"], r["actor_kind"]) for r in view["actors"]] == [(CHAOS, HUMAN)]
+    assert {e["actor"] for e in view["activity"]} == {CHAOS}
+    assert {r["actor"] for r in core.stats(board)["actors"]} == \
+        {CHAOS, "w1", "tick", "mapped@example.com", "Bot@P.iam.gserviceaccount.com"}
+
+
+def test_ab91_stats_for_humans_only_keep_what_counts_as_human(board):
+    """A human's email stamped agent before AB-41 counts as human (AB-48), and a card an
+    agent entered for a person is credited to that person (AB-63)."""
+    core.create(board, "MS", "a", actor=CHAOS, actor_kind=AGENT)
+    core.create(board, "MS", "b", actor="overlord", actor_kind=AGENT,
+                creator="fiona@example.com")
+    rows = by_actor(core.stats(board, humans_only=True))
+    assert set(rows) == {CHAOS, "fiona@example.com"}
+    assert rows[CHAOS]["created"] == 1 and rows["fiona@example.com"]["created"] == 1
+
+
+def test_ab91_the_activity_limit_counts_human_events_only(board):
+    """Agent events newer than the human ones must not crowd them out of the list."""
+    a = ready(board, "a")
+    for n in range(5):
+        core.annotate(board, a, f"bot {n}", actor="w1", actor_kind=AGENT)
+    view = core.stats(board, limit=2, humans_only=True)
+    assert [e["kind"] for e in view["activity"]] == ["create"]
+    assert view["activity"][0]["actor"] == CHAOS
