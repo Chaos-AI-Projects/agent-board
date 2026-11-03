@@ -6001,3 +6001,40 @@ def test_ab88_a_hidden_scheduled_lane_does_not_move_the_board_stamp(board, clien
     first = board_stamp(client)
     scheduled_card(board, timedelta(hours=3))
     assert board_stamp(client) == first
+
+
+# --- user profiles (AB-89) ---------------------------------------------------
+
+
+def test_ab89_the_header_links_a_signed_in_person_to_their_profile(client, board):
+    assert '<a href="/profile">Profile</a>' in client.get("/", headers=AS_CHAOS).text
+
+
+def test_ab89_the_profile_page_shows_the_saved_text_in_a_form(client, board):
+    core.set_profile(board, CHAOS, "Runs <the> board")
+    html = client.get("/profile", headers=AS_CHAOS).text
+    assert 'action="/profile"' in html and 'method="post"' in html
+    assert f'maxlength="{core.PROFILE_MAX}"' in html
+    assert "Runs &lt;the&gt; board</textarea>" in html
+
+
+def test_ab89_saving_the_profile_form_stores_it(client, board):
+    r = client.post("/profile", data={"text": "Owner of the board"}, headers=AS_CHAOS)
+    assert r.status_code == 303 and r.headers["location"] == "/profile"
+    assert core.profile(board, CHAOS)["text"] == "Owner of the board"
+
+
+def test_ab89_a_profile_that_is_too_long_is_refused(client, board):
+    r = client.post("/profile", data={"text": "x" * (core.PROFILE_MAX + 1)}, headers=AS_CHAOS)
+    assert r.status_code == 422 and f"at most {core.PROFILE_MAX} characters" in r.text
+    assert core.profile(board, CHAOS)["text"] == ""
+
+
+def test_ab89_the_profile_needs_a_person_and_the_same_origin(client, board, monkeypatch):
+    monkeypatch.delenv(web.ACTOR_ENV, raising=False)
+    assert client.get("/profile").status_code == 401
+    assert client.post("/profile", data={"text": "x"}).status_code == 401
+    r = client.post("/profile", data={"text": "x"},
+                    headers=AS_CHAOS | {"origin": "https://evil.example"})
+    assert r.status_code == 403
+    assert core.profile(board, CHAOS)["text"] == ""

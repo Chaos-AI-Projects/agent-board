@@ -355,6 +355,16 @@ class CardSeen(Base):
     event_id: Mapped[int] = mapped_column(EventId)
 
 
+class Profile(Base):
+    """A person's short description of themselves (AB-89), keyed like an actor."""
+
+    __tablename__ = "profile"
+
+    actor: Mapped[str] = mapped_column(String(200), primary_key=True)
+    text: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(Timestamp())
+
+
 class Workflow(Base):
     """An ordered group of issues. Its state is computed from the steps."""
 

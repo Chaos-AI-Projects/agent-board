@@ -1390,6 +1390,20 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
                      max_age=PREFS_MAX_AGE, samesite="lax", httponly=True)
         return r
 
+    @app.get("/profile", response_class=HTMLResponse)
+    def profile_page(request: Request):
+        """AB-89: the viewer's own short profile, with the form that sets it."""
+        me = actor(request)
+        return page(request, "profile.html", profile=core.profile(engine, me.email),
+                    profile_max=core.PROFILE_MAX)
+
+    @app.post("/profile")
+    async def save_profile(request: Request):
+        me = await run_in_threadpool(actor, request)
+        f = await request.form()
+        core.set_profile(engine, me.email, f.get("text", ""))
+        return RedirectResponse("/profile", status_code=303)
+
     @app.get("/projects", response_class=HTMLResponse)
     def projects_page(request: Request):
         return page(request, "projects.html", projects=core.projects(engine))

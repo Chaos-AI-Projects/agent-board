@@ -352,6 +352,19 @@ def build_server(engine, actor: str | Callable[[], str], brain=_FROM_ENV,
         """Extend the lease on an issue this agent claimed."""
         return run(lambda: core.heartbeat(engine, id, current(), token, ttl=_ttl(ttl_minutes)))
 
+    @mcp.tool()
+    def profile() -> CallToolResult:
+        """Your own profile: a short text describing you. Blank if never set."""
+        return run(lambda: core.profile(engine, current()))
+
+    @mcp.tool()
+    def set_profile(text: str) -> CallToolResult:
+        """Replace your own profile with `text`, a few lines describing you.
+
+        Blank text clears it; longer than 500 characters is refused.
+        """
+        return run(lambda: core.set_profile(engine, current(), text))
+
     if brain is not None:
         _brain_tools(mcp, brain, run)
     _refuse_unknown_arguments(mcp)

@@ -28,8 +28,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import aliased
 
 from board import store
-from board.store import (Artifact, Attachment, CardSeen, Dependency, Event, Issue, Label, Project, Template,
-                         TemplateStep, Workflow)
+from board.store import (Artifact, Attachment, CardSeen, Dependency, Event, Issue, Label, Profile,
+                         Project, Template, TemplateStep, Workflow)
 
 DEFAULT_TTL = timedelta(minutes=90)
 
@@ -100,6 +100,8 @@ ACTOR_KINDS = {"agent", "human", "system"}
 # Matches the width of store.Project's columns.
 PROJECT_KEY = re.compile(r"[A-Z][A-Z0-9]{0,15}")
 PROJECT_NAME_MAX = 200
+# A profile is a few lines about a person, not a page (AB-89).
+PROFILE_MAX = 500
 
 
 class BoardError(Exception):
@@ -336,6 +338,47 @@ def mark_seen(engine, actor: str, issue_id: str) -> None:
             # Two pages opened the card at once and the other inserted first;
             # the second pass updates its row.
             continue
+
+
+def profile(engine, actor: str) -> dict:
+    """`actor`'s profile; someone who never wrote one has a blank one (AB-89)."""
+    with store.session(engine) as s:
+        return _profile(actor, s.get(Profile, actor))
+
+
+def set_profile(engine, actor: str, text: str) -> dict:
+    """Replace `actor`'s own profile; blank text clears it. A profile belongs
+    to a person rather than an issue, so the write leaves no event."""
+    text = text.strip()
+    if len(text) > PROFILE_MAX:
+        raise BoardError(f"a profile is at most {PROFILE_MAX} characters")
+    for _ in range(2):
+        try:
+            with store.session(engine) as s, s.begin():
+                row = s.get(Profile, actor)
+                if not text:
+                    if row is not None:
+                        s.delete(row)
+                    return _profile(actor, None)
+                now = store.db_now(s)
+                if row is None:
+                    row = Profile(actor=actor, text=text, updated_at=now)
+                    s.add(row)
+                else:
+                    row.text, row.updated_at = text, now
+                s.flush()
+                return _profile(actor, row)
+        except IntegrityError:
+            # Two saves at once and the other inserted first; the second pass
+            # updates its row.
+            continue
+    raise Conflict(f"the profile for {actor!r} changed while saving; try again")
+
+
+def _profile(actor, row):
+    if row is None:
+        return {"user": actor, "text": "", "updated_at": None}
+    return {"user": actor, "text": row.text, "updated_at": _iso(row.updated_at)}
 
 
 def lane_meta(engine) -> dict[str, dict]:

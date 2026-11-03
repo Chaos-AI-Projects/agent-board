@@ -82,7 +82,8 @@ def test_the_tools_are_the_cli_operations(migrated, monkeypatch):
     names = {t.name for t in list_tools(migrated)}
     assert names == {"next", "show", "annotate", "link", "create",
                      "instantiate", "heartbeat", "plan", "hold", "resume", "depend", "undepend",
-                     "create_batch", "search", "projects", "move", "queue", "schedule"}
+                     "create_batch", "search", "projects", "move", "queue", "schedule",
+                     "profile", "set_profile"}
 
 
 def test_next_claims_as_the_server_actor_and_returns_the_token(migrated):
@@ -799,3 +800,26 @@ def test_ab86_annotate_and_queue_state_a_note_wakes_a_held_parent(migrated):
     out = core.annotate(migrated, parent, "start now", actor=CHAOS, actor_kind="human")
     assert place(out) == ("implement", "ready")
     assert place(core.show(migrated, step)) == ("implement", "ready")
+
+
+# --- user profiles (AB-89) ---------------------------------------------------
+
+
+def test_ab89_set_profile_writes_the_callers_own_profile(migrated):
+    out = ok(migrated, "set_profile", actor=CHAOS, text=" Owner of the board. ")
+    assert out["user"] == CHAOS and out["text"] == "Owner of the board."
+    assert core.profile(migrated, CHAOS)["text"] == "Owner of the board."
+    assert core.profile(migrated, WORKER)["text"] == ""
+
+
+def test_ab89_profile_reads_the_callers_own_profile(migrated):
+    assert ok(migrated, "profile", actor=CHAOS)["text"] == ""
+    core.set_profile(migrated, CHAOS, "hello")
+    assert ok(migrated, "profile", actor=CHAOS)["text"] == "hello"
+    assert ok(migrated, "profile")["text"] == ""
+
+
+def test_ab89_set_profile_refuses_long_text(migrated):
+    out = failed(migrated, "set_profile", text="x" * (core.PROFILE_MAX + 1))
+    assert out["error"] == "BoardError"
+    assert core.profile(migrated, WORKER)["text"] == ""

@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}Profile -- agent-board{% endblock %}
+{% block main %}
+<form method="post" action="/profile">
+  <p>A short text describing you, {{ profile.user }}. An agent you connect over MCP can set it too.</p>
+  <label>Profile <textarea name="text" rows="5" maxlength="{{ profile_max }}">{{ profile.text }}</textarea></label>
+  <p>At most {{ profile_max }} characters. Saving it blank clears it.</p>
+  <button class="primary">Save</button>
+</form>
+{% endblock %}

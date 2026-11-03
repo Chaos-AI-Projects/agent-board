@@ -2693,3 +2693,43 @@ def test_ab87_people_lists_everyone_the_autocomplete_offers(board):
                       creator="third@example.com")["id"]
     core.annotate(board, iid, "hi", actor=OTHER, actor_kind=HUMAN)
     assert core.people(board) == sorted([OTHER, "third@example.com"])
+
+
+# --- user profiles (AB-89) ---------------------------------------------------
+
+
+def test_ab89_a_person_with_no_profile_has_a_blank_one(migrated):
+    assert core.profile(migrated, CHAOS) == {"user": CHAOS, "text": "", "updated_at": None}
+
+
+def test_ab89_a_profile_is_saved_trimmed_and_read_back(migrated):
+    out = core.set_profile(migrated, CHAOS, "  Runs the board.\nLikes short notes.  ")
+    assert out["user"] == CHAOS and out["text"] == "Runs the board.\nLikes short notes."
+    assert out["updated_at"] is not None
+    assert core.profile(migrated, CHAOS) == out
+
+
+def test_ab89_saving_again_replaces_the_text(migrated):
+    core.set_profile(migrated, CHAOS, "first")
+    core.set_profile(migrated, CHAOS, "second")
+    assert core.profile(migrated, CHAOS)["text"] == "second"
+
+
+def test_ab89_a_blank_profile_clears_it(migrated):
+    core.set_profile(migrated, CHAOS, "something")
+    assert core.set_profile(migrated, CHAOS, "   ")["text"] == ""
+    assert core.profile(migrated, CHAOS) == {"user": CHAOS, "text": "", "updated_at": None}
+
+
+def test_ab89_a_profile_is_short_text(migrated):
+    core.set_profile(migrated, CHAOS, "x" * core.PROFILE_MAX)
+    with pytest.raises(core.BoardError, match=f"at most {core.PROFILE_MAX} characters"):
+        core.set_profile(migrated, CHAOS, "y" * (core.PROFILE_MAX + 1))
+    assert core.profile(migrated, CHAOS)["text"] == "x" * core.PROFILE_MAX
+
+
+def test_ab89_each_person_has_their_own_profile(migrated):
+    core.set_profile(migrated, CHAOS, "mine")
+    core.set_profile(migrated, OTHER, "theirs")
+    assert core.profile(migrated, CHAOS)["text"] == "mine"
+    assert core.profile(migrated, OTHER)["text"] == "theirs"
