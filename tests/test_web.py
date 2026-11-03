@@ -1457,6 +1457,7 @@ def test_saving_preferences_sets_a_lax_year_long_cookie(client, board):
         "projects": ["BR"], "lanes": ["implement", "done"], "timezone": "",
         "hide_old_done": False, "involved": True, "queue_collapsed": False,
         "scheduled_collapsed": False,
+        "scheduled_hidden": False,
         "schedule_fields": False, "schedule_warning_accepted": False}
 
 
@@ -1535,6 +1536,7 @@ def test_saving_keeps_only_known_projects_and_lanes(client, board):
         "projects": ["BR"], "lanes": ["implement", "done"], "timezone": "",
         "hide_old_done": False, "involved": True, "queue_collapsed": False,
         "scheduled_collapsed": False,
+        "scheduled_hidden": False,
         "schedule_fields": False, "schedule_warning_accepted": False}
 
 
@@ -1616,6 +1618,7 @@ def test_a_banner_save_keeps_the_saved_lanes_and_timezone(client, board):
         "projects": ["BR"], "lanes": ["implement", "done"], "timezone": "Asia/Tokyo",
         "hide_old_done": False, "involved": True, "queue_collapsed": False,
         "scheduled_collapsed": False,
+        "scheduled_hidden": False,
         "schedule_fields": False, "schedule_warning_accepted": False}
     assert lanes(client.get("/").text) == ["implement", "done"]
 
@@ -1656,6 +1659,7 @@ def test_the_preferences_page_still_saves_every_key(client, board):
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
         "projects": ["MS"], "lanes": ["implement"], "timezone": "", "hide_old_done": False, "involved": True, "queue_collapsed": False,
         "scheduled_collapsed": False,
+        "scheduled_hidden": False,
         "schedule_fields": False, "schedule_warning_accepted": False}
 
 
@@ -1716,7 +1720,8 @@ def saved_lanes(client):
 
 def test_every_lane_heading_has_a_hide_control(client, board):
     html = client.get("/").text
-    assert hide_buttons(html) == ALL_LANES
+    # AB-88: the scheduled lane, after the stage lanes, carries one too.
+    assert hide_buttons(html) == ALL_LANES + ["scheduled"]
     assert 'title="Hide this lane"' in html
 
 
@@ -1763,11 +1768,12 @@ def test_showing_the_last_hidden_lane_saves_all(client, board):
 
 def test_hiding_down_to_one_lane_leaves_no_hide_button(client, board):
     client.post("/preferences", data={"lane": ["implement", "done"]})
-    assert hide_buttons(client.get("/").text) == ["implement", "done"]
+    assert hide_buttons(client.get("/").text) == ["implement", "done", "scheduled"]
     client.post("/preferences/lanes/hide", data={"lane": "done"})
     html = client.get("/").text
     assert lanes(html) == ["implement"]
-    assert hide_buttons(html) == []
+    # The scheduled lane is no stage lane, so it never counts as the last one.
+    assert hide_buttons(html) == ["scheduled"]
 
 
 def test_hiding_the_last_visible_lane_is_refused(client, board):
@@ -1785,12 +1791,14 @@ def test_a_lane_save_keeps_projects_and_timezone(client, board):
         "projects": ["BR"], "lanes": [s for s in ALL_LANES if s != "done"],
         "timezone": "Asia/Tokyo", "hide_old_done": False, "involved": True, "queue_collapsed": False,
         "scheduled_collapsed": False,
+        "scheduled_hidden": False,
         "schedule_fields": False, "schedule_warning_accepted": False}
     client.post("/preferences/lanes/show", data={"lane": "done"})
     assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE)) == {
         "projects": ["BR"], "lanes": [], "timezone": "Asia/Tokyo",
         "hide_old_done": False, "involved": True, "queue_collapsed": False,
         "scheduled_collapsed": False,
+        "scheduled_hidden": False,
         "schedule_fields": False, "schedule_warning_accepted": False}
 
 
@@ -5103,13 +5111,13 @@ def test_ab62_the_scheduled_lane_offers_collapse_and_keeps_its_count(board, clie
     assert scheduled_toggle(html) == ("expand", "Expand")
     # The card stays served for the toggle to bring back; the count stays in the heading.
     assert f'data-id="{later}"' in lane
-    assert re.search(r"<h2[^>]*>scheduled \(1\)</h2>", lane)
+    assert re.search(r"<h2[^>]*>scheduled \(1\)<", lane)
 
 
 def test_ab62_the_toggle_sits_beside_the_heading_not_inside_it(board, client):
     lane = scheduled_lane(client.get("/").text)
     heading = re.search(r"<h2[^>]*>(.*?)</h2>", lane, re.S).group(1)
-    assert "<form" not in heading and 'class="scheduled-toggle"' in lane
+    assert "scheduled-toggle" not in heading and 'class="scheduled-toggle"' in lane
 
 
 def test_ab62_the_choice_is_saved_in_board_prefs_and_expand_undoes_it(board, client):
@@ -5919,3 +5927,77 @@ def test_ab87_picking_after_the_caret_moved_off_the_at_changes_nothing(client, b
                        " mentionPick('hello @ow world', 2, 6, 'owner@example.com'),"
                        " mentionPick('hello @ow world', 9, 6, 'owner@example.com')]") == [
         None, None, {"text": "hello @owner@example.com world", "caret": 25}]
+
+
+# --- the scheduled lane hides like a stage lane (AB-88) --------------------------
+
+
+def scheduled_lane_present(html):
+    return 'data-lane="scheduled"' in html
+
+
+def test_ab88_the_scheduled_lane_heading_has_the_lane_hide_control(board, client):
+    heading = re.search(r"<h2[^>]*>(.*?)</h2>", scheduled_lane(client.get("/").text), re.S).group(1)
+    assert hide_buttons(heading) == ["scheduled"]
+    assert 'aria-label="Hide the scheduled lane"' in heading
+
+
+def test_ab88_hiding_the_scheduled_lane_removes_it_and_its_cards(board, client):
+    later = scheduled_card(board, timedelta(hours=3))
+    r = client.post("/preferences/lanes/hide", data={"lane": "scheduled"})
+    assert r.status_code == 303 and r.headers["location"] == "/"
+    assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE))["scheduled_hidden"] is True
+    html = client.get("/").text
+    assert not scheduled_lane_present(html)
+    # Hidden, not moved: the waiting card does not fall back into the strip.
+    assert f'data-id="{later}"' not in html
+    # The stage lanes are untouched and saved as all.
+    assert lanes(html) == ALL_LANES and saved_lanes(client) == []
+
+
+def test_ab88_the_hidden_scheduled_lane_is_offered_back_in_the_view_banner(board, client):
+    client.post("/preferences/lanes/hide", data={"lane": "done"})
+    client.post("/preferences/lanes/hide", data={"lane": "scheduled"})
+    html = client.get("/").text
+    shows = re.findall(r'<form autocomplete="off" method="post" action="/preferences/lanes/show">'
+                       r'<input type="hidden" name="lane" value="([^"]+)">', banner(html))
+    assert shows == ["done", "scheduled"]
+    r = client.post("/preferences/lanes/show", data={"lane": "scheduled"})
+    assert r.status_code == 303
+    html = client.get("/").text
+    assert scheduled_lane_present(html)
+    assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE))["scheduled_hidden"] is False
+    assert saved_lanes(client) == [s for s in ALL_LANES if s != "done"]
+
+
+def test_ab88_hiding_scheduled_is_allowed_with_one_stage_lane_left(board, client):
+    client.post("/preferences", data={"lane": ["implement"]})
+    r = client.post("/preferences/lanes/hide", data={"lane": "scheduled"})
+    assert r.status_code == 303
+    html = client.get("/").text
+    assert lanes(html) == ["implement"] and not scheduled_lane_present(html)
+
+
+def test_ab88_other_view_saves_keep_the_scheduled_lane_hidden(board, client):
+    client.post("/preferences/lanes/hide", data={"lane": "scheduled"})
+    client.post("/preferences", data={"project": ["MS"], "lane": list(core.STAGES)})
+    client.post("/preferences/done/hide")
+    client.post("/preferences/queue/collapse")
+    client.post("/preferences/scheduled/collapse")
+    client.post("/preferences/lanes/hide", data={"lane": "cancelled"})
+    assert web.read_prefs(client.cookies.get(web.PREFS_COOKIE))["scheduled_hidden"] is True
+    assert not scheduled_lane_present(client.get("/").text)
+
+
+def test_ab88_only_an_exact_true_hides_the_scheduled_lane():
+    assert web.read_prefs(None)["scheduled_hidden"] is False
+    for raw in ('{"scheduled_hidden":1}', '{"scheduled_hidden":"true"}'):
+        assert web.read_prefs(quote(raw, safe=""))["scheduled_hidden"] is False, raw
+    assert web.read_prefs(quote('{"scheduled_hidden":true}', safe=""))["scheduled_hidden"] is True
+
+
+def test_ab88_a_hidden_scheduled_lane_does_not_move_the_board_stamp(board, client):
+    client.post("/preferences/lanes/hide", data={"lane": "scheduled"})
+    first = board_stamp(client)
+    scheduled_card(board, timedelta(hours=3))
+    assert board_stamp(client) == first

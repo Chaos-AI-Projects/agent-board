@@ -143,7 +143,8 @@ Three controls pick what the board shows, and all three save to one per-browser 
   `/preferences/projects`. Unticking every project is refused with 422 rather than hiding the whole
   board. The panel also lists hidden lanes, each with a Show button;
 - the × in a lane's heading hides that lane, through `/preferences/lanes/hide`. The last visible
-  lane cannot be hidden, and Show posts to `/preferences/lanes/show`;
+  lane cannot be hidden, and Show posts to `/preferences/lanes/show`. The scheduled lane has the
+  same ×, saved as `scheduled_hidden`, and it never counts as the last lane (AB-88);
 - `/preferences` sets projects, lanes and the timezone together.
 
 The cookie is `board_prefs`: percent-encoded JSON, `{"projects": [...], "lanes": [...],

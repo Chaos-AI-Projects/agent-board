@@ -814,9 +814,12 @@ def _form_labels(value):
     return [l.strip() for l in value.split(",") if l.strip()]
 
 
+# The lane name the hide and show controls use for the scheduled lane (AB-88).
+SCHEDULED_LANE = "scheduled"
+
 # The `board_prefs` keys that are plain on/off switches.
 PREF_FLAGS = ("hide_old_done", "involved", "queue_collapsed", "scheduled_collapsed",
-              "schedule_fields", "schedule_warning_accepted")
+              "scheduled_hidden", "schedule_fields", "schedule_warning_accepted")
 # The flags that are on until the cookie says otherwise (AB-78).
 PREF_DEFAULT_ON = frozenset({"involved"})
 
@@ -827,8 +830,9 @@ def read_prefs(raw: str | None) -> dict:
     whether the board shows only the cards the viewer interacted with
     (AB-42, AB-78),
     whether the queue strip is collapsed to its counts (AB-57), whether
-    the scheduled lane is collapsed to its count (AB-62), and whether the New
-    issue form shows its schedule fields and their warning was accepted (AB-64).
+    the scheduled lane is collapsed to its count (AB-62) or hidden (AB-88),
+    and whether the New issue form shows its schedule fields and their warning
+    was accepted (AB-64).
 
     The value is JSON, percent-encoded so a browser sends it back unmangled.
     Anything unreadable, and any other key, is ignored. A list key that is
@@ -1200,6 +1204,11 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
             columns.append((stage, wfs, issues,
                             lane_groups(wfs, issues, view["now"], tz, news)))
         hidden = [s for s in core.STAGES if s not in prefs["lanes"]]
+        # AB-88: a hidden scheduled lane takes its cards with it. They stay
+        # out of the strip too, so hiding the lane never moves a card.
+        if prefs["scheduled_hidden"]:
+            hidden.append(SCHEDULED_LANE)
+            waiting = []
         return {"view": view, "queues": queues, "columns": columns, "now": view["now"],
                 "scheduled": waiting,
                 "lane_meta": core.lane_meta(engine), "done_cap": DONE_CAP,
@@ -1208,6 +1217,7 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
                 "mine": mine, "can_mine": me is not None, "unseen": news,
                 "queue_collapsed": prefs["queue_collapsed"],
                 "scheduled_collapsed": prefs["scheduled_collapsed"],
+                "scheduled_hidden": prefs["scheduled_hidden"],
                 "schedule_fields": prefs["schedule_fields"]}
 
     @app.get("/", response_class=HTMLResponse)
@@ -1296,9 +1306,14 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
             return error(request, 404, "No such lane action.")
         lane = (await request.form()).get("lane")
         known = list(core.STAGES)
-        if lane not in known:
+        if lane not in known and lane != SCHEDULED_LANE:
             return error(request, 422, "No such lane.")
         prefs = read_prefs(request.cookies.get(PREFS_COOKIE))
+        if lane == SCHEDULED_LANE:
+            # AB-88: the scheduled lane is a view, not a stage, so it has its
+            # own flag and never counts towards the last visible lane.
+            prefs["scheduled_hidden"] = action == "hide"
+            return saved(prefs)
         shown = set(_chosen(prefs["lanes"], known))
         if action == "hide":
             # [] means every lane, so hiding the last one would bring them all back.

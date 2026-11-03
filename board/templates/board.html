@@ -118,14 +118,17 @@
 {# AB-54: a ready cron card waits here until it is due within five minutes,
    then joins the top strip. A view, not a stage, so nothing drags. AB-62: it
    collapses to the count in its heading, the same saved view pref and in-page
-   toggle as the queue strip. #}
+   toggle as the queue strip. AB-88: it hides like a stage lane, and the view
+   banner offers it back. #}
+{% if not scheduled_hidden %}
 <section class="column scheduled-lane{{ " collapsed" if scheduled_collapsed }}" data-lane="scheduled">
-  <h2 title="{{ scheduled_hint }}">scheduled ({{ scheduled|length }})</h2>
+  <h2 title="{{ scheduled_hint }}">scheduled ({{ scheduled|length }})<form autocomplete="off" method="post" action="/preferences/lanes/hide"><input type="hidden" name="lane" value="scheduled"><button class="hide-lane" title="Hide this lane" aria-label="Hide the scheduled lane">&times;</button></form></h2>
   <form class="scheduled-toggle" autocomplete="off" method="post" action="/preferences/scheduled/{{ "expand" if scheduled_collapsed else "collapse" }}"><button title="{{ "Show the scheduled cards" if scheduled_collapsed else "Hide the scheduled cards, keep the count" }}">{{ "Expand" if scheduled_collapsed else "Collapse" }}</button></form>
   <div class="scheduled-cards">
   {% for issue in scheduled %}{% set queued = true %}{% include "_card.html" %}{% endfor %}
   </div>
 </section>
+{% endif %}
 </div>
 <aside id="issue-panel" hidden aria-label="Issue">
   <div class="issue-panel-bar"><a class="issue-panel-full" href="/">Open full page</a><button class="issue-panel-close" title="Close (Esc)" aria-label="Close the issue panel">&times;</button></div>
