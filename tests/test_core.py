@@ -686,7 +686,9 @@ def test_a_concurrent_retry_replays_after_the_first_commits(board):
     core.queue(board, iid, None, note="d", actor="w1", actor_kind=AGENT,
                token=tok, request_id="fin")
     t.join(10)
-    assert outcome == {"state": "need-input"}
+    assert outcome == {"state": None}
+    kinds = [e["kind"] for e in core.show(board, iid)["events"]]
+    assert kinds.count("transition") == 1, kinds
 
 
 # --- overview: the read the web board renders from ------------------------------
