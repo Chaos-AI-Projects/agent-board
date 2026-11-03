@@ -2733,3 +2733,77 @@ def test_ab89_each_person_has_their_own_profile(migrated):
     core.set_profile(migrated, OTHER, "theirs")
     assert core.profile(migrated, CHAOS)["text"] == "mine"
     assert core.profile(migrated, OTHER)["text"] == "theirs"
+
+
+# --- following people (AB-90) ------------------------------------------------
+
+
+def known(engine, *people):
+    """Make each person someone the board knows, by a card they created."""
+    for who in people:
+        core.create(engine, "MS", f"by {who}", actor=who, actor_kind=HUMAN, stage="implement")
+
+
+def test_ab90_following_someone_lists_them(board):
+    known(board, OTHER, "third@example.com")
+    assert core.following(board, CHAOS) == []
+    core.follow(board, CHAOS, "third@example.com")
+    core.follow(board, CHAOS, OTHER)
+    assert core.following(board, CHAOS) == [OTHER, "third@example.com"]
+    assert core.following(board, OTHER) == []
+
+
+def test_ab90_following_twice_is_one_follow(board):
+    known(board, OTHER)
+    core.follow(board, CHAOS, OTHER)
+    core.follow(board, CHAOS, OTHER)
+    assert core.following(board, CHAOS) == [OTHER]
+
+
+def test_ab90_unfollowing_stops_it_and_is_harmless_when_not_following(board):
+    known(board, OTHER)
+    core.follow(board, CHAOS, OTHER)
+    core.unfollow(board, CHAOS, OTHER)
+    assert core.following(board, CHAOS) == []
+    core.unfollow(board, CHAOS, OTHER)
+    assert core.following(board, CHAOS) == []
+
+
+def test_ab90_nobody_follows_themselves(board):
+    known(board, CHAOS)
+    with pytest.raises(core.BoardError, match="cannot follow yourself"):
+        core.follow(board, CHAOS, CHAOS)
+
+
+def test_ab90_only_someone_the_board_knows_can_be_followed(board):
+    with pytest.raises(core.NotFound, match="nobody called 'ghost@example.com'"):
+        core.follow(board, CHAOS, "ghost@example.com")
+    core.set_profile(board, "ghost@example.com", "here now")
+    core.follow(board, CHAOS, "ghost@example.com")
+    assert core.following(board, CHAOS) == ["ghost@example.com"]
+
+
+def test_ab90_users_are_the_people_and_anyone_with_a_profile(board):
+    known(board, OTHER)
+    core.set_profile(board, "overlord", "the vault's agent")
+    assert core.users(board) == sorted([OTHER, "overlord"])
+
+
+def test_ab90_an_agent_that_created_a_card_is_a_user(board):
+    # The issue page links every creator to a profile, so an agent that
+    # entered a card for nobody must have a page too.
+    core.create(board, "MS", "found it", actor="overlord", actor_kind=AGENT, stage="implement")
+    assert "overlord" in core.users(board)
+
+
+def test_ab90_followed_by_finds_the_cards_followed_people_created(board):
+    known(board, "third@example.com")
+    theirs = core.create(board, "MS", "theirs", actor=OTHER, actor_kind=HUMAN,
+                         stage="implement")["id"]
+    entered = core.create(board, "MS", "for them", actor="overlord", actor_kind=AGENT,
+                          stage="implement", creator=OTHER)["id"]
+    noted = ready(board, "noted")
+    core.annotate(board, noted, "a note", actor=OTHER, actor_kind=HUMAN)
+    assert core.search(board, followed_by=CHAOS) == []
+    core.follow(board, CHAOS, OTHER)
+    assert sorted(i["id"] for i in core.search(board, followed_by=CHAOS)) == sorted([theirs, entered])

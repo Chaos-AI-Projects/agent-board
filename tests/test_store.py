@@ -13,6 +13,7 @@ from board import store
 TABLES = {
     "card_seen",
     "profile",
+    "follow",
     "project",
     "issue",
     "event",
@@ -393,7 +394,7 @@ def test_0004_adds_the_attachment_table_and_downgrade_drops_only_it(engine):
     assert "attachment" in inspect(engine).get_table_names()
     store.downgrade(engine, "0003")
     names = set(inspect(engine).get_table_names())
-    assert "attachment" not in names and TABLES - {"attachment", "dependency", "card_seen", "profile"} - OAUTH_TABLES <= names
+    assert "attachment" not in names and TABLES - {"attachment", "dependency", "card_seen", "profile", "follow"} - OAUTH_TABLES <= names
 
 
 def test_0005_adds_workflow_origin_and_downgrade_drops_only_it(engine):
@@ -411,7 +412,7 @@ def test_0006_adds_the_dependency_table_and_downgrade_drops_only_it(engine):
     assert "dependency" in inspect(engine).get_table_names()
     store.downgrade(engine, "0005")
     names = set(inspect(engine).get_table_names())
-    assert "dependency" not in names and TABLES - {"dependency", "card_seen", "profile"} - OAUTH_TABLES <= names
+    assert "dependency" not in names and TABLES - {"dependency", "card_seen", "profile", "follow"} - OAUTH_TABLES <= names
 
 
 def test_0007_adds_the_oauth_tables_and_downgrade_drops_only_them(engine):
@@ -419,7 +420,7 @@ def test_0007_adds_the_oauth_tables_and_downgrade_drops_only_them(engine):
     assert OAUTH_TABLES <= set(inspect(engine).get_table_names())
     store.downgrade(engine, "0006")
     names = set(inspect(engine).get_table_names())
-    assert not OAUTH_TABLES & names and TABLES - OAUTH_TABLES - {"card_seen", "profile"} <= names
+    assert not OAUTH_TABLES & names and TABLES - OAUTH_TABLES - {"card_seen", "profile", "follow"} <= names
 
 
 def test_0009_adds_the_artifact_name_and_downgrade_drops_only_it(engine):
@@ -531,3 +532,11 @@ def test_ab67_0013_counts_every_finish_before_it_as_seen(engine):
         assert core.unseen(engine, who) == set()
     store.downgrade(engine, "0012")
     assert "card_seen" not in inspect(engine).get_table_names()
+
+
+def test_0016_adds_the_follow_table_and_downgrade_drops_only_it(engine):
+    store.upgrade(engine, "0016")
+    assert "follow" in inspect(engine).get_table_names()
+    store.downgrade(engine, "0015")
+    names = set(inspect(engine).get_table_names())
+    assert "follow" not in names and TABLES - {"follow"} <= names

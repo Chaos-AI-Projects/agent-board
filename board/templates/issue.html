@@ -7,7 +7,7 @@
 <p><span class="project-key" style="--proj-bg: {{ pc.bg }}; --proj-border: {{ pc.border }}">{{ issue.project }}</span> &middot; Stage <b title="{{ stage_hints[issue.stage] }}">{{ issue.stage }}</b>{% if issue.queue %}, queued <b title="{{ queue_hint }}">{{ issue.queue }}</b>{% else %}, not queued{% endif %}
 {% if issue.workflow %} &middot; step {{ issue.workflow.position }} of <i>{{ issue.workflow.title }}</i> ({{ issue.workflow.queue or issue.workflow.stage }}){% if issue.workflow.origin_issue_id %}, planned from <a href="/issues/{{ issue.workflow.origin_issue_id }}">{{ issue.workflow.origin_issue_id }}</a>{% endif %}{% endif %}
 {% if issue.plan %} &middot; planned as <i>{{ issue.plan.title }}</i> ({{ issue.plan.queue or issue.plan.stage }}){% endif %}</p>
-{% if issue.creator %}<p class="creator">Created by {{ issue.creator }}{% if issue.created_by_agent %}, entered by agent {{ issue.created_by_agent }}{% endif %}</p>{% endif %}
+{% if issue.creator %}<p class="creator">Created by <a href="{{ issue.creator|profile_url }}">{{ issue.creator }}</a>{% if issue.created_by_agent %}, entered by agent {{ issue.created_by_agent }}{% endif %}</p>{% endif %}
 <div class="card{% if ls %} lease-{{ ls }}{% endif %}">
   {% include "_lease.html" %}
   {% if not ls %}<div class="lease">Not held</div>{% endif %}

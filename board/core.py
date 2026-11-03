@@ -28,8 +28,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import aliased
 
 from board import store
-from board.store import (Artifact, Attachment, CardSeen, Dependency, Event, Issue, Label, Profile,
-                         Project, Template, TemplateStep, Workflow)
+from board.store import (Artifact, Attachment, CardSeen, Dependency, Event, Follow, Issue, Label,
+                         Profile, Project, Template, TemplateStep, Workflow)
 
 DEFAULT_TTL = timedelta(minutes=90)
 
@@ -381,6 +381,63 @@ def _profile(actor, row):
     return {"user": actor, "text": row.text, "updated_at": _iso(row.updated_at)}
 
 
+def users(engine) -> list[str]:
+    """Everyone who has a profile page to visit and follow (AB-90): the
+    people `people` names, anyone who created a card, and anyone who wrote a
+    profile, agents included. The issue page links every creator here."""
+    with store.session(engine) as s:
+        return _users(s)
+
+
+def _users(s) -> list[str]:
+    return sorted(set(_people(s))
+                  | set(s.scalars(select(Event.actor).distinct().where(Event.kind == "create")))
+                  | set(s.scalars(select(Profile.actor))))
+
+
+def follow(engine, follower: str, followee: str) -> list[str]:
+    """`follower` follows `followee`, once however often asked; returns
+    whom `follower` now follows. Like a profile, a follow belongs to people
+    rather than an issue, so it leaves no event."""
+    if follower == followee:
+        raise BoardError("you cannot follow yourself")
+    for _ in range(2):
+        try:
+            with store.session(engine) as s, s.begin():
+                if followee not in _users(s):
+                    raise NotFound(f"nobody called {followee!r} is on the board")
+                if s.get(Follow, (follower, followee)) is None:
+                    s.add(Follow(follower=follower, followee=followee, created_at=store.db_now(s)))
+                    s.flush()
+                return _following(s, follower)
+        except IntegrityError:
+            # Two follows at once and the other inserted first; the second
+            # pass finds its row.
+            continue
+    raise Conflict(f"following {followee!r} changed while saving; try again")
+
+
+def unfollow(engine, follower: str, followee: str) -> list[str]:
+    """`follower` stops following `followee`, if they did; returns whom they still follow."""
+    with store.session(engine) as s, s.begin():
+        row = s.get(Follow, (follower, followee))
+        if row is not None:
+            s.delete(row)
+            s.flush()
+        return _following(s, follower)
+
+
+def following(engine, follower: str) -> list[str]:
+    """Everyone `follower` follows, sorted."""
+    with store.session(engine) as s:
+        return _following(s, follower)
+
+
+def _following(s, follower):
+    return list(s.scalars(select(Follow.followee).where(Follow.follower == follower)
+                          .order_by(Follow.followee)))
+
+
 def lane_meta(engine) -> dict[str, dict]:
     """Each issue's card meta line, by id (AB-35).
 
@@ -589,7 +646,8 @@ def workflow(engine, workflow_id: int) -> dict:
 
 def search(engine, *, q: str | None = None, project: str | None = None,
            label: str | None = None, assignee: str | None = None,
-           creator: str | None = None, involved: str | None = None) -> list[dict]:
+           creator: str | None = None, involved: str | None = None,
+           followed_by: str | None = None) -> list[dict]:
     """Issues matching every filter given, the newest updated first (AB-72).
 
     `q` is a case-insensitive substring of the id, title, body or any label,
@@ -600,11 +658,14 @@ def search(engine, *, q: str | None = None, project: str | None = None,
     agent or human holding a card is the one working it. `creator` is the
     actor of the issue's create event (AB-27), or the person an agent named
     on it (AB-63). `involved` is a person who created the issue, had it
-    created for them, or wrote any event on it as a human (AB-70). An empty
-    filter is no filter. Cards updated in the same instant keep board order.
+    created for them, or wrote any event on it as a human (AB-70).
+    `followed_by` is a person; it matches the issues created, by `creator`'s
+    rule, by anyone that person follows (AB-90). An empty filter is no
+    filter. Cards updated in the same instant keep board order.
     """
     with store.session(engine) as s:
-        return _search(s, q, project, label, assignee, creator, involved, newest_first=True)
+        return _search(s, q, project, label, assignee, creator, involved, newest_first=True,
+                       followed_by=followed_by)
 
 
 def _creator_col():
@@ -612,7 +673,8 @@ def _creator_col():
     return func.coalesce(Event.on_behalf_of, Event.actor)
 
 
-def _search(s, q, project, label, assignee, creator=None, involved=None, newest_first=False):
+def _search(s, q, project, label, assignee, creator=None, involved=None, newest_first=False,
+            followed_by=None):
     stmt = select(Issue)
     if newest_first:
         stmt = stmt.order_by(Issue.updated_at.desc())
@@ -640,6 +702,10 @@ def _search(s, q, project, label, assignee, creator=None, involved=None, newest_
                                          _creator_col() == creator))
     if involved:
         stmt = stmt.where(_involves(s, involved))
+    if followed_by:
+        followed = select(Follow.followee).where(Follow.follower == followed_by)
+        stmt = stmt.where(exists().where(Event.issue_id == Issue.id, Event.kind == "create",
+                                         _creator_col().in_(followed)))
     issues = list(s.scalars(stmt))
     return [_row(i) | {"creator": c} for i, c in zip(issues, _creators(s, issues))]
 

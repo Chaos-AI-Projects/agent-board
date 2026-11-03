@@ -83,7 +83,7 @@ def test_the_tools_are_the_cli_operations(migrated, monkeypatch):
     assert names == {"next", "show", "annotate", "link", "create",
                      "instantiate", "heartbeat", "plan", "hold", "resume", "depend", "undepend",
                      "create_batch", "search", "projects", "move", "queue", "schedule",
-                     "profile", "set_profile"}
+                     "profile", "set_profile", "follow", "unfollow", "following"}
 
 
 def test_next_claims_as_the_server_actor_and_returns_the_token(migrated):
@@ -823,3 +823,24 @@ def test_ab89_set_profile_refuses_long_text(migrated):
     out = failed(migrated, "set_profile", text="x" * (core.PROFILE_MAX + 1))
     assert out["error"] == "BoardError"
     assert core.profile(migrated, WORKER)["text"] == ""
+
+
+# --- following people (AB-90) ------------------------------------------------
+
+
+def test_ab90_profile_reads_another_persons_profile(migrated):
+    core.set_profile(migrated, CHAOS, "Owner of the board.")
+    assert ok(migrated, "profile", user=CHAOS)["text"] == "Owner of the board."
+    assert ok(migrated, "profile", user="")["user"] == WORKER
+
+
+def test_ab90_follow_unfollow_and_following(migrated):
+    core.set_profile(migrated, CHAOS, "Owner of the board.")
+    assert ok(migrated, "following") == {"following": []}
+    assert ok(migrated, "follow", user=CHAOS) == {"following": [CHAOS]}
+    assert core.following(migrated, WORKER) == [CHAOS]
+    assert ok(migrated, "unfollow", user=CHAOS) == {"following": []}
+
+
+def test_ab90_follow_refuses_someone_the_board_does_not_know(migrated):
+    assert failed(migrated, "follow", user="ghost@example.com")["error"] == "NotFound"

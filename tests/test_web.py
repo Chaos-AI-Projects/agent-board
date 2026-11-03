@@ -4091,7 +4091,7 @@ def test_ab78_off_shows_everyone_and_offers_the_interacted_filter(board, client)
     assert r.status_code == 303 and r.headers["location"] == "/"
     html = client.get("/", headers=AS_CHAOS).text
     assert f'data-id="{mine}"' in html and f'data-id="{theirs}"' in html
-    assert mine_toggle(html) == ("on", "Only cards I interacted with")
+    assert mine_toggle(html) == ("on", "Only cards I interacted with or follow")
 
 
 def test_ab78_a_card_the_viewer_only_noted_on_shows(board, client):
@@ -5195,8 +5195,10 @@ def text_of(html):
 def test_ab63_the_issue_page_names_the_creator_and_the_entering_agent(board, client):
     iid = core.create(board, "MS", "his ask", actor="overlord", actor_kind=AGENT,
                       creator=CHAOS)["id"]
-    html = text_of(client.get(f"/issues/{iid}").text)
-    assert f"Created by {CHAOS}, entered by agent overlord" in html
+    raw = client.get(f"/issues/{iid}").text
+    # AB-90 links the creator to their profile.
+    assert f'Created by <a href="/profile/{CHAOS}">{CHAOS}</a>, entered by agent overlord' in raw
+    html = text_of(raw)
     assert f"overlord (agent) · created this for {CHAOS}" in html
 
 
@@ -6038,3 +6040,99 @@ def test_ab89_the_profile_needs_a_person_and_the_same_origin(client, board, monk
                     headers=AS_CHAOS | {"origin": "https://evil.example"})
     assert r.status_code == 403
     assert core.profile(board, CHAOS)["text"] == ""
+
+
+# --- following people (AB-90) ------------------------------------------------
+
+OTHER = "other@example.com"
+AS_OTHER = {web.ACTOR_HEADER: OTHER}
+
+
+def by_other(engine, title="theirs"):
+    return core.create(engine, "MS", title, actor=OTHER, actor_kind=HUMAN,
+                       stage="implement")["id"]
+
+
+def test_ab90_another_persons_profile_shows_read_only_with_a_follow_button(client, board):
+    by_other(board)
+    core.set_profile(board, OTHER, "Builds <the> evals")
+    html = client.get(f"/profile/{OTHER}", headers=AS_CHAOS).text
+    assert "Builds &lt;the&gt; evals" in html and "<textarea" not in html
+    assert f'action="/profile/{OTHER}/follow"' in html
+    assert f'href="/search?creator={quote(OTHER)}"' in html
+
+
+def test_ab90_following_and_unfollowing_from_the_profile_page(client, board):
+    by_other(board)
+    r = client.post(f"/profile/{OTHER}/follow", headers=AS_CHAOS)
+    assert r.status_code == 303 and r.headers["location"] == f"/profile/{OTHER}"
+    assert core.following(board, CHAOS) == [OTHER]
+    html = client.get(f"/profile/{OTHER}", headers=AS_CHAOS).text
+    assert f'action="/profile/{OTHER}/unfollow"' in html
+    client.post(f"/profile/{OTHER}/unfollow", headers=AS_CHAOS)
+    assert core.following(board, CHAOS) == []
+
+
+def test_ab90_your_own_profile_address_is_the_edit_page(client, board):
+    r = client.get(f"/profile/{CHAOS}", headers=AS_CHAOS)
+    assert r.status_code == 303 and r.headers["location"] == "/profile"
+
+
+def test_ab90_an_unknown_person_has_no_profile_page(client, board):
+    assert client.get("/profile/ghost@example.com", headers=AS_CHAOS).status_code == 404
+    assert client.post("/profile/ghost@example.com/follow", headers=AS_CHAOS).status_code == 404
+
+
+def test_ab90_your_profile_page_lists_people_and_whom_you_follow(client, board):
+    by_other(board)
+    core.create(board, "MS", "t", actor="third@example.com", actor_kind=HUMAN, stage="implement")
+    core.follow(board, CHAOS, OTHER)
+    html = client.get("/profile", headers=AS_CHAOS).text
+    following = html.split('class="following"')[1].split("</ul>")[0]
+    assert f'href="/profile/{OTHER}"' in following and "third@example.com" not in following
+    people = html.split('class="people"')[1].split("</ul>")[0]
+    assert f'href="/profile/third@example.com"' in people
+    assert f'href="/profile/{CHAOS}"' not in people
+
+
+def test_ab90_the_board_shows_cards_from_people_you_follow(client, board):
+    theirs, stranger = by_other(board), core.create(
+        board, "MS", "s", actor="third@example.com", actor_kind=HUMAN, stage="implement")["id"]
+    assert f'data-id="{theirs}"' not in client.get("/", headers=AS_CHAOS).text
+    core.follow(board, CHAOS, OTHER)
+    html = client.get("/", headers=AS_CHAOS).text
+    assert f'data-id="{theirs}"' in html and f'data-id="{stranger}"' not in html
+    assert mine_toggle(html) == ("off", "Show everyone's cards")
+    assert "cards I interacted with or follow" in re.search(
+        r"<summary>(.*?)</summary>", html.split('class="filter-banner"')[1], re.S).group(1)
+
+
+def test_ab90_the_search_page_filters_by_people_you_follow(client, board):
+    theirs = by_other(board)
+    core.follow(board, CHAOS, OTHER)
+    html = client.get(f"/search?followed_by={quote(CHAOS)}", headers=AS_CHAOS).text
+    assert f'href="/issues/{theirs}"' in html
+
+
+def test_ab90_an_issue_links_its_creator_to_their_profile(client, board):
+    theirs = by_other(board)
+    html = client.get(f"/issues/{theirs}", headers=AS_CHAOS).text
+    assert f'Created by <a href="/profile/{OTHER}">{OTHER}</a>' in html
+
+
+def test_ab90_an_agent_creators_profile_link_resolves(client, board):
+    iid = core.create(board, "MS", "found it", actor="overlord", actor_kind=AGENT,
+                      stage="implement")["id"]
+    html = client.get(f"/issues/{iid}", headers=AS_CHAOS).text
+    assert 'Created by <a href="/profile/overlord">overlord</a>' in html
+    assert client.get("/profile/overlord", headers=AS_CHAOS).status_code == 200
+
+
+def test_ab90_following_needs_a_person_and_the_same_origin(client, board, monkeypatch):
+    by_other(board)
+    monkeypatch.delenv(web.ACTOR_ENV, raising=False)
+    assert client.get(f"/profile/{OTHER}").status_code == 401
+    assert client.post(f"/profile/{OTHER}/follow").status_code == 401
+    r = client.post(f"/profile/{OTHER}/follow", headers=AS_CHAOS | {"origin": "https://evil.example"})
+    assert r.status_code == 403
+    assert core.following(board, CHAOS) == []

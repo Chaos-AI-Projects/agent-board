@@ -418,6 +418,13 @@ def initials(email: str) -> str:
     return (parts[0] if parts else email)[:2].upper()
 
 
+def profile_url(user: str) -> str:
+    """A person's profile page (AB-90). An email reads as itself; anything
+    else is escaped. A slash is not safe even escaped, since the router
+    decodes it first, but actors are emails or agent names."""
+    return "/profile/" + quote(user, safe="@")
+
+
 templates.env.globals["project_colour"] = project_colour
 templates.env.globals["creator_colour"] = creator_colour
 templates.env.globals["initials"] = initials
@@ -427,6 +434,7 @@ templates.env.filters["markdown"] = markdown
 templates.env.filters["filesize"] = filesize
 templates.env.filters["localtime"] = localtime
 templates.env.filters["url_host"] = url_host
+templates.env.filters["profile_url"] = profile_url
 
 
 class Unauthenticated(Exception):
@@ -1143,10 +1151,12 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         # rule, and on by default. A workflow stays when the viewer is on any
         # of its steps. With no viewer there is nobody to match, so the
         # filter does nothing.
+        # AB-90: cards created by anyone the viewer follows show too.
         me = who(request)
         mine = prefs["involved"] and me is not None
         if mine:
-            involved = {i["id"] for i in core.search(engine, involved=me.email)}
+            involved = ({i["id"] for i in core.search(engine, involved=me.email)}
+                        | {i["id"] for i in core.search(engine, followed_by=me.email)})
             workflows = [w for w in workflows
                          if any(st["id"] in involved for st in w["steps"])]
             loose = [i for i in loose if i["id"] in involved]
@@ -1233,9 +1243,9 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
     @app.get("/search", response_class=HTMLResponse)
     def search_page(request: Request, q: str = "", project: str = "", label: str = "",
                     assignee: str = "", creator: str = "", involved: str = "",
-                    unseen_only: str = Query("", alias="unseen")):
+                    followed_by: str = "", unseen_only: str = Query("", alias="unseen")):
         filters = {"q": q.strip(), "project": project, "label": label, "assignee": assignee,
-                   "creator": creator, "involved": involved}
+                   "creator": creator, "involved": involved, "followed_by": followed_by}
         view = core.overview(engine)
         # AB-72: hits come newest updated first, unlike the board's rank order.
         results = core.search(engine, **filters)
@@ -1395,7 +1405,27 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         """AB-89: the viewer's own short profile, with the form that sets it."""
         me = actor(request)
         return page(request, "profile.html", profile=core.profile(engine, me.email),
-                    profile_max=core.PROFILE_MAX)
+                    profile_max=core.PROFILE_MAX, following=core.following(engine, me.email),
+                    users=[u for u in core.users(engine) if u != me.email])
+
+    @app.get("/profile/{user}", response_class=HTMLResponse)
+    def person_page(request: Request, user: str):
+        """AB-90: someone else's profile, to read and follow. One's own is /profile."""
+        me = actor(request)
+        if user == me.email:
+            return RedirectResponse("/profile", status_code=303)
+        if user not in core.users(engine):
+            raise core.NotFound(f"nobody called {user!r} is on the board")
+        return page(request, "person.html", profile=core.profile(engine, user),
+                    followed=user in core.following(engine, me.email))
+
+    @app.post("/profile/{user}/{action}")
+    async def follow_person(request: Request, user: str, action: str):
+        if action not in ("follow", "unfollow"):
+            return error(request, 404, "No such profile action.")
+        me = await run_in_threadpool(actor, request)
+        await run_in_threadpool(getattr(core, action), engine, me.email, user)
+        return RedirectResponse(profile_url(user), status_code=303)
 
     @app.post("/profile")
     async def save_profile(request: Request):

@@ -7,4 +7,9 @@
   <p>At most {{ profile_max }} characters. Saving it blank clears it.</p>
   <button class="primary">Save</button>
 </form>
+<h2>Following</h2>
+{% if following %}<ul class="following">{% for u in following %}<li><a href="{{ u|profile_url }}">{{ u }}</a></li>{% endfor %}</ul>
+<p>The cards they create show on your board. <a href="/search?followed_by={{ profile.user|urlencode }}">Every card from people you follow</a></p>{% else %}<ul class="following"></ul><p>You follow nobody yet. Open someone's profile below to follow them.</p>{% endif %}
+<h2>People</h2>
+<ul class="people">{% for u in users %}<li><a href="{{ u|profile_url }}">{{ u }}</a></li>{% endfor %}</ul>
 {% endblock %}

@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}{{ profile.user }} -- agent-board{% endblock %}
+{% block main %}
+<h1>{{ profile.user }}</h1>
+{% if profile.text %}<p class="profile-text">{{ profile.text }}</p>{% else %}<p class="profile-text">No profile written yet.</p>{% endif %}
+<form method="post" action="{{ profile.user|profile_url }}/{{ "unfollow" if followed else "follow" }}"><button{% if not followed %} class="primary"{% endif %}>{{ "Unfollow" if followed else "Follow" }}</button></form>
+<p>{% if followed %}You follow {{ profile.user }}, so the cards they create show on your board. {% endif %}<a href="/search?creator={{ profile.user|urlencode }}">Cards {{ profile.user }} created</a></p>
+{% endblock %}

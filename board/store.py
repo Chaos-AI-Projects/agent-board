@@ -365,6 +365,16 @@ class Profile(Base):
     updated_at: Mapped[datetime] = mapped_column(Timestamp())
 
 
+class Follow(Base):
+    """One person following another (AB-90), each keyed like an actor."""
+
+    __tablename__ = "follow"
+
+    follower: Mapped[str] = mapped_column(String(200), primary_key=True)
+    followee: Mapped[str] = mapped_column(String(200), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(Timestamp())
+
+
 class Workflow(Base):
     """An ordered group of issues. Its state is computed from the steps."""
 

@@ -353,9 +353,12 @@ def build_server(engine, actor: str | Callable[[], str], brain=_FROM_ENV,
         return run(lambda: core.heartbeat(engine, id, current(), token, ttl=_ttl(ttl_minutes)))
 
     @mcp.tool()
-    def profile() -> CallToolResult:
-        """Your own profile: a short text describing you. Blank if never set."""
-        return run(lambda: core.profile(engine, current()))
+    def profile(user: str = "") -> CallToolResult:
+        """A profile: a short text describing someone. Blank if never set.
+
+        `user` is whose, an email; blank is your own.
+        """
+        return run(lambda: core.profile(engine, user or current()))
 
     @mcp.tool()
     def set_profile(text: str) -> CallToolResult:
@@ -364,6 +367,22 @@ def build_server(engine, actor: str | Callable[[], str], brain=_FROM_ENV,
         Blank text clears it; longer than 500 characters is refused.
         """
         return run(lambda: core.set_profile(engine, current(), text))
+
+    @mcp.tool()
+    def following() -> CallToolResult:
+        """Everyone you follow. The cards they create show on your board."""
+        return run(lambda: {"following": core.following(engine, current())})
+
+    @mcp.tool()
+    def follow(user: str) -> CallToolResult:
+        """Follow `user`, someone on the board, so the cards they create show
+        on your board. Returns everyone you now follow."""
+        return run(lambda: {"following": core.follow(engine, current(), user)})
+
+    @mcp.tool()
+    def unfollow(user: str) -> CallToolResult:
+        """Stop following `user`. Returns everyone you still follow."""
+        return run(lambda: {"following": core.unfollow(engine, current(), user)})
 
     if brain is not None:
         _brain_tools(mcp, brain, run)
