@@ -120,6 +120,10 @@ class NoteRequired(BoardError):
     pass
 
 
+class NotAllowed(BoardError):
+    pass
+
+
 class LeaseLost(BoardError):
     """The caller's lease token is no longer current. CLI exit 4."""
 
@@ -910,6 +914,8 @@ def _place_op(engine, op, issue_id, place, args, actor, actor_kind, note, token,
         else:
             _guard(s, issue, actor, actor_kind, token, now, preempt, None)
         _judge(issue, stage, queue, note, actor_kind)
+        if actor_kind == "human":
+            _check_closer(issue, stage, actor)
         ev = _set_place(s, issue, stage, queue, note, actor, actor_kind, now, key,
                         key_used=False)
         _attach(s, issue, ev.id, attachments, actor, now)
@@ -1823,6 +1829,37 @@ def _judge(issue, stage, queue, note, actor_kind):
                                     f"{queue or 'empty'} is not allowed")
         if old_queue == "processing" and queue is None and not note:
             raise NoteRequired(f"{issue.id}: releasing a card from the queue needs a note")
+
+
+CLOSED = {"done", "cancelled"}
+
+
+def _check_closer(issue, stage, actor):
+    """A person closes another person's card only when its creator mentions
+    them, in the body or in a note of the creator's own (AB-92).
+
+    An agent works under its lease and the system follows rules, so neither
+    is checked; nor is a card an agent found itself, which is nobody's. The
+    body is the creator's while nobody else has edited it.
+    """
+    if stage not in CLOSED or stage == issue.state:
+        return
+    made = _creator_view(issue)
+    creator = made["creator"]
+    if made["creator_kind"] != "human" or creator.lower() == actor.lower():
+        return
+    found = _mention(actor).search
+    theirs = [e for e in issue.events if e.actor_kind == "human"
+              and e.actor.lower() == creator.lower()]
+    if any(e.note and found(e.note) for e in theirs):
+        return
+    edited = any(e.kind == "edit" and e.actor.lower() != creator.lower()
+                 and "body" in (e.note or "").removeprefix("changed ").split(", ")
+                 for e in issue.events)
+    if not edited and found(issue.body or ""):
+        return
+    raise NotAllowed(f"{issue.id} is {creator}'s card; you may close it only "
+                     f"once they mention you, as @{actor.split('@', 1)[0]}")
 
 
 def _set_place(s, issue, stage, queue, note, actor, actor_kind, now, key, key_used):

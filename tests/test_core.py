@@ -2847,3 +2847,91 @@ def test_ab91_the_activity_limit_counts_human_events_only(board):
     view = core.stats(board, limit=2, humans_only=True)
     assert [e["kind"] for e in view["activity"]] == ["create"]
     assert view["activity"][0]["actor"] == CHAOS
+
+
+# --- AB-92: a person closes another's card only when its creator mentions them ----
+
+
+def others_card(engine, **kw):
+    return core.create(engine, "MS", "theirs", actor=OTHER, actor_kind=HUMAN,
+                       stage="implement", **kw)["id"]
+
+
+@pytest.mark.parametrize("stage", ["done", "cancelled"])
+def test_ab92_a_person_cannot_close_another_persons_card(board, stage):
+    iid = others_card(board)
+    with pytest.raises(core.NotAllowed, match="mention"):
+        core.move(board, iid, stage, note="closing", actor=CHAOS, actor_kind=HUMAN)
+    assert place(core.show(board, iid)) == ("implement", "ready")
+
+
+@pytest.mark.parametrize("stage", ["done", "cancelled"])
+def test_ab92_the_creator_closes_their_own_card(board, stage):
+    iid = others_card(board)
+    assert core.move(board, iid, stage, actor=OTHER, actor_kind=HUMAN)["stage"] == stage
+
+
+def test_ab92_a_mention_in_the_creators_body_lets_the_person_close_it(board):
+    iid = others_card(board, body="@owner please close this once it ships")
+    assert core.move(board, iid, "done", actor=CHAOS, actor_kind=HUMAN)["stage"] == "done"
+
+
+def test_ab92_a_mention_in_the_creators_note_lets_the_person_close_it(board):
+    iid = others_card(board)
+    core.annotate(board, iid, f"handing over to @{CHAOS}", actor=OTHER, actor_kind=HUMAN)
+    assert core.move(board, iid, "cancelled", actor=CHAOS,
+                     actor_kind=HUMAN)["stage"] == "cancelled"
+
+
+def test_ab92_a_mention_by_anyone_but_the_creator_does_not_count(board):
+    iid = others_card(board)
+    core.annotate(board, iid, "@owner can close this", actor="third@example.com",
+                  actor_kind=HUMAN)
+    core.annotate(board, iid, "@owner can close this", actor="overlord", actor_kind=AGENT)
+    core.annotate(board, iid, "cc @owner", actor=CHAOS, actor_kind=HUMAN)
+    with pytest.raises(core.NotAllowed):
+        core.move(board, iid, "done", actor=CHAOS, actor_kind=HUMAN)
+
+
+def test_ab92_a_body_someone_else_edited_is_not_the_creators_mention(board):
+    iid = others_card(board, body="plain")
+    version = core.show(board, iid)["version"]
+    core.edit(board, iid, actor=CHAOS, expected_version=version, body="@owner may close")
+    with pytest.raises(core.NotAllowed):
+        core.move(board, iid, "done", actor=CHAOS, actor_kind=HUMAN)
+
+
+def test_ab92_the_creators_own_body_edit_still_counts(board):
+    iid = others_card(board, body="plain")
+    version = core.show(board, iid)["version"]
+    core.edit(board, iid, actor=OTHER, expected_version=version, body="over to @owner")
+    assert core.move(board, iid, "done", actor=CHAOS, actor_kind=HUMAN)["stage"] == "done"
+
+
+def test_ab92_a_card_an_agent_entered_for_a_person_is_that_persons(board):
+    iid = core.create(board, "MS", "asked", actor="overlord", actor_kind=AGENT,
+                      stage="implement", creator=OTHER)["id"]
+    with pytest.raises(core.NotAllowed):
+        core.move(board, iid, "done", actor=CHAOS, actor_kind=HUMAN)
+    assert core.move(board, iid, "done", actor=OTHER, actor_kind=HUMAN)["stage"] == "done"
+
+
+def test_ab92_anyone_closes_a_card_an_agent_found_itself(board):
+    iid = core.create(board, "MS", "found", actor="overlord", actor_kind=AGENT,
+                      stage="implement")["id"]
+    assert core.move(board, iid, "cancelled", actor=CHAOS,
+                     actor_kind=HUMAN)["stage"] == "cancelled"
+
+
+def test_ab92_an_agent_still_closes_a_persons_card_under_its_lease(board):
+    iid = others_card(board)
+    got = core.next(board, "overlord")
+    assert got["issue"]["id"] == iid
+    assert core.move(board, iid, "done", note="PR #1", actor="overlord", actor_kind=AGENT,
+                     token=got["lease_token"])["stage"] == "done"
+
+
+def test_ab92_moves_that_do_not_close_another_persons_card_are_unchanged(board):
+    iid = others_card(board)
+    assert core.move(board, iid, "planning", actor=CHAOS, actor_kind=HUMAN)["stage"] == "planning"
+    assert core.move(board, iid, "backlog", actor=CHAOS, actor_kind=HUMAN)["stage"] == "backlog"

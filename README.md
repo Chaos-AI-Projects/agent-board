@@ -30,6 +30,9 @@ queue or needs a lease, and holding a held plan writes no event (AB-83).
 An agent closes its own finished card, a plan's origin included (AB-23, which replaced AB-9's
 human-only close). Entering `need-input` drops the lease, so the agent that made the latest move
 into `need-input` may still take that card to `done` or `cancelled` without one, and to nothing else.
+A person takes another person's card to `done` or `cancelled` only once its creator mentions them,
+in the body or in a note of the creator's own (AB-92). A body someone else edited no longer counts.
+A card an agent found itself has no person as creator, so anyone may close it.
 `create_batch` creates several issues in one transaction, all or nothing. Each item may list `after`:
 other items by 0-based index or `ref`, or existing issue ids, which become dependencies. With
 `workflow_title` the items become a new workflow in list order. The CLI is `board create-batch FILE`,
