@@ -2,6 +2,9 @@
 {% block title %}{{ issue.id }} {{ issue.title }}{% endblock %}
 {% block main %}
 {% set ls = lease_status(issue, now) %}
+{# AB-96: what a live update swaps. The scripts sit outside it: a script
+   swapped in never runs, so each one wires up its elements through onLive. #}
+<div data-live="issue">
 <h1>{{ issue.id }} {{ issue.title }}</h1>
 {% set pc = project_colour(issue.project) %}
 <p><span class="project-key" style="--proj-bg: {{ pc.bg }}; --proj-border: {{ pc.border }}">{{ issue.project }}</span> &middot; Stage <b title="{{ stage_hints[issue.stage] }}">{{ issue.stage }}</b>{% if issue.queue %}, queued <b title="{{ queue_hint }}">{{ issue.queue }}</b>{% else %}, not queued{% endif %}
@@ -56,26 +59,6 @@
 {% endif %}
 </details>
 </section>
-{% if diagram %}
-<script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
-<script>
-  // strict: labels are sanitised and click links are URL-checked; only the
-  // callback form of `click` needs loose, and the diagram uses none.
-  if (window.mermaid) mermaid.initialize({startOnLoad: true, securityLevel: "strict"});
-  // A collapse node links to #workflow-steps; open the list, and its "Show N more",
-  // on every click, since a repeat click to the same hash fires no hashchange.
-  function openStepList() {
-    document.querySelectorAll("#workflow-steps, #workflow-steps details")
-      .forEach(function (d) { d.open = true; });
-  }
-  document.addEventListener("click", function (e) {
-    var a = e.target.closest ? e.target.closest("a") : null;
-    var href = a ? (a.getAttribute("href") || a.getAttribute("xlink:href") || "") : "";
-    if (href === "#workflow-steps") openStepList();
-  });
-  if (location.hash === "#workflow-steps") openStepList();
-</script>
-{% endif %}
 {% endif %}
 
 {% if issue.body %}
@@ -202,12 +185,41 @@
   </div>
   <div>A note never needs the lease. A stage or queue change does, and the note becomes its reason; releasing a claimed card needs one, and so does leaving done.</div>
 </form>
+</div>
+{% if diagram %}
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
+<script>
+  // strict: labels are sanitised and click links are URL-checked; only the
+  // callback form of `click` needs loose, and the diagram uses none.
+  if (window.mermaid) mermaid.initialize({startOnLoad: true, securityLevel: "strict"});
+  // A collapse node links to #workflow-steps; open the list, and its "Show N more",
+  // on every click, since a repeat click to the same hash fires no hashchange.
+  function openStepList() {
+    document.querySelectorAll("#workflow-steps, #workflow-steps details")
+      .forEach(function (d) { d.open = true; });
+  }
+  document.addEventListener("click", function (e) {
+    var a = e.target.closest ? e.target.closest("a") : null;
+    var href = a ? (a.getAttribute("href") || a.getAttribute("xlink:href") || "") : "";
+    if (href === "#workflow-steps") openStepList();
+  });
+  if (location.hash === "#workflow-steps") openStepList();
+  // AB-96: a chart swapped in by a live update is drawn here; the first is
+  // mermaid's own startOnLoad.
+  function drawCharts(root) {
+    if (root === document || !window.mermaid) return;
+    var charts = within(root, "pre.mermaid");
+    if (charts.length) mermaid.run({nodes: charts});
+  }
+  onLive(drawCharts);
+</script>
+{% endif %}
 <script>
   // Without JS the note is always required and the button reads Save. With it,
   // an unchanged stage and queue is a plain note ("Add note"); a change may go
   // without, except leaving done, which is a reopen and needs its reason (AB-24).
-  (function () {
-    var selects = document.querySelectorAll("select[data-current]");
+  onLive(function (root) {
+    var selects = within(root, "select[data-current]");
     if (!selects.length) return;
     var stage = selects[0], form = stage.form, note = form.querySelector("textarea[name=note]");
     var button = form.querySelector("button");
@@ -220,7 +232,7 @@
     }
     Array.prototype.forEach.call(selects, function (s) { s.addEventListener("change", sync); });
     sync();
-  })();
+  });
 </script>
 
 <script>
@@ -229,15 +241,15 @@
   // refused, and it fires the submit event the fetch handler below listens for.
   // A held key's repeats are dropped: the fetch guard clears before the
   // redirect lands, so a repeat in between would post the note twice.
-  (function () {
-    var form = document.getElementById("note-form");
+  onLive(function (root) {
+    var form = within(root, "#note-form")[0];
     if (!form) return;
     form.querySelector("textarea[name=note]").addEventListener("keydown", function (ev) {
       if (ev.key !== "Enter" || !(ev.ctrlKey || ev.metaKey) || ev.isComposing || ev.repeat) return;
       ev.preventDefault();
       form.requestSubmit(form.querySelector("button"));
     });
-  })();
+  });
 </script>
 
 <script>
@@ -283,30 +295,32 @@
     // window's stamp poll, and the board's in embed mode, must not reload it.
     var replaced = false;
     window.extraBusy = function () { return dlg.open || replaced; };
-    document.querySelectorAll('form[method=post][action^="/issues/"]').forEach(function (form) {
-      form.addEventListener("submit", function (ev) {
-        if (ev.defaultPrevented) return;
-        ev.preventDefault();
-        if (form.dataset.sending) return;
-        form.dataset.sending = "1";
-        var body = new FormData(form);
-        if (ev.submitter && ev.submitter.name) body.append(ev.submitter.name, ev.submitter.value);
-        var headers = {};
-        headers["{{ fetch_header }}"] = "1";
-        fetch(form.action, {method: "POST", body: body, headers: headers, credentials: "same-origin"})
-          .then(function (r) {
-            var type = r.headers.get("content-type") || "";
-            if (!r.ok && type.indexOf("application/json") === 0) {
-              return r.json().then(function (got) { show(got.error); });
-            }
-            if (r.redirected) { location.href = r.url; return; }
-            return r.text().then(function (html) {
-              replaced = true;
-              document.open(); document.write(html); document.close();
-            });
-          })
-          .catch(function () { show("The board did not answer, or your sign-in has expired. Reload the page, then try again."); })
-          .finally(function () { delete form.dataset.sending; });
+    onLive(function (root) {
+      within(root, 'form[method=post][action^="/issues/"]').forEach(function (form) {
+        form.addEventListener("submit", function (ev) {
+          if (ev.defaultPrevented) return;
+          ev.preventDefault();
+          if (form.dataset.sending) return;
+          form.dataset.sending = "1";
+          var body = new FormData(form);
+          if (ev.submitter && ev.submitter.name) body.append(ev.submitter.name, ev.submitter.value);
+          var headers = {};
+          headers["{{ fetch_header }}"] = "1";
+          fetch(form.action, {method: "POST", body: body, headers: headers, credentials: "same-origin"})
+            .then(function (r) {
+              var type = r.headers.get("content-type") || "";
+              if (!r.ok && type.indexOf("application/json") === 0) {
+                return r.json().then(function (got) { show(got.error); });
+              }
+              if (r.redirected) { location.href = r.url; return; }
+              return r.text().then(function (html) {
+                replaced = true;
+                document.open(); document.write(html); document.close();
+              });
+            })
+            .catch(function () { show("The board did not answer, or your sign-in has expired. Reload the page, then try again."); })
+            .finally(function () { delete form.dataset.sending; });
+        });
       });
     });
   })();

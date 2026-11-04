@@ -262,8 +262,19 @@
 </style>
 </head>
 <body>
-{% if not embed_q %}<header><a href="/">agent-board</a><form autocomplete="off" method="get" action="/search" class="header-search"><input type="search" name="q" value="{{ header_q or "" }}" placeholder="Search issues" aria-label="Search issues"><button type="submit">Search</button></form><a href="/search">Advanced search</a><nav class="header-right">{% if unseen %}<a class="unseen-count" href="/search?involved={{ me|urlencode }}&amp;unseen=1" title="Finished cards you have not opened yet">{{ unseen|length }} finished</a>{% endif %}{% if me %}<a href="/profile">Profile</a>{% endif %}<a href="/preferences">Preferences</a><a href="/projects">Projects</a><a href="/stats">Stats</a><span class="me">{{ me or "not signed in" }}</span>{% if sign_in and me %}<form method="post" action="/logout" style="margin:0"><button type="submit">Sign out</button></form>{% elif sign_in %}<a href="/login">Sign in</a>{% endif %}<button type="button" id="theme-toggle" title="Switch light / dark theme" aria-label="Switch light / dark theme">&#9681;</button></nav></header>{% endif %}
-<main>{% block main %}{% endblock %}</main>
+{% if not embed_q %}<header><a href="/">agent-board</a><form autocomplete="off" method="get" action="/search" class="header-search"><input type="search" name="q" value="{{ header_q or "" }}" placeholder="Search issues" aria-label="Search issues"><button type="submit">Search</button></form><a href="/search">Advanced search</a><nav class="header-right"><span data-live="unseen">{% if unseen %}<a class="unseen-count" href="/search?involved={{ me|urlencode }}&amp;unseen=1" title="Finished cards you have not opened yet">{{ unseen|length }} finished</a>{% endif %}</span>{% if me %}<a href="/profile">Profile</a>{% endif %}<a href="/preferences">Preferences</a><a href="/projects">Projects</a><a href="/stats">Stats</a><span class="me">{{ me or "not signed in" }}</span>{% if sign_in and me %}<form method="post" action="/logout" style="margin:0"><button type="submit">Sign out</button></form>{% elif sign_in %}<a href="/login">Sign in</a>{% endif %}<button type="button" id="theme-toggle" title="Switch light / dark theme" aria-label="Switch light / dark theme">&#9681;</button></nav></header>{% endif %}
+<script>
+  // AB-96: a script that wires up elements registers with onLive, so the
+  // regions a live update swaps in are wired too. It runs at once on the page,
+  // then on each swapped region; within() includes the region itself.
+  var LIVE_HOOKS = [];
+  function onLive(fn) { LIVE_HOOKS.push(fn); fn(document); }
+  function within(root, sel) {
+    var own = root.matches && root.matches(sel) ? [root] : [];
+    return own.concat(Array.prototype.slice.call(root.querySelectorAll(sel)));
+  }
+</script>
+<main{% if stamp %} data-stamp="{{ stamp }}"{% endif %}>{% block main %}{% endblock %}</main>
 <script>
   // AB-37: the switch saves the other theme; the storage event carries it to
   // other tabs and the issue panel's frame.
@@ -289,10 +300,12 @@
         box.checked = kind === "all" || recent.indexOf(box.value) >= 0;
       });
   }
-  document.querySelectorAll(".check-all").forEach(function (span) {
-    span.hidden = false;
-    span.querySelectorAll("button").forEach(function (b) {
-      b.addEventListener("click", function () { checkAll(b); });
+  onLive(function (root) {
+    within(root, ".check-all").forEach(function (span) {
+      span.hidden = false;
+      span.querySelectorAll("button").forEach(function (b) {
+        b.addEventListener("click", function () { checkAll(b); });
+      });
     });
   });
 </script>
@@ -403,6 +416,76 @@
     for (var i = 0; i < fields.length; i++) if (fieldDirty(fields[i])) return true;
     return !!(window.extraBusy && window.extraBusy());
   }
+  // AB-96: the page fetches itself and swaps each [data-live] region for the
+  // one with the same key, so scroll, focus and the board's issue panel stay
+  // put. A page that cannot be swapped in, a refusal, an error page, or one
+  // whose regions differ, falls back to a reload. A page that turned busy
+  // while the fetch was out is left for the next poll.
+  function swapLive(doc, fresh) {
+    var olds = doc.querySelectorAll("[data-live]"), news = {}, count = 0;
+    fresh.querySelectorAll("[data-live]").forEach(function (el) { news[el.dataset.live] = el; count++; });
+    if (!olds.length || olds.length !== count) return null;
+    for (var i = 0; i < olds.length; i++) if (!(olds[i].dataset.live in news)) return null;
+    return Array.prototype.map.call(olds, function (old) {
+      var el = doc.adoptNode(news[old.dataset.live]), restore = keepState(old, el);
+      old.replaceWith(el);
+      restore();
+      return el;
+    });
+  }
+  // What a swap must not undo: the region's scroll, its [data-keep-scroll]
+  // scrollers', and which sections are open, when the new region has the
+  // same sections. A browser drops a scroll set on an element not yet in the
+  // page, so the scrolls are read now and set by the returned function once
+  // the region is in.
+  function keepState(old, el) {
+    var pairs = [[old, el]];
+    var was = old.querySelectorAll("[data-keep-scroll]"), now = el.querySelectorAll("[data-keep-scroll]");
+    for (var i = 0; i < Math.min(was.length, now.length); i++) pairs.push([was[i], now[i]]);
+    var at = pairs.map(function (p) { return [p[0].scrollLeft, p[0].scrollTop]; });
+    was = old.querySelectorAll("details"); now = el.querySelectorAll("details");
+    if (was.length === now.length) for (var j = 0; j < now.length; j++) now[j].open = was[j].open;
+    return function () {
+      pairs.forEach(function (p, k) { p[1].scrollLeft = at[k][0]; p[1].scrollTop = at[k][1]; });
+    };
+  }
+  // An update that cannot swap now clears STAMP, so the next poll that finds
+  // the page idle swaps even when nothing on the server moved: a refused or
+  // cancelled drag has already moved its card on screen.
+  async function liveUpdate() {
+    if (updating) { STAMP = null; return; }
+    updating = true;
+    try {
+      var fresh, main, swapped;
+      try {
+        var r = await fetch(location.pathname + location.search, {cache: "no-store", credentials: "same-origin"});
+        if (!r.ok || (r.headers.get("content-type") || "").indexOf("text/html") !== 0) throw new Error(r.status);
+        fresh = new DOMParser().parseFromString(await r.text(), "text/html");
+      } catch (_) {
+        if (pageBusy()) { STAMP = null; return; }
+        return reloadPage();
+      }
+      if (pageBusy()) { STAMP = null; return; }
+      main = fresh.querySelector("main[data-stamp]");
+      // A workflow chart on a page that never loaded mermaid needs the reload.
+      if (fresh.querySelector("pre.mermaid") && !window.mermaid) return reloadPage();
+      swapped = main && swapLive(document, fresh);
+      if (!swapped) return reloadPage();
+      STAMP = main.dataset.stamp;
+      swapped.forEach(function (el) { LIVE_HOOKS.forEach(function (fn) { fn(el); }); });
+    } finally { updating = false; }
+  }
+  var updating = false;
+  function reloadPage() {
+    // A reload keeps the window's scroll; the board's .kanban scroller is kept here.
+    var kept = [].map.call(document.querySelectorAll(".kanban"), function (el) {
+      return [el.scrollLeft, el.scrollTop];
+    });
+    try { sessionStorage.setItem(KEEP_SCROLL, JSON.stringify(kept)); } catch (_) { /* private mode */ }
+    if (window.onAutoReload) window.onAutoReload();
+    location.reload();
+  }
+  window.liveUpdate = liveUpdate;
   async function pollStamp() {
     if (document.hidden) return;
     var got;
@@ -412,13 +495,7 @@
       got = (await r.json()).stamp;
     } catch (_) { return; }
     if (!got || got === STAMP || pageBusy()) return;
-    // A reload keeps the window's scroll; the board's .kanban scroller is kept here.
-    var kept = [].map.call(document.querySelectorAll(".kanban"), function (el) {
-      return [el.scrollLeft, el.scrollTop];
-    });
-    try { sessionStorage.setItem(KEEP_SCROLL, JSON.stringify(kept)); } catch (_) { /* private mode */ }
-    if (window.onAutoReload) window.onAutoReload();
-    location.reload();
+    await liveUpdate();
   }
   // The load an auto-reload caused. A reload happens only with every field
   // as it was served, but Firefox refills fields on reload from the old page,

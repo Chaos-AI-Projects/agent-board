@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block main %}
-<div class="board-controls">
+<div class="board-controls" data-live="controls">
 {% if view.templates %}
 <details>
   <summary>New workflow from a template</summary>
@@ -34,7 +34,7 @@
    counts. The choice is a saved view pref, so a reload keeps it. AB-59: both
    the cards and the counts are always served, and the collapsed class picks
    which shows, so the toggle's script needs no reload. #}
-<section class="queue-strip{{ " collapsed" if queue_collapsed }}" aria-label="Queue">
+<section class="queue-strip{{ " collapsed" if queue_collapsed }}" aria-label="Queue" data-live="queue">
   <div class="queue-head">
     <h2 title="{{ queue_hint }}">queue ({{ queues|map(attribute="1")|map("length")|sum }})</h2>
     {% for q, cards in queues %}<span class="queue-count" data-queue="{{ q }}">{{ q }} {{ cards|length }}</span>{% endfor %}
@@ -44,7 +44,7 @@
   {% for q, cards in queues %}
   <div class="queue-group" data-queue="{{ q }}" data-count="{{ cards|length }}">
     <h3>{{ q }} ({{ cards|length }})</h3>
-    <div class="queue-cards">
+    <div class="queue-cards" data-keep-scroll>
     {% for kind, item in cards %}
     {% if kind == "workflow" %}{% set wf = item %}
     {% if wf.project %}{% set pc = project_colour(wf.project) %}{% endif %}
@@ -61,7 +61,7 @@
   </div>
 </section>
 {# AB-60: New issue sits under the queue strip, not in the controls row. #}
-<div class="new-issue-row">
+<div class="new-issue-row" data-live="new-issue">
 <details>
   <summary class="new-issue">New issue</summary>
   <form autocomplete="off" method="post" action="/issues" enctype="multipart/form-data">
@@ -85,7 +85,7 @@
   </form>
 </details>
 </div>
-<div class="kanban">
+<div class="kanban" data-live="kanban">
 {% for state, workflows, issues, groups in columns %}
 <section class="column" data-state="{{ state }}">
   <h2 title="{{ stage_hints[state] }}">{{ state }} ({{ workflows|length + issues|length }}){% if state == "done" and old_done %}<span class="old-done-count"> + {{ old_done }} older hidden</span>{% endif %}{% if columns|length > 1 %}<form autocomplete="off" method="post" action="/preferences/lanes/hide"><input type="hidden" name="lane" value="{{ state }}"><button class="hide-lane" title="Hide this lane" aria-label="Hide the {{ state }} lane">&times;</button></form>{% endif %}</h2>
@@ -141,7 +141,9 @@
   // column that would refuse the move does not accept the drop and is dimmed
   // while the card is in the air. A move refused anyway (a lease, a stale
   // version) is shown, then the page reloads so the board never shows a move
-  // that did not happen. A workflow card does not drag: its column is
+  // that did not happen. AB-96: the board updates in place rather than
+  // reloading, which also puts back a card whose move was refused or
+  // abandoned. A workflow card does not drag: its column is
   // computed from its steps, and a step's state changes on its issue page.
   var justDragged = false, dragging = false;
   function allowed(card) { return (card.dataset.moves || "").split(" "); }
@@ -158,8 +160,8 @@
     document.querySelectorAll(".kanban .column").forEach(function (col) {
       col.classList.remove("drop-ok", "drop-no");
     });
-    // A real move ends in a reload, so it stays "dragging" until then: an
-    // auto-reload must not beat a refusal's alert.
+    // A real move ends in an update, so it stays "dragging" until then: an
+    // auto-update must not beat a refusal's alert.
     // A drop into another date group of the same lane is no move (AB-17).
     if (evt.from.dataset.state === evt.to.dataset.state) { dragging = false; return; }
     // AB-53: the lanes are stages, so a drop posts the stage it landed in.
@@ -167,32 +169,44 @@
     var body = new URLSearchParams({version: card.dataset.version, stage: state});
     if (evt.from.dataset.state === "done") {
       var why = prompt("Reopening a done card needs a reason:");
-      if (!why) { location.reload(); return; }
+      if (!why) { redraw(); return; }
       body.set("note", why);
     } else if (state === "done") {
       // A human closes without a note (AB-49); Cancel still abandons the move.
       var reason = prompt("A note for done (optional):");
-      if (reason === null) { location.reload(); return; }
+      if (reason === null) { redraw(); return; }
       if (reason) body.set("note", reason);
     }
     var r;
     try {
       r = await fetch("/issues/" + card.dataset.id + "/move", {method: "POST", body: body});
-    } catch (_) { alert("Move failed: the board did not answer"); location.reload(); return; }
+    } catch (_) { alert("Move failed: the board did not answer"); redraw(); return; }
     if (!r.ok) {
       var why = r.status;
       try { why = (await r.json()).error || why; } catch (_) { /* an HTML error page */ }
       alert("Move refused: " + why);
     }
-    location.reload();
+    redraw();
   }
+  function redraw() { dragging = false; liveUpdate(); }
   function accepts(to, _from, card) { return allowed(card).indexOf(to.el.dataset.state) >= 0; }
-  document.querySelectorAll(".kanban .cards").forEach(function (list) {
-    // A workflow card shares its date group's list (AB-17) but never drags.
-    new Sortable(list, {group: {name: "kanban", put: accepts}, animation: 150,
-                        filter: ".workflow-card", preventOnFilter: false,
-                        onStart: onStart, onEnd: onEnd});
-  });
+  // Sortable keeps every list it was given until destroy(), so a swap
+  // destroys the ones it took out of the page (AB-96).
+  var sortables = [];
+  function wireSortables(root) {
+    sortables = sortables.filter(function (s) {
+      if (s.el.isConnected) return true;
+      s.destroy();
+      return false;
+    });
+    within(root, ".kanban .cards").forEach(function (list) {
+      // A workflow card shares its date group's list (AB-17) but never drags.
+      sortables.push(new Sortable(list, {group: {name: "kanban", put: accepts}, animation: 150,
+                                         filter: ".workflow-card", preventOnFilter: false,
+                                         onStart: onStart, onEnd: onEnd}));
+    });
+  }
+  onLive(wireSortables);
 
   // A plain click on a card opens its issue, or its current step's, in the
   // right-half panel (MS-662), unless the click ended a drag. A ctrl/cmd,
@@ -238,7 +252,7 @@
     document.body.classList.toggle("issue-panel-open", false);
     frame.contentWindow.location.replace("about:blank");
     // A save inside the panel may have moved the card; redraw the columns.
-    if (changed) location.reload();
+    if (changed) { changed = false; liveUpdate(); }
   }
   function sync() {
     var id = issueHash();
@@ -283,14 +297,16 @@
       panel.querySelector(".issue-panel-full").setAttribute("href", ISSUE + encodeURIComponent(id));
     }
   });
-  document.querySelectorAll(".card[data-href]").forEach(function (card) {
-    card.addEventListener("click", function (e) {
-      if (justDragged) { e.preventDefault(); return; }
-      if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
-      var inner = e.target.closest("a, button, input, form");
-      if (inner && !(inner.tagName === "A" && inner.parentElement === card)) return;
-      e.preventDefault();
-      openPanel(decodeURIComponent(card.dataset.href.slice("/issues/".length)));
+  onLive(function (root) {
+    within(root, ".card[data-href]").forEach(function (card) {
+      card.addEventListener("click", function (e) {
+        if (justDragged) { e.preventDefault(); return; }
+        if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+        var inner = e.target.closest("a, button, input, form");
+        if (inner && !(inner.tagName === "A" && inner.parentElement === card)) return;
+        e.preventDefault();
+        openPanel(decodeURIComponent(card.dataset.href.slice("/issues/".length)));
+      });
     });
   });
   sync();
@@ -345,11 +361,14 @@
     var headers = {};
     headers[{{ fetch_header|tojson }}] = "1";
     function wire(section, toggle, path, KEY, what) {
-      var box = document.querySelector(section);
-      var form = box && box.querySelector(toggle);
-      if (!form) return;
-      var button = form.querySelector("button"), saving = Promise.resolve();
+      var saving = Promise.resolve();
+      // AB-96: a live update swaps the strip or lane for a new one, so each
+      // draw finds the current one rather than holding the first.
       function draw(collapsed) {
+        var box = document.querySelector(section);
+        var form = box && box.querySelector(toggle);
+        if (!form) return;
+        var button = form.querySelector("button");
         box.classList.toggle("collapsed", collapsed);
         form.action = path + (collapsed ? "expand" : "collapse");
         button.textContent = collapsed ? "Expand" : "Collapse";
@@ -360,19 +379,25 @@
       }
       // The form holds only this button, so a click covers every way to send
       // it; a submit listener would trip the issue panel's MS-662 guard.
-      button.addEventListener("click", function (ev) {
-        ev.preventDefault();
-        var collapsed = !box.classList.contains("collapsed");
-        var url = form.action;
-        draw(collapsed);
-        share(collapsed);
-        saving = saving.then(function () {
-          return fetch(url, {method: "POST", headers: headers, credentials: "same-origin"});
-        }).then(function (r) {
-          if (!r.ok) throw new Error(r.status);
-        }).catch(function () {
-          draw(!collapsed);
-          share(!collapsed);
+      onLive(function (root) {
+        within(root, section).forEach(function (box) {
+          var form = box.querySelector(toggle);
+          if (!form) return;
+          form.querySelector("button").addEventListener("click", function (ev) {
+            ev.preventDefault();
+            var collapsed = !box.classList.contains("collapsed");
+            var url = form.action;
+            draw(collapsed);
+            share(collapsed);
+            saving = saving.then(function () {
+              return fetch(url, {method: "POST", headers: headers, credentials: "same-origin"});
+            }).then(function (r) {
+              if (!r.ok) throw new Error(r.status);
+            }).catch(function () {
+              draw(!collapsed);
+              share(!collapsed);
+            });
+          });
         });
       });
       window.addEventListener("storage", function (e) {
@@ -388,45 +413,83 @@
   // AB-34: a long done lane shows its first cards and a button for the rest.
   // Without this script nothing is hidden. The choice outlives an auto-reload.
   var SHOW_DONE = "ab34-show-done";
-  document.querySelectorAll(".column .show-more").forEach(function (button) {
-    var column = button.closest(".column");
-    var shown = false;
-    try { shown = sessionStorage.getItem(SHOW_DONE) === "1"; } catch (_) { /* private mode */ }
-    function draw() {
-      column.classList.toggle("capped", !shown);
-      button.hidden = shown;
-    }
-    button.addEventListener("click", function () {
-      shown = true;
-      try { sessionStorage.setItem(SHOW_DONE, "1"); } catch (_) { /* private mode */ }
+  onLive(function (root) {
+    within(root, ".column .show-more").forEach(function (button) {
+      var column = button.closest(".column");
+      var shown = false;
+      try { shown = sessionStorage.getItem(SHOW_DONE) === "1"; } catch (_) { /* private mode */ }
+      function draw() {
+        column.classList.toggle("capped", !shown);
+        button.hidden = shown;
+      }
+      button.addEventListener("click", function () {
+        shown = true;
+        try { sessionStorage.setItem(SHOW_DONE, "1"); } catch (_) { /* private mode */ }
+        draw();
+      });
       draw();
     });
-    draw();
   });
 </script>
 <script>
   // AB-28: choosing "+ New project" shows and enables the key and name fields
   // and makes them required; any other project hides and disables them, so a
   // half-typed key is neither validated nor sent.
-  document.querySelectorAll('form[action="/issues"]').forEach(function (form) {
-    var select = form.querySelector('select[name="project"]');
-    var box = form.querySelector(".new-project");
-    function sync() {
-      var on = select.value === {{ new_project|tojson }};
-      box.hidden = !on;
-      box.disabled = !on;
-      box.querySelectorAll("input").forEach(function (i) { i.required = on; });
-    }
-    select.addEventListener("change", sync);
-    // AB-45: Cancel is a reset button, so it clears the form without sending
-    // it; here it also closes the form. The reset event fires before the
-    // fields are cleared, so the fieldset is synced on the next tick.
-    form.addEventListener("reset", function () {
-      form.closest("details").open = false;
-      setTimeout(sync);
+  onLive(function (root) {
+    within(root, 'form[action="/issues"]').forEach(function (form) {
+      var select = form.querySelector('select[name="project"]');
+      var box = form.querySelector(".new-project");
+      function sync() {
+        var on = select.value === {{ new_project|tojson }};
+        box.hidden = !on;
+        box.disabled = !on;
+        box.querySelectorAll("input").forEach(function (i) { i.required = on; });
+      }
+      select.addEventListener("change", sync);
+      // AB-45: Cancel is a reset button, so it clears the form without sending
+      // it; here it also closes the form. The reset event fires before the
+      // fields are cleared, so the fieldset is synced on the next tick.
+      form.addEventListener("reset", function () {
+        form.closest("details").open = false;
+        setTimeout(sync);
+      });
+      sync();
     });
-    sync();
   });
+</script>
+<script>
+  // AB-96: the Queue button on a card posts with fetch and the board updates
+  // in place. A refusal is shown first. Without this script the form posts
+  // and the server sends the board back. A click covers the only way to send
+  // the form, as with the strip's toggle.
+  (function () {
+    var headers = {};
+    headers[{{ fetch_header|tojson }}] = "1";
+    async function queueCard(form) {
+      if (form.dataset.sending) return;
+      form.dataset.sending = "1";
+      try {
+        var r = await fetch(form.action, {method: "POST", body: new FormData(form), headers: headers, credentials: "same-origin"});
+        if (!r.ok) {
+          var why = r.status;
+          try { why = (await r.json()).error || why; } catch (_) { /* an HTML error page */ }
+          alert("Queue refused: " + why);
+        }
+      } catch (_) {
+        alert("Queue failed: the board did not answer");
+      } finally { delete form.dataset.sending; }
+      liveUpdate();
+    }
+    onLive(function (root) {
+      within(root, ".queue-form").forEach(function (form) {
+        form.querySelector("button").addEventListener("click", function (ev) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          queueCard(form);
+        });
+      });
+    });
+  })();
 </script>
 {% include "_mention.html" %}
 {% endblock %}

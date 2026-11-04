@@ -1016,6 +1016,8 @@ var form = {
   requestSubmit: function (b) { calls.push(["requestSubmit", b === button]); },
 };
 var document = {getElementById: function (id) { return id === "note-form" ? form : null; }};
+function onLive(fn) { fn(document); }
+function within(root, sel) { return sel === "#note-form" ? [form] : []; }
 function press(key, mods) {
   var ev = Object.assign({key: key, ctrlKey: false, metaKey: false, shiftKey: false,
                           altKey: false, isComposing: false, repeat: false,
@@ -1293,7 +1295,7 @@ def hits(html):
 
 def main_of(html):
     """The page body without the header, whose search box is on every page."""
-    return re.search(r"<main>.*</main>", html, re.S).group(0)
+    return re.search(r"<main\b[^>]*>.*</main>", html, re.S).group(0)
 
 
 def test_the_board_has_no_search_and_ignores_filter_params(client, board):
@@ -1565,7 +1567,7 @@ def test_the_banner_sits_above_the_kanban_collapsed(client, board):
     two_projects(board)
     html = client.get("/").text
     b = banner(html)
-    assert html.index(b) < html.index('<div class="kanban">')
+    assert html.index(b) < html.index('<div class="kanban" data-live="kanban">')
     assert "<details class=\"filter-banner\">" in b  # no open attribute
     assert 'action="/preferences/projects"' in b and 'method="post"' in b
     assert re.search(r'<input type="checkbox" name="project" value="BR" checked>', b)
@@ -1667,7 +1669,7 @@ def test_the_preferences_page_still_saves_every_key(client, board):
 
 
 def controls_row(html):
-    m = re.search(r'<div class="board-controls">(.*?)</details>\s*</div>', html, re.S)
+    m = re.search(r'<div class="board-controls" data-live="controls">(.*?)</details>\s*</div>', html, re.S)
     assert m, "no controls row"
     return m.group(0)
 
@@ -1680,7 +1682,7 @@ def test_the_toggles_and_the_view_banner_share_one_row_view_last(client, board):
     # AB-60: New issue left this row for the spot under the queue strip.
     assert 'class="new-issue"' not in row
     assert row.index(banner(html)) + len(banner(html)) == row.rindex("</details>") + len("</details>")
-    assert html.index(row) < html.index('<div class="kanban">')
+    assert html.index(row) < html.index('<div class="kanban" data-live="kanban">')
 
 
 def test_the_view_banner_is_right_aligned_and_its_panel_anchored_right(client, board):
@@ -3173,6 +3175,8 @@ var group = {querySelectorAll: function () { return boxes; }};
 var span = {hidden: true, querySelectorAll: function (sel) {
   return sel === "button" ? [button("all"), button("none")] : []; }};
 var document = {querySelectorAll: function (sel) { return sel === ".check-all" ? [span] : []; }};
+function onLive(fn) { fn(document); }
+function within(root, sel) { return root.querySelectorAll(sel); }
 """ + ab7_script(client.get("/").text), """(function () {
       var shown = !span.hidden;
       clicks["all:click"](); var all = boxes.map(function (b) { return b.checked; });
@@ -4989,7 +4993,7 @@ def test_ab60_new_issue_sits_between_the_queue_strip_and_the_lanes(board, client
     top = strip(html)
     assert html.count(NEW_ISSUE) == 1
     assert NEW_ISSUE not in top
-    assert html.index(top) + len(top) < html.index(NEW_ISSUE) < html.index('<div class="kanban">')
+    assert html.index(top) + len(top) < html.index(NEW_ISSUE) < html.index('<div class="kanban" data-live="kanban">')
 
 
 def test_ab60_new_issue_stays_under_a_collapsed_strip(board, client):
@@ -4997,12 +5001,12 @@ def test_ab60_new_issue_stays_under_a_collapsed_strip(board, client):
     html = client.get("/").text
     assert strip_collapsed(html)
     top = strip(html)
-    assert html.index(top) + len(top) < html.index(NEW_ISSUE) < html.index('<div class="kanban">')
+    assert html.index(top) + len(top) < html.index(NEW_ISSUE) < html.index('<div class="kanban" data-live="kanban">')
 
 
 def test_ab60_the_moved_form_still_creates_an_issue(board, client):
     html = client.get("/").text
-    after = html[html.index(NEW_ISSUE):html.index('<div class="kanban">')]
+    after = html[html.index(NEW_ISSUE):html.index('<div class="kanban" data-live="kanban">')]
     assert 'action="/issues"' in after and 'name="title"' in after
     r = client.post("/issues", data={"project": "MS", "title": "from under the strip"},
                     headers=AS_CHAOS, follow_redirects=False)
@@ -6173,3 +6177,368 @@ def test_ab91_the_days_form_keeps_the_agent_choice(board, client):
     assert '<input type="hidden" name="agents" value="1">' in form
     assert "agents" not in re.search(r'<form method="get" action="/stats".*?</form>',
                                      client.get("/stats").text, re.S).group(0)
+
+
+# --- AB-96: a moved stamp swaps the page's live regions in place --------------------------
+# Chaos 2026-11-04: "I want to make use of async http request". The page fetches
+# itself, swaps each [data-live] region for its namesake, and reloads only when
+# the fetched page cannot be swapped in.
+
+@pytest.mark.parametrize("path", ["/", "/issues/{iid}", "/issues/{iid}?embed=1"])
+def test_ab96_main_carries_the_stamp_a_fetched_page_hands_over(board, client, path):
+    iid = ready(board)
+    html = client.get(path.format(iid=iid)).text
+    stamp, _ = stamp_of(html)
+    assert f'<main data-stamp="{stamp}">' in html
+
+
+def test_ab96_a_page_without_a_stamp_has_a_plain_main(client):
+    assert "<main>" in client.get("/preferences").text
+
+
+LIVE_STUBS = """
+function region(key, label) {
+  var el = {dataset: {live: key}, label: label, parent: null, scrollLeft: 0, scrollTop: 0};
+  el.querySelectorAll = function () { return []; };
+  el.replaceWith = function (other) { el.parent.swap(el, other); };
+  return el;
+}
+function page(regions) {
+  var doc = {regions: regions, adopted: []};
+  regions.forEach(function (r) { r.parent = doc; });
+  doc.swap = function (old, other) { doc.regions[doc.regions.indexOf(old)] = other; other.parent = doc; };
+  doc.querySelectorAll = function (sel) { return sel === "[data-live]" ? doc.regions.slice() : []; };
+  doc.adoptNode = function (n) { doc.adopted.push(n.label); return n; };
+  return doc;
+}
+"""
+
+
+def test_ab96_swap_live_replaces_each_region_by_its_key(client):
+    src = LIVE_STUBS + js_function(client.get("/").text, "swapLive", "keepState")
+    got = run_js(src, """(function () {
+      var doc = page([region("a", "old a"), region("b", "old b")]);
+      var fresh = page([region("b", "new b"), region("a", "new a")]);
+      var swapped = swapLive(doc, fresh);
+      return [doc.regions.map(function (r) { return r.label; }),
+              swapped.map(function (r) { return r.label; }), doc.adopted.sort()]; })()""")
+    assert got == [["new a", "new b"], ["new a", "new b"], ["new a", "new b"]]
+
+
+@pytest.mark.parametrize("fresh", ['[region("a", "new a")]', '[region("a", "new a"), region("c", "new c")]',
+                                   '[region("a", "x"), region("b", "y"), region("c", "z")]', "[]"])
+def test_ab96_swap_live_touches_nothing_when_the_regions_do_not_match(client, fresh):
+    src = LIVE_STUBS + js_function(client.get("/").text, "swapLive", "keepState")
+    got = run_js(src, f"""(function () {{
+      var doc = page([region("a", "old a"), region("b", "old b")]);
+      var swapped = swapLive(doc, page({fresh}));
+      return [swapped, doc.regions.map(function (r) {{ return r.label; }})]; }})()""")
+    assert got == [None, ["old a", "old b"]]
+
+
+UPDATE_STUBS = LIVE_STUBS + """
+var reloads = 0, hooked = [], busy = false, reply = null, asked = [], window = {};
+var location = {pathname: "/issues/AB-1", search: "?embed=1"};
+function reloadPage() { reloads++; }
+var STAMP = "old", LIVE_HOOKS = [function (root) { hooked.push(root.label); }], updating = false;
+var document = page([region("a", "old a")]);
+function pageBusy() { return busy; }
+function fetch(url, opts) {
+  asked.push([url, opts.cache, opts.credentials]);
+  if (reply === "throw") return Promise.reject(new Error("offline"));
+  return Promise.resolve({ok: reply.ok, headers: {get: function () { return reply.type; }},
+                          text: function () { return Promise.resolve(reply.html); }});
+}
+function DOMParser() {}
+DOMParser.prototype.parseFromString = function (html) {
+  var doc = page(html.regions.map(function (r) { return region(r[0], r[1]); }));
+  doc.querySelector = function (sel) {
+    if (sel === "pre.mermaid") return html.chart ? {} : null;
+    return sel === "main[data-stamp]" && html.stamp ? {dataset: {stamp: html.stamp}} : null;
+  };
+  return doc;
+};
+"""
+
+
+def run_update(client, reply, busy="false"):
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    html = client.get("/").text
+    src = UPDATE_STUBS + js_function(html, "swapLive", "keepState") + "\nasync " + js_function(html, "liveUpdate")
+    src += f"""
+reply = {reply}; busy = {busy};
+liveUpdate().then(function () {{
+  console.log(JSON.stringify({{reloads: reloads, stamp: STAMP, hooked: hooked, asked: asked,
+    updating: updating, regions: document.regions.map(function (r) {{ return r.label; }})}}));
+}});
+"""
+    out = subprocess.run([node, "-e", src], capture_output=True, text=True, check=True).stdout
+    return json.loads(out)
+
+
+GOOD = '{ok: true, type: "text/html; charset=utf-8", html: {stamp: "new", regions: [["a", "new a"]]}}'
+
+
+def test_ab96_live_update_swaps_takes_the_new_stamp_and_rewires_the_region(client):
+    got = run_update(client, GOOD)
+    assert got == {"reloads": 0, "stamp": "new", "hooked": ["new a"], "updating": False,
+                   "asked": [["/issues/AB-1?embed=1", "no-store", "same-origin"]],
+                   "regions": ["new a"]}
+
+
+@pytest.mark.parametrize("reply", [
+    '"throw"',
+    '{ok: false, type: "text/html", html: {stamp: "new", regions: [["a", "new a"]]}}',
+    '{ok: true, type: "application/json", html: {stamp: "new", regions: [["a", "new a"]]}}',
+    '{ok: true, type: "text/html", html: {stamp: null, regions: [["a", "new a"]]}}',
+    '{ok: true, type: "text/html", html: {stamp: "new", regions: [["b", "new b"]]}}',
+    '{ok: true, type: "text/html", html: {stamp: "new", chart: true, regions: [["a", "new a"]]}}',
+])
+def test_ab96_a_page_it_cannot_swap_in_falls_back_to_a_reload(client, reply):
+    got = run_update(client, reply)
+    assert got["reloads"] == 1 and got["stamp"] == "old" and got["regions"] == ["old a"]
+    assert got["hooked"] == [] and got["updating"] is False
+
+
+def test_ab96_a_page_that_turned_busy_during_the_fetch_is_left_for_the_next_poll(client):
+    got = run_update(client, GOOD, busy="true")
+    assert got["reloads"] == 0 and got["regions"] == ["old a"]
+    assert got["updating"] is False
+    # A refused drag leaves the stamp where it was, so the next poll must
+    # still see the screen as stale.
+    assert got["stamp"] is None
+
+
+def test_ab96_a_busy_page_whose_fetch_failed_waits_rather_than_reloads(client):
+    got = run_update(client, '"throw"', busy="true")
+    assert got["reloads"] == 0 and got["stamp"] is None and got["regions"] == ["old a"]
+
+
+def test_ab96_an_update_asked_for_while_one_is_out_marks_the_screen_stale(client):
+    html = client.get("/").text
+    src = UPDATE_STUBS + js_function(html, "swapLive", "keepState") + "\nasync " + js_function(html, "liveUpdate")
+    got = run_js(src + "\nupdating = true; liveUpdate();", "[STAMP, asked.length]")
+    assert got == [None, 0]
+
+
+def test_ab96_a_swap_destroys_the_sortables_of_the_lists_it_replaced(client):
+    src = js_function(client.get("/").text, "wireSortables")
+    got = run_js("""
+var made = [], destroyed = [], sortables = [];
+function accepts() {} function onStart() {} function onEnd() {}
+function Sortable(el) { this.el = el; made.push(el.name); }
+Sortable.prototype.destroy = function () { destroyed.push(this.el.name); };
+function within(root) { return root.lists; }
+""" + src + """
+var a = {name: "a", isConnected: true}, b = {name: "b", isConnected: true};
+wireSortables({lists: [a, b]});
+a.isConnected = false; b.isConnected = false;
+wireSortables({lists: [{name: "c", isConnected: true}]});
+""", "[made, destroyed, sortables.length]")
+    assert got == [["a", "b", "c"], ["a", "b"], 1]
+
+
+def test_ab96_the_stamp_poll_swaps_rather_than_reloads(client):
+    poll = js_function(client.get("/").text, "pollStamp")
+    assert "liveUpdate()" in poll and "location.reload" not in poll
+
+
+def test_ab96_a_swapped_region_keeps_its_scroll_and_its_open_sections(client):
+    src = LIVE_STUBS + js_function(client.get("/").text, "swapLive", "keepState")
+    got = run_js(src, """(function () {
+      var old = region("k", "old"), fresh = region("k", "new");
+      old.scrollLeft = 40; old.scrollTop = 7; fresh.scrollLeft = 0; fresh.scrollTop = 0;
+      var inner = {scrollLeft: 12, scrollTop: 3}, inner2 = {scrollLeft: 0, scrollTop: 0};
+      old.parts = {"details": [{open: true}, {open: false}], "[data-keep-scroll]": [inner]};
+      fresh.parts = {"details": [{open: false}, {open: true}], "[data-keep-scroll]": [inner2]};
+      [old, fresh].forEach(function (r) { r.querySelectorAll = function (s) { return r.parts[s] || []; }; });
+      var doc = page([old]);
+      swapLive(doc, page([fresh]));
+      return [fresh.scrollLeft, fresh.scrollTop, fresh.parts.details.map(function (d) { return d.open; }),
+              inner2.scrollLeft, inner2.scrollTop]; })()""")
+    assert got == [40, 7, [True, False], 12, 3]
+
+
+def test_ab96_scroll_is_set_after_the_region_is_in_the_page(client):
+    # A browser drops a scroll written to an element with no layout box, so a
+    # region scrolled before replaceWith comes back at 0 (smoke, 2026-11-04).
+    src = LIVE_STUBS + js_function(client.get("/").text, "swapLive", "keepState")
+    got = run_js(src, """(function () {
+      var old = region("k", "old"), fresh = region("k", "new"), doc = page([old]);
+      function scroller(owner) {
+        var box = {x: 0, y: 0}, el = {};
+        Object.defineProperty(el, "scrollLeft", {get: function () { return box.x; },
+          set: function (v) { if (owner().parent === doc) box.x = v; }});
+        Object.defineProperty(el, "scrollTop", {get: function () { return box.y; },
+          set: function (v) { if (owner().parent === doc) box.y = v; }});
+        return el;
+      }
+      var me = scroller(function () { return fresh; }), inner2 = scroller(function () { return fresh; });
+      Object.defineProperty(fresh, "scrollLeft", Object.getOwnPropertyDescriptor(me, "scrollLeft"));
+      Object.defineProperty(fresh, "scrollTop", Object.getOwnPropertyDescriptor(me, "scrollTop"));
+      old.scrollLeft = 40; old.scrollTop = 7;
+      old.parts = {"[data-keep-scroll]": [{scrollLeft: 12, scrollTop: 3}]};
+      fresh.parts = {"[data-keep-scroll]": [inner2]};
+      [old, fresh].forEach(function (r) { r.querySelectorAll = function (s) { return r.parts[s] || []; }; });
+      swapLive(doc, page([fresh]));
+      return [fresh.scrollLeft, fresh.scrollTop, inner2.scrollLeft, inner2.scrollTop]; })()""")
+    assert got == [40, 7, 12, 3]
+
+
+def test_ab96_open_sections_follow_only_when_the_new_region_has_the_same_ones(client):
+    src = LIVE_STUBS + js_function(client.get("/").text, "swapLive", "keepState")
+    got = run_js(src, """(function () {
+      var old = region("k", "old"), fresh = region("k", "new");
+      old.parts = {"details": [{open: true}]};
+      fresh.parts = {"details": [{open: false}, {open: false}]};
+      [old, fresh].forEach(function (r) { r.querySelectorAll = function (s) { return r.parts[s] || []; }; });
+      swapLive(page([old]), page([fresh]));
+      return fresh.parts.details.map(function (d) { return d.open; }); })()""")
+    assert got == [False, False]
+
+
+def live_tree(html):
+    """Each data-live key in a page, and the data-live keys around #issue-panel."""
+    from html.parser import HTMLParser
+    keys, around, stack = [], [], []
+
+    class P(HTMLParser):
+        def handle_starttag(self, tag, attrs):
+            a = dict(attrs)
+            if tag in ("input", "br", "img", "meta", "link", "hr"):
+                return
+            stack.append(a.get("data-live"))
+            if a.get("data-live"):
+                keys.append(a["data-live"])
+            if a.get("id") == "issue-panel":
+                around.extend(k for k in stack[:-1] if k)
+
+        def handle_endtag(self, tag):
+            if tag not in ("input", "br", "img", "meta", "link", "hr") and stack:
+                stack.pop()
+
+    P().feed(html)
+    return keys, around
+
+
+def test_ab96_the_board_swaps_its_regions_and_never_the_issue_panel(board, client):
+    ready(board)
+    keys, around = live_tree(client.get("/").text)
+    assert keys == ["unseen", "controls", "queue", "new-issue", "kanban"]
+    assert around == [], "a swap would reload the panel's frame"
+
+
+@pytest.mark.parametrize("path", ["/", "/issues/{iid}"])
+def test_ab96_the_header_count_sits_in_a_region_whether_or_not_it_shows(board, client, path):
+    # AB-67's count moves the stamp, so a swap that left the header alone
+    # would keep the old number on an always-open board.
+    iid = finished(board, "seen")
+    client.get(f"/issues/{iid}", headers=AS_CHAOS)
+    url = path.format(iid=iid)
+    html = client.get(url, headers=AS_CHAOS).text
+    assert "unseen" in live_tree(html)[0] and live_region_tags(html, "unseen")[0] == []
+    finished(board, "one")
+    html = client.get(url, headers=AS_CHAOS).text
+    assert live_region_tags(html, "unseen")[0] == ["a"] and unseen_count(html) == 1
+
+
+def test_ab96_the_queue_cards_keep_their_sideways_scroll(board, client):
+    ready(board)
+    assert re.search(r'<div class="queue-cards" data-keep-scroll>', client.get("/").text)
+
+
+def test_ab96_board_scripts_wire_each_swapped_region(client):
+    html = client.get("/").text
+    assert "onLive(wireSortables)" in html
+    for wired in ('within(root, ".card[data-href]")', 'within(root, ".column .show-more")',
+                  "within(root, 'form[action=\"/issues\"]')", 'within(root, ".check-all")'):
+        at = html.index(wired)
+        assert html.rfind("onLive(function (root) {", 0, at) > html.rfind("</script>", 0, at), wired
+
+
+@pytest.mark.parametrize("fn", ["onEnd", "hidePanel"])
+def test_ab96_a_drag_or_closing_the_panel_updates_the_board_in_place(client, fn):
+    html = client.get("/").text
+    src = js_function(html, fn)
+    assert "location.reload" not in src
+    assert "liveUpdate()" in (js_function(html, "redraw") if fn == "onEnd" else src)
+    if fn == "onEnd":
+        assert src.count("redraw()") == 4, "a refusal, a failure, a cancel and a move"
+        assert "dragging = false" in js_function(html, "redraw"), "a drag would hold the update"
+
+
+def test_ab96_the_card_queue_button_posts_with_fetch_then_updates(client):
+    html = client.get("/").text
+    src = js_function(html, "queueCard")
+    assert "fetch(form.action" in src and "liveUpdate()" in src
+    assert 'within(root, ".queue-form")' in html
+
+
+def live_region_tags(html, key):
+    """The tags inside the data-live=key region, by name."""
+    from html.parser import HTMLParser
+    inside, depth, tags, ids = [False], [0], [], []
+
+    class P(HTMLParser):
+        def handle_starttag(self, tag, attrs):
+            a = dict(attrs)
+            if tag in ("input", "br", "img", "meta", "link", "hr"):
+                if inside[0]:
+                    tags.append(tag)
+                return
+            if inside[0]:
+                depth[0] += 1
+                tags.append(tag)
+                if a.get("id"):
+                    ids.append(a["id"])
+            elif a.get("data-live") == key:
+                inside[0], depth[0] = True, 1
+
+        def handle_endtag(self, tag):
+            if inside[0] and tag not in ("input", "br", "img", "meta", "link", "hr"):
+                depth[0] -= 1
+                if depth[0] == 0:
+                    inside[0] = False
+
+    P().feed(html)
+    return tags, ids
+
+
+@pytest.mark.parametrize("embed", ["", "?embed=1"])
+def test_ab96_an_issue_page_swaps_one_region_without_its_scripts(board, client, embed):
+    iid = ready(board)
+    core.annotate(board, iid, "a note", actor=CHAOS, actor_kind=HUMAN)
+    html = client.get(f"/issues/{iid}{embed}").text
+    keys, _ = live_tree(html)
+    assert keys == (["issue"] if embed else ["unseen", "issue"])
+    tags, ids = live_region_tags(html, "issue")
+    assert "h1" in tags and "note-form" in ids
+    assert "script" not in tags, "a swapped-in script never runs"
+    assert "write-error" not in ids, "the error dialog may be open over a swap"
+
+
+def test_ab96_a_workflow_issue_keeps_the_chart_script_outside_the_region(board, client):
+    wf = release(board)
+    html = client.get(f"/issues/{wf['steps'][1]['id']}").text
+    assert "mermaid.min.js" in html
+    tags, _ = live_region_tags(html, "issue")
+    assert "pre" in tags and "script" not in tags
+
+
+def test_ab96_issue_scripts_wire_each_swapped_region(board, client):
+    html = client.get(f"/issues/{ready(board)}").text
+    for wired in ('within(root, "select[data-current]")', 'within(root, "#note-form")',
+                  "within(root, 'form[method=post][action^=\"/issues/\"]')"):
+        at = html.index(wired)
+        assert html.rfind("onLive(function (root) {", 0, at) > html.rfind("</script>", 0, at), wired
+
+
+def test_ab96_a_swapped_in_chart_is_drawn(board, client):
+    wf = release(board)
+    src = js_function(client.get(f"/issues/{wf['steps'][1]['id']}").text, "drawCharts")
+    assert 'within(root, "pre.mermaid")' in src and "mermaid.run" in src
+    assert "root === document" in src, "the first draw is mermaid's own startOnLoad"
