@@ -409,9 +409,12 @@
     if (["hidden", "submit", "button", "reset", "image"].indexOf(type) >= 0) return false;
     return el.value !== el.defaultValue;
   }
-  function pageBusy() {
+  // AB-97: `exempt` is a form whose write just saved. Focus inside it does
+  // not hold the update its own save asked for; typed text anywhere still does.
+  function pageBusy(exempt) {
     var active = document.activeElement;
-    if (active && active.matches && active.matches("input, textarea, select")) return true;
+    if (active && active.matches && active.matches("input, textarea, select") &&
+        !(exempt && exempt.contains(active))) return true;
     var fields = document.querySelectorAll("input, textarea, select");
     for (var i = 0; i < fields.length; i++) if (fieldDirty(fields[i])) return true;
     return !!(window.extraBusy && window.extraBusy());
@@ -420,14 +423,18 @@
   // one with the same key, so scroll, focus and the board's issue panel stay
   // put. A page that cannot be swapped in, a refusal, an error page, or one
   // whose regions differ, falls back to a reload. A page that turned busy
-  // while the fetch was out is left for the next poll.
+  // while the fetch was out is left for the next poll. A key that repeats, as
+  // a raw-HTML note holding data-live="issue" would, reloads too (AB-97).
   function swapLive(doc, fresh) {
-    var olds = doc.querySelectorAll("[data-live]"), news = {}, count = 0;
-    fresh.querySelectorAll("[data-live]").forEach(function (el) { news[el.dataset.live] = el; count++; });
-    if (!olds.length || olds.length !== count) return null;
+    var olds = doc.querySelectorAll("[data-live]"), news = {}, count = 0, repeated = false;
+    fresh.querySelectorAll("[data-live]").forEach(function (el) {
+      if (el.dataset.live in news) repeated = true;
+      news[el.dataset.live] = el; count++;
+    });
+    if (repeated || !olds.length || olds.length !== count) return null;
     for (var i = 0; i < olds.length; i++) if (!(olds[i].dataset.live in news)) return null;
     return Array.prototype.map.call(olds, function (old) {
-      var el = doc.adoptNode(news[old.dataset.live]), restore = keepState(old, el);
+      var el = doc.adoptNode(news[old.dataset.live]), restore = keepState(old, el, doc);
       old.replaceWith(el);
       restore();
       return el;
@@ -437,8 +444,14 @@
   // scrollers', and which sections are open, when the new region has the
   // same sections. A browser drops a scroll set on an element not yet in the
   // page, so the scrolls are read now and set by the returned function once
-  // the region is in.
-  function keepState(old, el) {
+  // the region is in. So is the focus (AB-97), with the caret when the field
+  // still holds the same text.
+  function keepState(old, el, doc) {
+    var active = doc && doc.activeElement, path = null, caret = null;
+    if (active && old.contains && old.contains(active)) {
+      path = focusPath(active);
+      if (typeof active.selectionStart === "number") caret = [active.value, active.selectionStart, active.selectionEnd];
+    }
     var pairs = [[old, el]];
     var was = old.querySelectorAll("[data-keep-scroll]"), now = el.querySelectorAll("[data-keep-scroll]");
     for (var i = 0; i < Math.min(was.length, now.length); i++) pairs.push([was[i], now[i]]);
@@ -447,13 +460,29 @@
     if (was.length === now.length) for (var j = 0; j < now.length; j++) now[j].open = was[j].open;
     return function () {
       pairs.forEach(function (p, k) { p[1].scrollLeft = at[k][0]; p[1].scrollTop = at[k][1]; });
+      var found = path && doc.getElementById(path[0]);
+      if (found && path.length > 1) found = found.elements && found.elements[path[1]];
+      if (!found || !found.focus) return;
+      found.focus({preventScroll: true});
+      if (caret && found.value === caret[0]) {
+        try { found.setSelectionRange(caret[1], caret[2]); } catch (_) { /* a field without a caret */ }
+      }
     };
+  }
+  // The focused field, found again by its id, or by its form's id and its
+  // place among that form's fields, which a swap leaves the same.
+  function focusPath(el) {
+    if (el.id) return [el.id];
+    if (el.form && el.form.id) return [el.form.id, Array.prototype.indexOf.call(el.form.elements, el)];
+    return null;
   }
   // An update that cannot swap now clears STAMP, so the next poll that finds
   // the page idle swaps even when nothing on the server moved: a refused or
-  // cancelled drag has already moved its card on screen.
-  async function liveUpdate() {
-    if (updating) { STAMP = null; return; }
+  // cancelled drag has already moved its card on screen. A save that lands
+  // while a poll's update is out runs its own after it, since the poll's
+  // fetch may have left before the save did (AB-97).
+  async function liveUpdate(exempt) {
+    if (updating) { STAMP = null; if (exempt) after = exempt; return; }
     updating = true;
     try {
       var fresh, main, swapped;
@@ -462,10 +491,10 @@
         if (!r.ok || (r.headers.get("content-type") || "").indexOf("text/html") !== 0) throw new Error(r.status);
         fresh = new DOMParser().parseFromString(await r.text(), "text/html");
       } catch (_) {
-        if (pageBusy()) { STAMP = null; return; }
+        if (pageBusy(exempt)) { STAMP = null; return; }
         return reloadPage();
       }
-      if (pageBusy()) { STAMP = null; return; }
+      if (pageBusy(exempt)) { STAMP = null; return; }
       main = fresh.querySelector("main[data-stamp]");
       // A workflow chart on a page that never loaded mermaid needs the reload.
       if (fresh.querySelector("pre.mermaid") && !window.mermaid) return reloadPage();
@@ -473,9 +502,12 @@
       if (!swapped) return reloadPage();
       STAMP = main.dataset.stamp;
       swapped.forEach(function (el) { LIVE_HOOKS.forEach(function (fn) { fn(el); }); });
-    } finally { updating = false; }
+    } finally {
+      updating = false;
+      if (after) { var next = after; after = null; liveUpdate(next); }
+    }
   }
-  var updating = false;
+  var updating = false, after = null;
   function reloadPage() {
     // A reload keeps the window's scroll; the board's .kanban scroller is kept here.
     var kept = [].map.call(document.querySelectorAll(".kanban"), function (el) {

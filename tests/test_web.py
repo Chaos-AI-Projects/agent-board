@@ -6240,7 +6240,7 @@ UPDATE_STUBS = LIVE_STUBS + """
 var reloads = 0, hooked = [], busy = false, reply = null, asked = [], window = {};
 var location = {pathname: "/issues/AB-1", search: "?embed=1"};
 function reloadPage() { reloads++; }
-var STAMP = "old", LIVE_HOOKS = [function (root) { hooked.push(root.label); }], updating = false;
+var STAMP = "old", LIVE_HOOKS = [function (root) { hooked.push(root.label); }], updating = false, after = null;
 var document = page([region("a", "old a")]);
 function pageBusy() { return busy; }
 function fetch(url, opts) {
@@ -6542,3 +6542,208 @@ def test_ab96_a_swapped_in_chart_is_drawn(board, client):
     src = js_function(client.get(f"/issues/{wf['steps'][1]['id']}").text, "drawCharts")
     assert 'within(root, "pre.mermaid")' in src and "mermaid.run" in src
     assert "root === document" in src, "the first draw is mermaid's own startOnLoad"
+
+
+# --- AB-97: a note or an edit saves in place ------------------------------------------------
+# Chaos 2026-11-04, on AB-96: "Yes, please make those async too." A fetched note
+# or edit is answered 204, and the page swaps itself rather than navigating.
+
+def test_ab97_a_fetched_note_is_saved_without_a_redirect(board, client):
+    iid = ready(board)
+    issue = core.show(board, iid)
+    r = client.post(f"/issues/{iid}/note", data=note_form(issue, "in place"),
+                    headers=AS_CHAOS | {web.FETCH_HEADER: "1"}, follow_redirects=False)
+    assert r.status_code == 204 and r.content == b""
+    assert core.show(board, iid)["events"][-1]["note"] == "in place"
+
+
+def test_ab97_a_fetched_stage_change_is_saved_without_a_redirect(board, client):
+    iid = ready(board)
+    issue = core.show(board, iid)
+    r = client.post(f"/issues/{iid}/note", data=note_form(issue, "why", stage="backlog"),
+                    headers=AS_CHAOS | {web.FETCH_HEADER: "1"}, follow_redirects=False)
+    assert r.status_code == 204
+    assert core.show(board, iid)["stage"] == "backlog"
+
+
+def test_ab97_a_fetched_edit_is_saved_without_a_redirect(board, client):
+    iid = ready(board)
+    issue = core.show(board, iid)
+    r = client.post(f"/issues/{iid}/edit", data=edit_form(issue, title="renamed"),
+                    headers=AS_CHAOS | {web.FETCH_HEADER: "1"}, follow_redirects=False)
+    assert r.status_code == 204
+    assert core.show(board, iid)["title"] == "renamed"
+
+
+@pytest.mark.parametrize("path, data", [("note", lambda i: note_form(i, "plain")),
+                                        ("edit", lambda i: edit_form(i, title="plain"))])
+def test_ab97_without_js_a_note_or_edit_still_redirects_to_the_issue(board, client, path, data):
+    iid = ready(board)
+    r = client.post(f"/issues/{iid}/{path}?embed=1", data=data(core.show(board, iid)),
+                    headers=AS_CHAOS, follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == f"/issues/{iid}?embed=1"
+
+
+def test_ab97_a_fetched_refusal_is_still_json(board, client):
+    iid = ready(board)
+    stale = core.show(board, iid)
+    core.edit(board, iid, actor=CHAOS, actor_kind=HUMAN, title="moved on",
+              expected_version=stale["version"])
+    r = client.post(f"/issues/{iid}/edit", data=edit_form(stale, title="two"),
+                    headers=AS_CHAOS | {web.FETCH_HEADER: "1"})
+    assert r.status_code == 409 and r.json()["error"]
+
+
+def test_ab97_the_fetched_queue_button_gets_no_board_back(board, client):
+    # AB-96 review Minor: the Queue button's fetch followed the 303 and the
+    # board was rendered twice, once for the redirect and once for liveUpdate.
+    issue = core.show(board, queued_and_waiting(board)["waiting"])
+    r = client.post(f"/issues/{issue['id']}/queue", data={"version": issue["version"]},
+                    headers=AS_CHAOS | {web.FETCH_HEADER: "1"}, follow_redirects=False)
+    assert r.status_code == 204
+    assert core.show(board, issue["id"])["queue"] == "ready"
+
+
+@pytest.mark.parametrize("fresh", ['[region("a", "x"), region("a", "y")]',
+                                   '[region("a", "x"), region("b", "y"), region("a", "z")]'])
+def test_ab97_swap_live_refuses_a_page_whose_key_repeats(client, fresh):
+    # AB-96 review Minor: a raw-HTML note holding data-live="issue" would have
+    # been swapped in for the real region. A repeated key reloads instead.
+    src = LIVE_STUBS + js_function(client.get("/").text, "swapLive", "keepState")
+    got = run_js(src, f"""(function () {{
+      var doc = page([region("a", "old a"), region("b", "old b")]);
+      if ({fresh}.length === 2) doc = page([region("a", "old a"), region("a", "old a2")]);
+      var swapped = swapLive(doc, page({fresh}));
+      return [swapped, doc.adopted]; }})()""")
+    assert got == [None, []]
+
+
+SAVED_FORM_STUBS = """
+function field(value, start) {
+  return {tagName: "TEXTAREA", type: "textarea", value: value, defaultValue: start,
+          matches: function () { return true; }};
+}
+var box = field("", ""), other = field("", ""), window = {};
+var document = {activeElement: box, querySelectorAll: function () { return [box, other]; }};
+var form = {contains: function (el) { return el === box; }};
+"""
+
+
+def test_ab97_focus_in_the_form_just_saved_does_not_hold_the_swap(client):
+    src = SAVED_FORM_STUBS + js_function(client.get("/").text, "fieldDirty", "pageBusy")
+    got = run_js(src, """[pageBusy(), pageBusy(form),
+      (box.value = "typed again", pageBusy(form)),
+      (box.value = "", other.value = "elsewhere", pageBusy(form))]""")
+    assert got == [True, False, True, True], "only the focus is excused, never typed text"
+
+
+def run_live(client, script):
+    html = client.get("/").text
+    src = UPDATE_STUBS + js_function(html, "swapLive", "keepState") + "\nasync " + js_function(html, "liveUpdate")
+    src += "\n" + script
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    out = subprocess.run([node, "-e", src], capture_output=True, text=True, check=True).stdout
+    return json.loads(out)
+
+
+def test_ab97_live_update_passes_its_saved_form_to_the_busy_check(client):
+    got = run_live(client, f"""
+reply = {GOOD}; busy = true;
+function pageBusy(exempt) {{ return busy && exempt !== "the form"; }}
+liveUpdate("the form").then(function () {{
+  console.log(JSON.stringify([reloads, STAMP, document.regions.map(function (r) {{ return r.label; }})]));
+}});""")
+    assert got == [0, "new", ["new a"]]
+
+
+def test_ab97_a_save_during_a_poll_swaps_again_once_the_poll_is_done(client):
+    # The poll's fetch may have left before the note was saved, so its swap
+    # can show the card without the note; the save's own update runs after it.
+    got = run_live(client, f"""
+reply = {GOOD};
+var first = liveUpdate();
+liveUpdate("the form");
+first.then(function () {{ return new Promise(function (ok) {{ setTimeout(ok, 0); }}); }}).then(function () {{
+  console.log(JSON.stringify([asked.length, updating, STAMP]));
+}});""")
+    assert got == [2, False, "new"]
+
+
+def test_ab97_a_swap_keeps_the_focused_field_and_its_caret(client):
+    src = LIVE_STUBS + js_function(client.get("/").text, "swapLive", "keepState", "focusPath")
+    got = run_js(src, """(function () {
+      var focused = [];
+      function input(form, value) {
+        var el = {form: form, value: value, selectionStart: 2, selectionEnd: 4};
+        el.focus = function (opts) { focused.push([el.value, opts.preventScroll]); };
+        el.setSelectionRange = function (a, b) { el.selectionStart = a; el.selectionEnd = b; };
+        return el;
+      }
+      var oldForm = {id: "edit-form", elements: []}, newForm = {id: "edit-form", elements: []};
+      var was = input(oldForm, "same"), now = input(newForm, "same");
+      now.selectionStart = now.selectionEnd = 0;
+      oldForm.elements.push({}, was); newForm.elements.push({}, now);
+      var old = region("issue", "old"), fresh = region("issue", "new");
+      old.contains = function (el) { return el === was; };
+      var doc = page([old]);
+      doc.activeElement = was;
+      doc.getElementById = function (id) { return id === "edit-form" ? newForm : null; };
+      swapLive(doc, page([fresh]));
+      return [focused, now.selectionStart, now.selectionEnd]; })()""")
+    assert got == [[["same", True]], 2, 4]
+
+
+SAVED_STUBS = """
+var updated = [], reloads = 0, location = {reload: function () { reloads++; }};
+var window = {liveUpdate: function (form) { updated.push(form.id); return Promise.resolve(); }};
+function makeForm(id, fields) {
+  var form = {id: id, elements: fields, resets: 0};
+  form.reset = function () { form.resets++; fields.forEach(function (f) { f.value = f.defaultValue; }); };
+  return form;
+}
+function text(value, start) { return {tagName: "TEXTAREA", type: "textarea", value: value, defaultValue: start}; }
+"""
+
+
+def test_ab97_a_saved_note_empties_its_box_and_swaps_the_page(board, client):
+    src = SAVED_STUBS + js_function(client.get(f"/issues/{ready(board)}").text,
+                                    "savedInPlace", "settleFields")
+    got = run_js(src, """(function () {
+      var note = text("my note", ""), form = makeForm("note-form", [note]);
+      savedInPlace(form);
+      return [note.value, form.resets, updated, reloads]; })()""")
+    assert got == ["", 1, ["note-form"], 0]
+
+
+def test_ab97_a_saved_edit_keeps_what_was_saved_as_the_fields_start(board, client):
+    src = SAVED_STUBS + js_function(client.get(f"/issues/{ready(board)}").text,
+                                    "savedInPlace", "settleFields")
+    got = run_js(src, """(function () {
+      var title = text("new title", "old title");
+      var box = {tagName: "INPUT", type: "checkbox", checked: true, defaultChecked: false};
+      var files = {tagName: "INPUT", type: "file", value: "C:\\\\fakepath\\\\a.png"};
+      var form = makeForm("edit-form", [title, box, files]);
+      savedInPlace(form);
+      return [title.value, title.defaultValue, box.defaultChecked, files.value, form.resets, updated]; })()""")
+    assert got == ["new title", "new title", True, "", 0, ["edit-form"]]
+
+
+def test_ab97_without_a_live_update_a_save_reloads(board, client):
+    src = SAVED_STUBS + js_function(client.get(f"/issues/{ready(board)}").text,
+                                    "savedInPlace", "settleFields")
+    got = run_js(src + "\nwindow = {};", """(function () {
+      savedInPlace(makeForm("note-form", [text("n", "")]));
+      return reloads; })()""")
+    assert got == 1
+
+
+def test_ab97_a_204_saves_in_place_and_anything_else_is_as_before(board, client):
+    html = client.get(f"/issues/{ready(board)}").text
+    src = js_function(html, "sendForm")
+    assert src.index("r.status === 204") < src.index("r.redirected")
+    assert "savedInPlace(form)" in src
+    assert 'id="edit-form"' in html and 'id="note-form"' in html

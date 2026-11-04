@@ -982,6 +982,13 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         embed = "?embed=1" if request is not None and embedded(request) else ""
         return RedirectResponse(f"/issues/{issue_id}{embed}", status_code=303)
 
+    def saved_back(issue_id, request):
+        """`back`, except that a fetched write gets 204: the page that sent it
+        swaps itself in place (AB-97) and has no use for a page to follow."""
+        if request.headers.get(FETCH_HEADER):
+            return Response(status_code=204)
+        return back(issue_id, request)
+
     hosts = allowed_hosts()
 
     @app.middleware("http")
@@ -1576,7 +1583,7 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         except core.Conflict:
             return error(request, 409, f"{issue_id} changed since you loaded it. "
                          "Reload the card to see what changed, then save again.", issue_id)
-        return back(issue_id, request)
+        return saved_back(issue_id, request)
 
     @app.post("/issues/{issue_id}/edit")
     async def edit(request: Request, issue_id: str):
@@ -1621,7 +1628,7 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         except core.Conflict:
             return error(request, 409, f"{issue_id} changed since you loaded it. "
                          "Reload the board to see what changed.", issue_id)
-        return back(None, request)
+        return saved_back(None, request)
 
     @app.post("/issues/{issue_id}/schedule")
     async def schedule(request: Request, issue_id: str):
@@ -1698,7 +1705,7 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
                                            note=note)
         core.annotate(engine, issue_id, f.get("note", ""), actor=me.email, actor_kind=me.kind,
                       attachments=files)
-        return back(issue_id, request)
+        return saved_back(issue_id, request)
 
     @app.get("/attachments/{attachment_id}")
     def download(attachment_id: int):

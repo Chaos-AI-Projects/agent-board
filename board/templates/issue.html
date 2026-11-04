@@ -103,7 +103,7 @@
 
 <details>
 <summary>Edit issue</summary>
-<form autocomplete="off" method="post" action="/issues/{{ issue.id }}/edit{{ embed_q }}" enctype="multipart/form-data">
+<form id="edit-form" autocomplete="off" method="post" action="/issues/{{ issue.id }}/edit{{ embed_q }}" enctype="multipart/form-data">
   <input type="hidden" name="version" value="{{ issue.version }}">
   <label>Title <input name="title" value="{{ issue.title }}" size="60"></label>
   <label>Body <textarea name="body" data-mention>{{ issue.body }}</textarea></label>
@@ -239,8 +239,8 @@
   // AB-82: Ctrl+Enter, or Cmd+Enter on a Mac, in the note box presses the
   // form's button. requestSubmit validates first, so an empty required note is
   // refused, and it fires the submit event the fetch handler below listens for.
-  // A held key's repeats are dropped: the fetch guard clears before the
-  // redirect lands, so a repeat in between would post the note twice.
+  // A held key's repeats are dropped: a repeat that lands after the fetch
+  // guard clears, before the swap replaces the form, would post the note twice.
   onLive(function (root) {
     var form = within(root, "#note-form")[0];
     if (!form) return;
@@ -284,6 +284,24 @@
   // the issue and keeps what was typed. A success follows the redirect; any
   // other page, such as the take-over form, replaces this one. Without JS the
   // forms post as before and the error page links back here.
+  // AB-97: a saved note or edit is answered 204 instead, and the page swaps
+  // itself in place. The note box empties only then. An edit form keeps the
+  // saved values as its starting ones, so it no longer reads as unsaved input
+  // that would hold the swap.
+  function savedInPlace(form) {
+    if (form.id === "note-form") form.reset(); else settleFields(form);
+    if (window.liveUpdate) return window.liveUpdate(form);
+    location.reload();
+  }
+  function settleFields(form) {
+    Array.prototype.forEach.call(form.elements, function (el) {
+      var tag = String(el.tagName || "").toLowerCase(), type = String(el.type || "").toLowerCase();
+      if (type === "file") el.value = "";
+      else if (type === "checkbox" || type === "radio") el.defaultChecked = el.checked;
+      else if (tag === "select") Array.prototype.forEach.call(el.options, function (o) { o.defaultSelected = o.selected; });
+      else if (tag === "textarea" || tag === "input") el.defaultValue = el.value;
+    });
+  }
   (function () {
     var dlg = document.getElementById("write-error");
     if (!dlg || !window.fetch) return;
@@ -300,29 +318,33 @@
         form.addEventListener("submit", function (ev) {
           if (ev.defaultPrevented) return;
           ev.preventDefault();
-          if (form.dataset.sending) return;
-          form.dataset.sending = "1";
-          var body = new FormData(form);
-          if (ev.submitter && ev.submitter.name) body.append(ev.submitter.name, ev.submitter.value);
-          var headers = {};
-          headers["{{ fetch_header }}"] = "1";
-          fetch(form.action, {method: "POST", body: body, headers: headers, credentials: "same-origin"})
-            .then(function (r) {
-              var type = r.headers.get("content-type") || "";
-              if (!r.ok && type.indexOf("application/json") === 0) {
-                return r.json().then(function (got) { show(got.error); });
-              }
-              if (r.redirected) { location.href = r.url; return; }
-              return r.text().then(function (html) {
-                replaced = true;
-                document.open(); document.write(html); document.close();
-              });
-            })
-            .catch(function () { show("The board did not answer, or your sign-in has expired. Reload the page, then try again."); })
-            .finally(function () { delete form.dataset.sending; });
+          sendForm(form, ev.submitter);
         });
       });
     });
+    function sendForm(form, submitter) {
+      if (form.dataset.sending) return;
+      form.dataset.sending = "1";
+      var body = new FormData(form);
+      if (submitter && submitter.name) body.append(submitter.name, submitter.value);
+      var headers = {};
+      headers["{{ fetch_header }}"] = "1";
+      return fetch(form.action, {method: "POST", body: body, headers: headers, credentials: "same-origin"})
+        .then(function (r) {
+          if (r.status === 204) return savedInPlace(form);
+          var type = r.headers.get("content-type") || "";
+          if (!r.ok && type.indexOf("application/json") === 0) {
+            return r.json().then(function (got) { show(got.error); });
+          }
+          if (r.redirected) { location.href = r.url; return; }
+          return r.text().then(function (html) {
+            replaced = true;
+            document.open(); document.write(html); document.close();
+          });
+        })
+        .catch(function () { show("The board did not answer, or your sign-in has expired. Reload the page, then try again."); })
+        .finally(function () { delete form.dataset.sending; });
+    }
   })();
 </script>
 {% include "_mention.html" %}
