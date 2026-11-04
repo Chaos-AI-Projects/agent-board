@@ -100,6 +100,14 @@ def test_next_on_an_empty_queue_is_a_result_not_an_error(migrated):
     assert ok(migrated, "next") == {"issue": None}
 
 
+def test_ab94_next_skips_cards_requested_by_each_skip_user(migrated):
+    ready(board(migrated), "chaos's")
+    other = core.create(migrated, "MS", "fiona's", stage="implement",
+                        actor="fiona@example.com", actor_kind="human")["id"]
+    assert ok(migrated, "next", skip_users=[CHAOS])["issue"]["id"] == other
+    assert ok(migrated, "next", skip_users=[CHAOS, "fiona@example.com"]) == {"issue": None}
+
+
 def test_show_returns_the_issue_and_its_events(migrated):
     issue_id = ready(board(migrated), "shown")
     out = ok(migrated, "show", id=issue_id)

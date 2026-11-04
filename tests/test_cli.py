@@ -188,6 +188,17 @@ def test_next_honours_the_project_filter(url):
     assert proc.returncode == 3
 
 
+def test_ab94_next_skips_cards_requested_by_each_skip_user(url):
+    ready(url, "chaos's")
+    other = ok(board(url, "--actor-kind", "human", "create", "--project", "MS",
+                     "--title", "fiona's", "--stage", "implement",
+                     actor="fiona@example.com"))["id"]
+    out = ok(board(url, "next", "--skip-user", CHAOS))
+    assert out["issue"]["id"] == other
+    proc = board(url, "next", "--skip-user", CHAOS, "--skip-user", "fiona@example.com")
+    assert proc.returncode == 3, proc.stderr
+
+
 # --- idempotency (design section 8) -------------------------------------------
 
 

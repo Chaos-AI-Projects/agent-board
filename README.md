@@ -38,6 +38,10 @@ other items by 0-based index or `ref`, or existing issue ids, which become depen
 `workflow_title` the items become a new workflow in list order. The CLI is `board create-batch FILE`,
 reading JSON from FILE or `-` for stdin.
 An issue has at most one plan, and a step cannot be planned.
+`next(skip_users=[...])` passes over the issues those people requested, in any case, and claims the
+first other workable issue in rank order (AB-94). The requester is the creator below: the person an
+agent named, else whoever created the issue. The CLI repeats `--skip-user EMAIL` and the MCP `next`
+tool takes `skip_users`. Left out or empty, nobody is skipped.
 `next` returns `None` on an empty queue. Lease failures raise `LeaseLost` (the CLI's exit 4) and
 conflicts raise `Conflict` (exit 5), including `LeaseHeld` when `edit` meets someone else's lease
 without `preempt=True`. Only a human or the system edits; an agent works through `queue`,

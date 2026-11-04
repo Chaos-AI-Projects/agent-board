@@ -539,8 +539,15 @@ def create_workflow(engine, title: str) -> int:
 
 
 def next(engine, worker: str, *, ttl: timedelta = DEFAULT_TTL, project: str | None = None,
-         request_id: str | None = None) -> dict | None:
-    """Claim the first workable issue, or return None on an empty queue."""
+         request_id: str | None = None, skip_users: list[str] | None = None) -> dict | None:
+    """Claim the first workable issue, or return None on an empty queue.
+
+    `skip_users` passes over every issue whose requester is one of them, in
+    any case (AB-94). The requester is the issue's creator by `_creator_col`'s
+    rule: the person an agent named for it, else whoever created it. None or
+    an empty list skips nobody.
+    """
+    skip = sorted({u.strip().lower() for u in skip_users or () if u.strip()})
 
     def replay(s, ev):
         issue = s.get(Issue, ev.issue_id)
@@ -553,7 +560,7 @@ def next(engine, worker: str, *, ttl: timedelta = DEFAULT_TTL, project: str | No
         # Bounded: each miss means another caller committed a claim, and
         # there are finitely many candidates.
         for _ in range(100):
-            issue = s.scalars(_candidates(now, project)).first()
+            issue = s.scalars(_candidates(now, project, skip)).first()
             if issue is None:
                 return None
             prev_holder, prev_queue = issue.lease_holder, issue.queue
@@ -583,7 +590,9 @@ def next(engine, worker: str, *, ttl: timedelta = DEFAULT_TTL, project: str | No
         raise Conflict("gave up after 100 lost claim races")
 
     key = _scoped("next", worker, request_id)
-    return _write(engine, key, body, replay, [project, ttl.total_seconds()])
+    # An empty skip list hashes as no list, so it replays a call made without one.
+    return _write(engine, key, body, replay,
+                  [project, ttl.total_seconds(), *([skip] if skip else [])])
 
 
 def show(engine, issue_id: str) -> dict:
@@ -1640,8 +1649,10 @@ def edit(engine, issue_id: str, *, actor: str, expected_version: int,
 # --- internals ------------------------------------------------------------------
 
 
-def _candidates(now, project):
+def _candidates(now, project, skip=()):
     """Workable issues in rank order (design section 4).
+
+    `skip` is lower-cased requesters whose issues are passed over (AB-94).
 
     `FOR UPDATE SKIP LOCKED` is rendered on PostgreSQL only; SQLAlchemy drops
     it on SQLite, where BEGIN IMMEDIATE already serialises the callers.
@@ -1683,6 +1694,9 @@ def _candidates(now, project):
     )
     if project is not None:
         q = q.where(Issue.project_key == project)
+    if skip:
+        q = q.where(~exists().where(Event.issue_id == Issue.id, Event.kind == "create",
+                                    func.lower(_creator_col()).in_(skip)))
     return q
 
 

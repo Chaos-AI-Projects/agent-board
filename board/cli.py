@@ -85,6 +85,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp = op("next", help="claim the first workable issue; exit 3 when there is none")
     sp.add_argument("--project")
     sp.add_argument("--ttl", type=_minutes, default=core.DEFAULT_TTL)
+    sp.add_argument("--skip-user", action="append", default=[], dest="skip_users",
+                    help="pass over cards this person requested; repeatable (AB-94)")
     writes(sp, token=False)
 
     sp = op("show", help="one issue with its events")
@@ -224,7 +226,7 @@ def _run(engine, a) -> dict | None:
             return core.create_project(engine, a.key, a.name)
         case "next":
             return core.next(engine, a.actor, ttl=a.ttl, project=a.project,
-                             request_id=a.request_id)
+                             request_id=a.request_id, skip_users=a.skip_users)
         case "show":
             return core.show(engine, a.id)
         case "search":

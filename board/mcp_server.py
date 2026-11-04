@@ -118,14 +118,17 @@ def build_server(engine, actor: str | Callable[[], str], brain=_FROM_ENV,
 
     @mcp.tool()
     def next(project: str | None = None, ttl_minutes: float = DEFAULT_TTL_MINUTES,
-             request_id: str | None = None) -> CallToolResult:
+             request_id: str | None = None,
+             skip_users: list[str] | None = None) -> CallToolResult:
         """Claim the first workable issue and return it with its lease token.
 
         An empty queue returns {"issue": null}. Pass the token to every
-        write on the issue until it is done.
+        write on the issue until it is done. `skip_users` passes over the
+        issues those people requested: the person an agent created the
+        issue for, else whoever created it. Case is ignored.
         """
         return run(lambda: core.next(engine, current(), ttl=_ttl(ttl_minutes), project=project,
-                                     request_id=request_id))
+                                     request_id=request_id, skip_users=skip_users))
 
     @mcp.tool()
     def show(id: str) -> CallToolResult:

@@ -79,6 +79,52 @@ def test_onhold_is_not_selectable(board):
     assert core.next(board, "w1") is None
 
 
+def test_ab94_next_skips_a_skipped_users_top_card_and_claims_the_next_in_rank(board):
+    top = ready(board, "chaos's top card", rank=10)
+    second = core.create(board, "MS", "fiona's card", actor="fiona@example.com",
+                         actor_kind=HUMAN, stage="implement", rank=20)["id"]
+    ready(board, "chaos's third card", rank=30)
+    claim = core.next(board, "w1", skip_users=[CHAOS])
+    assert claim["issue"]["id"] == second
+    assert place(core.show(board, top)) == ("implement", "ready")
+    assert core.next(board, "w2", skip_users=[CHAOS]) is None
+
+
+def test_ab94_an_empty_or_missing_skip_list_is_todays_next(board):
+    top = ready(board, "top", rank=10)
+    second = ready(board, "second", rank=20)
+    assert core.next(board, "w1", skip_users=[])["issue"]["id"] == top
+    assert core.next(board, "w2")["issue"]["id"] == second
+
+
+def test_ab94_the_requester_is_the_person_an_agent_named_else_the_agent(board):
+    named = core.create(board, "MS", "for chaos", actor=AGENT, actor_kind="agent",
+                        stage="implement", rank=10, creator=CHAOS)["id"]
+    found = core.create(board, "MS", "agent's own", actor=AGENT, actor_kind="agent",
+                        stage="implement", rank=20)["id"]
+    last = ready(board, "chaos's own", rank=30)
+    # The agent that entered the card for Chaos is not its requester.
+    assert core.next(board, "w1", skip_users=[AGENT])["issue"]["id"] == named
+    assert core.next(board, "w2", skip_users=[CHAOS])["issue"]["id"] == found
+    assert core.next(board, "w3", skip_users=[CHAOS, AGENT]) is None
+    assert place(core.show(board, last)) == ("implement", "ready")
+
+
+def test_ab94_skip_users_match_an_email_in_any_case(board):
+    ready(board, "chaos's", rank=10)
+    other = core.create(board, "MS", "other", actor="fiona@example.com", actor_kind=HUMAN,
+                        stage="implement", rank=20)["id"]
+    assert core.next(board, "w1", skip_users=[" Owner@Example.COM "])["issue"]["id"] == other
+
+
+def test_ab94_a_request_id_with_another_skip_list_is_a_different_call(board):
+    ready(board, "a", rank=10)
+    ready(board, "b", rank=20)
+    core.next(board, "w1", skip_users=["x@example.com"], request_id="r1")
+    with pytest.raises(core.Conflict):
+        core.next(board, "w1", skip_users=["y@example.com"], request_id="r1")
+
+
 # --- row 1: two parallel claims ----------------------------------------------
 
 
