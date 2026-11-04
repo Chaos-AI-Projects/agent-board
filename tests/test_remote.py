@@ -412,6 +412,35 @@ def test_sa_only_mcp_takes_a_cross_origin_post(sa_board):
     assert r.status_code == 200, r.text
 
 
+def get_mcp(client, bearer):
+    headers = {"accept": "text/event-stream"}
+    if bearer:
+        headers["authorization"] = f"Bearer {bearer}"
+    return client.get("/mcp", headers=headers)
+
+
+@pytest.mark.parametrize("bearer", ["google-token", None])
+def test_ab95_get_mcp_is_405_so_no_client_holds_a_stream_open(board, bearer):
+    # /mcp is stateless, so the GET stream would carry nothing, yet each Claude
+    # Code client held one open for its full timeout and they used up the
+    # instance's request slots. 405 is the spec's answer for "no SSE stream here".
+    r = get_mcp(board, bearer)
+    assert r.status_code == 405, r.text
+    assert "POST" in r.headers["allow"]
+    assert not r.headers.get("content-type", "").startswith("text/event-stream")
+
+
+def test_ab95_sa_only_get_mcp_is_405(sa_board):
+    r = get_mcp(sa_board, sa_token())
+    assert r.status_code == 405, r.text
+    assert "POST" in r.headers["allow"]
+
+
+def test_ab95_post_still_reaches_mcp(board):
+    assert initialize(board, "google-token").status_code == 200
+    assert initialize(board, None).status_code == 401
+
+
 def test_sa_only_has_no_authorization_server(sa_board):
     for path in ("/.well-known/oauth-authorization-server",
                  "/.well-known/oauth-protected-resource/mcp", "/authorize", "/revoke"):

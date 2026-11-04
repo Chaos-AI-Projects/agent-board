@@ -162,7 +162,11 @@ def build(engine, provider: oauth.Provider | None, authn: auth.Authenticator,
             resource_metadata_url=(build_resource_metadata_url(resource)
                                    if provider is not None else None))),
         backend=BearerAuthBackend(Verifier(provider, authn, allowed)))
-    endpoint = Route(MCP_PATH, endpoint=guarded, methods=["GET", "POST", "DELETE"])
+    # No GET (AB-95): a stateless server has nothing to push on a standalone
+    # SSE stream, yet each client held one open for its whole timeout and
+    # used up the instance's request slots. The router answers 405 before
+    # authentication, which the spec reads as "no SSE stream here".
+    endpoint = Route(MCP_PATH, endpoint=guarded, methods=["POST", "DELETE"])
 
     @contextlib.asynccontextmanager
     async def lifespan(_app):
