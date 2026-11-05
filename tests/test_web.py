@@ -3124,6 +3124,9 @@ def run_js_async(source, expr):
 POLL_STUBS = """
 var STAMP = "old", STAMP_URL = "/stamp", updates = 0, fetched = 0;
 var document = {hidden: true};
+var timers = [], cleared = [];
+function setTimeout(fn, ms) { timers.push(ms); return timers.length; }
+function clearTimeout(id) { cleared.push(id); }
 function fetch() { fetched++; return Promise.resolve({ok: true, json: function () {
   return Promise.resolve({stamp: "new"}); }}); }
 function pageBusy() { return false; }
@@ -3131,10 +3134,78 @@ async function liveUpdate() { updates++; }
 """
 
 
+def poll_source(client):
+    html = client.get("/").text
+    return POLL_STUBS + "var polling = false, pollTimer = null;\n" + "\n".join(
+        "async " + js_function(html, name) for name in ("checkStamp", "pollStamp"))
+
+
 def test_ab98_a_hidden_tab_still_polls_and_updates(client):
-    src = POLL_STUBS + "async " + js_function(client.get("/").text, "pollStamp")
-    got = run_js_async(src, "pollStamp().then(function () { return [fetched, updates]; })")
+    got = run_js_async(poll_source(client), "pollStamp().then(function () { return [fetched, updates]; })")
     assert got == [1, 1]
+
+
+def test_ab99_the_page_polls_on_a_chained_timer_not_an_interval(client):
+    html = client.get("/").text
+    assert "setInterval(pollStamp" not in html
+    assert "setTimeout(pollStamp" in html
+
+
+def test_ab99_the_next_poll_is_timed_only_once_this_one_and_its_update_settle(client):
+    src = poll_source(client) + """
+var answer;
+fetch = function () { fetched++; return new Promise(function (r) { answer = r; }); };
+var done, during = [];
+liveUpdate = function () { updates++; return new Promise(function (r) { done = r; }); };
+"""
+    got = run_js_async(src, """(function () {
+  var p = pollStamp(), before = timers.length;
+  answer({ok: true, json: function () { return Promise.resolve({stamp: "new"}); }});
+  return new Promise(function (r) { setImmediate(r); }).then(function () {
+    during = [updates, timers.length];
+    done();
+    return p;
+  }).then(function () { return [before, during, timers.length]; });
+})()""")
+    assert got == [0, [1, 0], 1]
+
+
+def test_ab99_a_focus_poll_while_one_is_out_sends_nothing(client):
+    src = poll_source(client) + """
+var answer;
+fetch = function () { fetched++; return new Promise(function (r) { answer = r; }); };
+"""
+    got = run_js_async(src, """(function () {
+  var p = pollStamp();
+  pollStamp(); pollStamp();
+  var during = fetched;
+  answer({ok: false});
+  return p.then(function () { return [during, fetched, timers.length]; });
+})()""")
+    assert got == [1, 1, 1]
+
+
+def test_ab99_a_focus_poll_between_polls_restarts_the_one_timer(client):
+    src = poll_source(client) + "pollTimer = 7;"
+    got = run_js_async(src, "pollStamp().then(function () { return [cleared, timers.length, pollTimer]; })")
+    assert got == [[7], 1, 1]
+
+
+def test_ab99_an_update_that_throws_still_times_the_next(client):
+    src = poll_source(client) + 'liveUpdate = async function () { throw new Error("hook"); };'
+    got = run_js_async(src, "pollStamp().catch(function () {}).then(function () { return [timers.length, polling]; })")
+    assert got == [1, False]
+
+
+def test_ab99_a_stamp_request_that_never_answers_is_given_up(client):
+    poll = js_function(client.get("/").text, "checkStamp")
+    assert "signal: AbortSignal.timeout(" in poll
+
+
+def test_ab99_a_failed_poll_still_times_the_next(client):
+    src = poll_source(client) + 'fetch = function () { fetched++; return Promise.reject(new Error("down")); };'
+    got = run_js_async(src, "pollStamp().then(function () { return [fetched, timers.length, polling]; })")
+    assert got == [1, 1, False]
 
 
 def test_ab98_the_window_regaining_focus_polls_at_once(client):
@@ -6423,7 +6494,7 @@ wireSortables({lists: [{name: "c", isConnected: true}]});
 
 
 def test_ab96_the_stamp_poll_swaps_rather_than_reloads(client):
-    poll = js_function(client.get("/").text, "pollStamp")
+    poll = js_function(client.get("/").text, "checkStamp")
     assert "liveUpdate()" in poll and "location.reload" not in poll
 
 

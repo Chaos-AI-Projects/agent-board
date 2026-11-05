@@ -525,16 +525,32 @@
     location.reload();
   }
   window.liveUpdate = liveUpdate;
-  async function pollStamp() {
+  async function checkStamp() {
     var got;
     try {
-      var r = await fetch(STAMP_URL, {cache: "no-store", credentials: "same-origin"});
+      // A request that never answers would hold up every later poll.
+      var r = await fetch(STAMP_URL, {cache: "no-store", credentials: "same-origin",
+                                      signal: AbortSignal.timeout(30000)});
       if (!r.ok) return;
       got = (await r.json()).stamp;
     } catch (_) { return; }
     if (!got || got === STAMP || pageBusy()) return;
     await liveUpdate();
   }
+  // One poll at a time (AB-99). The next is timed from when this one settles,
+  // its update included, so a slow /stamp never has another queued behind it.
+  // A focus or visibility poll while one is out is dropped; between polls it
+  // runs at once and restarts the one timer.
+  async function pollStamp() {
+    if (polling) return;
+    polling = true;
+    clearTimeout(pollTimer);
+    try { await checkStamp(); } finally {
+      polling = false;
+      pollTimer = setTimeout(pollStamp, {{ stamp_poll_ms }});
+    }
+  }
+  var polling = false, pollTimer = null;
   // The load an auto-reload caused. A reload happens only with every field
   // as it was served, but Firefox refills fields on reload from the old page,
   // and those values are the stale defaults; reset puts the new ones back.
@@ -549,7 +565,7 @@
     return true;
   }
   afterAutoReload();
-  setInterval(pollStamp, {{ stamp_poll_ms }});
+  pollTimer = setTimeout(pollStamp, {{ stamp_poll_ms }});
   document.addEventListener("visibilitychange", pollStamp);
   window.addEventListener("focus", pollStamp);
 </script>{% endif %}
