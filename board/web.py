@@ -41,6 +41,8 @@ a stamp, a digest of what it shows, and polls `/stamp` or
 page unless a field has focus or unsaved input, a card is mid-drag, or the
 issue panel is busy, in which case the next poll tries again. A field's focus
 counts only while its window has focus, and a background tab polls too (AB-98).
+A poll costs one small query, the board's revision, unless that has moved or
+the clock has reached the next change the page would show by itself (AB-100).
 
 Times are stored in UTC and shown in a zone: the one saved in `board_prefs`,
 else `BOARD_TIMEZONE`, else UTC. An unknown name in either is skipped, and
@@ -62,6 +64,7 @@ import json
 import logging
 import os
 import re
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit
@@ -513,6 +516,59 @@ def lease_status(issue: dict, now: str) -> str | None:
         return "held"
     expired = datetime.fromisoformat(issue["lease_expires_at"]) < datetime.fromisoformat(now)
     return "expired" if expired else "live"
+
+
+def next_clock_change(cards, now: str, tz, also=()) -> str:
+    """The first moment after `now` at which the clock alone would move a
+    stamp built at `now` (AB-100): a live lease running out, a ready
+    scheduled card coming within SCHEDULE_LEAD of its run, the next calendar
+    day in `tz` regrouping the lanes, or any instant in `also`."""
+    at = _aware(now)
+    midnight = datetime.combine(at.astimezone(tz).date() + timedelta(days=1),
+                                datetime.min.time(), tzinfo=tz)
+    times = [midnight] + [_aware(a) for a in also]
+    for c in cards:
+        if c["lease_holder"] is not None and c["lease_expires_at"] is not None:
+            times.append(_aware(c["lease_expires_at"]))
+        if c["queue"] == "ready" and c["next_run_at"] and not c["schedule_paused"]:
+            times.append(_aware(c["next_run_at"]) - core.SCHEDULE_LEAD)
+    # An instant equal to now counts: a lease ending this second still shows
+    # live, so the stamp built now must not outlast it.
+    return min(t for t in times if t >= at).isoformat()
+
+
+class StampCache:
+    """Stamps already built (AB-100). One stands while the board's revision
+    does and until its clock change; a moved revision drops them all. A key
+    holds whatever else decides the stamp, such as the viewer and their
+    preferences. Bounded, since every viewer adds one."""
+
+    LIMIT = 256
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._revision = None
+        self._stamps: dict = {}
+
+    def get(self, key, revision: int, now: str) -> str | None:
+        with self._lock:
+            # A request that read an older revision before a newer one was
+            # seen rebuilds for itself and leaves the cache alone.
+            if self._revision is None or revision > self._revision:
+                self._revision, self._stamps = revision, {}
+            hit = self._stamps.get(key) if revision == self._revision else None
+        if hit is not None and _aware(now) < _aware(hit[1]):
+            return hit[0]
+        return None
+
+    def put(self, key, revision: int, stamp: str, until: str) -> None:
+        with self._lock:
+            # Built from a revision already superseded: the next poll rebuilds.
+            if revision != self._revision:
+                return
+            if len(self._stamps) >= self.LIMIT:
+                self._stamps = {}
+            self._stamps[key] = (stamp, until)
 
 
 # One fill per lane, so a step's colour on the workflow diagram names its state.
@@ -1170,7 +1226,7 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
             loose = [i for i in loose if i["id"] in involved]
         # The workflow is the card: its computed state picks the column, and
         # its steps show on their issue pages rather than as loose cards here.
-        old_done = 0
+        old_done, ages_out = 0, []
         if prefs["hide_old_done"] and "done" in prefs["lanes"]:
             # AB-13: a card finished over two weeks ago drops out of the done
             # lane, and its heading counts it. A workflow finished with its last step.
@@ -1182,6 +1238,9 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
             def old(ids):
                 return max((finished.get(i, cutoff) for i in ids), default=cutoff) < cutoff
 
+            # AB-100: when each card still shown would drop out.
+            ages_out = [at + timedelta(days=core.DONE_HIDE_DAYS)
+                        for at in finished.values() if at >= cutoff]
             kept_wf = [w for w in workflows
                        if w["stage"] != "done" or not old(st["id"] for st in w["steps"])]
             kept = [i for i in loose if i["stage"] != "done" or not old([i["id"]])]
@@ -1236,7 +1295,8 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
                 "queue_collapsed": prefs["queue_collapsed"],
                 "scheduled_collapsed": prefs["scheduled_collapsed"],
                 "scheduled_hidden": prefs["scheduled_hidden"],
-                "schedule_fields": prefs["schedule_fields"]}
+                "schedule_fields": prefs["schedule_fields"],
+                "clock_tz": tz, "ages_out": ages_out}
 
     @app.get("/", response_class=HTMLResponse)
     def board_page(request: Request):
@@ -1244,9 +1304,22 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
         return page(request, "board.html", **ctx, stamp_url="/stamp",
                     stamp=board_stamp(ctx, core.colour_buckets(engine)))
 
+    # AB-100: a poll reads the revision and rebuilds only when the board changed.
+    stamps = StampCache()
+
     @app.get("/stamp")
     def board_page_stamp(request: Request):
-        return {"stamp": board_stamp(board_view(request), core.colour_buckets(engine))}
+        revision, now = store.revision(engine)
+        me = who(request)
+        key = ("board", request.cookies.get(PREFS_COOKIE), me and (me.email, me.kind))
+        found = stamps.get(key, revision, now)
+        if found is None:
+            ctx = board_view(request)
+            found = board_stamp(ctx, core.colour_buckets(engine))
+            stamps.put(key, revision, found,
+                       next_clock_change(ctx["view"]["issues"], ctx["now"], ctx["clock_tz"],
+                                         ctx["ages_out"]))
+        return {"stamp": found}
 
     @app.get("/search", response_class=HTMLResponse)
     def search_page(request: Request, q: str = "", project: str = "", label: str = "",
@@ -1506,8 +1579,14 @@ def create_app(engine=None, authenticator: auth.Authenticator | None = None,
 
     @app.get("/issues/{issue_id}/stamp")
     def issue_page_stamp(issue_id: str):
-        return {"stamp": issue_stamp(core.show(engine, issue_id), core.now(engine),
-                                     core.colour_buckets(engine))}
+        revision, now = store.revision(engine)
+        key = ("issue", issue_id)
+        found = stamps.get(key, revision, now)
+        if found is None:
+            issue = core.show(engine, issue_id)
+            found = issue_stamp(issue, now, core.colour_buckets(engine))
+            stamps.put(key, revision, found, next_clock_change([issue], now, timezone.utc))
+        return {"stamp": found}
 
     @app.post("/issues")
     async def create_issue(request: Request):

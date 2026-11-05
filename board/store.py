@@ -33,6 +33,7 @@ from sqlalchemy import (
     create_engine,
     event,
     false,
+    update,
 )
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.orm import (
@@ -110,9 +111,56 @@ def _sqlite_begin_immediate(conn):
     conn.exec_driver_sql("BEGIN IMMEDIATE")
 
 
+class _BoardSession(Session):
+    """Every session the board opens. A commit that wrote anything moves
+    the board's revision (AB-100), whichever process committed it."""
+
+
+# Set in the transaction that wrote, read at its commit.
+_WROTE = "board_wrote"
+
+
+@event.listens_for(_BoardSession, "after_flush")
+def _flushed(s, _ctx):
+    # The lists still hold what this flush wrote.
+    if s.new or s.dirty or s.deleted:
+        s.info[_WROTE] = True
+
+
+@event.listens_for(_BoardSession, "do_orm_execute")
+def _executed(state):
+    # A bulk statement, such as a claim, changes rows without a dirty object.
+    if state.is_insert or state.is_update or state.is_delete:
+        state.session.info[_WROTE] = True
+
+
+@event.listens_for(_BoardSession, "before_commit")
+def _bump_revision(s):
+    if s.info.pop(_WROTE, False) or s.new or s.dirty or s.deleted:
+        s.execute(update(Revision).where(Revision.id == 1).values(n=Revision.n + 1))
+        s.info.pop(_WROTE, None)
+
+
+@event.listens_for(_BoardSession, "after_soft_rollback")
+def _rolled_back(s, _previous):
+    s.info.pop(_WROTE, None)
+
+
 def session(engine: Engine) -> Session:
     """A session whose objects stay readable after commit."""
-    return Session(engine, expire_on_commit=False)
+    return _BoardSession(engine, expire_on_commit=False)
+
+
+def revision(engine: Engine) -> tuple[int, str]:
+    """The board's revision and the database clock, in one small query (AB-100).
+
+    A web page's stamp is rebuilt only when the revision has moved since, or
+    when the clock reaches the next moment the page would change by itself.
+    """
+    with session(engine) as s:
+        n, now = s.execute(select(Revision.n, type_coerce(func.current_timestamp(), Timestamp()))
+                           .where(Revision.id == 1)).one()
+    return n, now.isoformat()
 
 
 def db_now(s: Session) -> datetime:
@@ -363,6 +411,16 @@ class Profile(Base):
     actor: Mapped[str] = mapped_column(String(200), primary_key=True)
     text: Mapped[str] = mapped_column(Text)
     updated_at: Mapped[datetime] = mapped_column(Timestamp())
+
+
+class Revision(Base):
+    """One row whose counter every committed write moves (AB-100), so a
+    poll can ask whether anything changed without reading the board."""
+
+    __tablename__ = "board_revision"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    n: Mapped[int] = mapped_column(BigInteger)
 
 
 class Follow(Base):

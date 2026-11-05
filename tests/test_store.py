@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from board import store
 
 TABLES = {
+    "board_revision",
     "card_seen",
     "profile",
     "follow",
@@ -394,7 +395,7 @@ def test_0004_adds_the_attachment_table_and_downgrade_drops_only_it(engine):
     assert "attachment" in inspect(engine).get_table_names()
     store.downgrade(engine, "0003")
     names = set(inspect(engine).get_table_names())
-    assert "attachment" not in names and TABLES - {"attachment", "dependency", "card_seen", "profile", "follow"} - OAUTH_TABLES <= names
+    assert "attachment" not in names and TABLES - {"attachment", "dependency", "card_seen", "profile", "follow", "board_revision"} - OAUTH_TABLES <= names
 
 
 def test_0005_adds_workflow_origin_and_downgrade_drops_only_it(engine):
@@ -412,7 +413,7 @@ def test_0006_adds_the_dependency_table_and_downgrade_drops_only_it(engine):
     assert "dependency" in inspect(engine).get_table_names()
     store.downgrade(engine, "0005")
     names = set(inspect(engine).get_table_names())
-    assert "dependency" not in names and TABLES - {"dependency", "card_seen", "profile", "follow"} - OAUTH_TABLES <= names
+    assert "dependency" not in names and TABLES - {"dependency", "card_seen", "profile", "follow", "board_revision"} - OAUTH_TABLES <= names
 
 
 def test_0007_adds_the_oauth_tables_and_downgrade_drops_only_them(engine):
@@ -420,7 +421,7 @@ def test_0007_adds_the_oauth_tables_and_downgrade_drops_only_them(engine):
     assert OAUTH_TABLES <= set(inspect(engine).get_table_names())
     store.downgrade(engine, "0006")
     names = set(inspect(engine).get_table_names())
-    assert not OAUTH_TABLES & names and TABLES - OAUTH_TABLES - {"card_seen", "profile", "follow"} <= names
+    assert not OAUTH_TABLES & names and TABLES - OAUTH_TABLES - {"card_seen", "profile", "follow", "board_revision"} <= names
 
 
 def test_0009_adds_the_artifact_name_and_downgrade_drops_only_it(engine):
@@ -539,4 +540,66 @@ def test_0016_adds_the_follow_table_and_downgrade_drops_only_it(engine):
     assert "follow" in inspect(engine).get_table_names()
     store.downgrade(engine, "0015")
     names = set(inspect(engine).get_table_names())
-    assert "follow" not in names and TABLES - {"follow"} <= names
+    assert "follow" not in names and TABLES - {"follow", "board_revision"} <= names
+
+
+def test_0017_adds_the_revision_row_and_downgrade_drops_only_it(engine):
+    store.upgrade(engine, "0017")
+    with store.session(engine) as s:
+        assert s.scalar(text("SELECT n FROM board_revision")) == 0
+    store.downgrade(engine, "0016")
+    names = set(inspect(engine).get_table_names())
+    assert "board_revision" not in names and TABLES - {"board_revision"} <= names
+
+
+# AB-100: one small query says whether anything on the board changed.
+
+def _rev(engine):
+    return store.revision(engine)[0]
+
+
+def test_ab100_every_kind_of_write_moves_the_revision_and_a_read_does_not(migrated):
+    from board import core
+    start = _rev(migrated)
+    core.create_project(migrated, "MS", "m")
+    assert _rev(migrated) > start
+    iid = core.create(migrated, "MS", "a", actor="chaos@example.com", actor_kind="human",
+                      stage="implement")["id"]
+    core.create(migrated, "MS", "b", actor="other@example.com", actor_kind="human",
+                stage="backlog")
+    writes = [
+        lambda: core.rename_project(migrated, "MS", "renamed"),
+        lambda: core.annotate(migrated, iid, "hm", actor="chaos@example.com", actor_kind="human"),
+        lambda: core.mark_seen(migrated, "chaos@example.com", iid),
+        lambda: core.follow(migrated, "chaos@example.com", "other@example.com"),
+        # A claim is a bulk UPDATE statement, not a changed object.
+        lambda: core.next(migrated, "w1"),
+    ]
+    for write in writes:
+        before = _rev(migrated)
+        write()
+        assert _rev(migrated) > before
+    before = _rev(migrated)
+    core.show(migrated, iid)
+    core.overview(migrated)
+    core.unseen(migrated, "chaos@example.com")
+    assert _rev(migrated) == before
+
+
+def test_ab100_a_write_from_another_process_moves_the_revision(migrated):
+    from board import core
+    other = store.make_engine(migrated.url.render_as_string(hide_password=False))
+    try:
+        before = _rev(migrated)
+        core.create_project(other, "PE", "p")
+        assert _rev(migrated) > before
+    finally:
+        other.dispose()
+
+
+def test_ab100_the_revision_query_also_reads_the_database_clock(migrated):
+    from board import core
+    n, now = store.revision(migrated)
+    assert isinstance(n, int)
+    assert abs(datetime.fromisoformat(now) - datetime.fromisoformat(core.now(migrated))) \
+        < timedelta(seconds=5)

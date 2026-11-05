@@ -6899,3 +6899,121 @@ def test_ab97_a_204_saves_in_place_and_anything_else_is_as_before(board, client)
     assert src.index("r.status === 204") < src.index("r.redirected")
     assert "savedInPlace(form)" in src
     assert 'id="edit-form"' in html and 'id="note-form"' in html
+
+
+# AB-100: a stamp poll whose board has not changed costs one small query.
+
+class Statements:
+    """Counts the queries an engine runs while in the block. SQLite's BEGIN
+    IMMEDIATE opens every transaction there and is not a query."""
+
+    def __init__(self, engine):
+        self.engine, self.n = engine, 0
+
+    def _count(self, conn, cursor, statement, *args):
+        if statement != "BEGIN IMMEDIATE":
+            self.n += 1
+
+    def __enter__(self):
+        from sqlalchemy import event
+        event.listen(self.engine, "before_cursor_execute", self._count)
+        return self
+
+    def __exit__(self, *exc):
+        from sqlalchemy import event
+        event.remove(self.engine, "before_cursor_execute", self._count)
+
+
+def test_ab100_an_unchanged_board_answers_its_stamp_with_one_query(board, client):
+    ready(board)
+    first = board_stamp(client)
+    with Statements(board) as sql:
+        assert board_stamp(client) == first
+    assert sql.n == 1
+
+
+def test_ab100_an_unchanged_issue_answers_its_stamp_with_one_query(board, client):
+    iid = ready(board)
+    first = issue_stamp(client, iid)
+    with Statements(board) as sql:
+        assert issue_stamp(client, iid) == first
+    assert sql.n == 1
+
+
+def test_ab100_a_write_from_another_process_moves_both_stamps(board, client):
+    iid = ready(board)
+    other = store.make_engine(board.url.render_as_string(hide_password=False))
+    try:
+        board_before, issue_before = board_stamp(client), issue_stamp(client, iid)
+        core.annotate(other, iid, "from the CLI", actor=CHAOS, actor_kind=HUMAN)
+        core.queue(other, iid, "on-hold", actor=CHAOS, actor_kind=HUMAN)
+        assert board_stamp(client) != board_before
+        assert issue_stamp(client, iid) != issue_before
+    finally:
+        other.dispose()
+
+
+def test_ab100_viewers_with_different_preferences_do_not_share_a_stamp(board, client):
+    ready(board)
+    core.create_project(board, "PE", "packrat-extended")
+    core.create(board, "PE", "elsewhere", actor=CHAOS, actor_kind=HUMAN, stage="implement")
+    everything = board_stamp(client)
+    narrow = local_client(board)
+    narrow.cookies.set(web.PREFS_COOKIE, quote(json.dumps({"projects": ["MS"]}), safe=""))
+    assert board_stamp(narrow) != everything
+    assert board_stamp(client) == everything
+
+
+NOW = "2026-11-05T10:00:00+00:00"
+
+
+def _card(**kw):
+    return {"lease_holder": None, "lease_expires_at": None, "queue": None,
+            "next_run_at": None, "schedule_paused": False} | kw
+
+
+@pytest.mark.parametrize("cards, tz, also, expected", [
+    # Nothing on a clock: the next calendar day in the viewer's zone regroups the lanes.
+    ([], "UTC", (), "2026-11-06T00:00:00+00:00"),
+    ([], "Australia/Sydney", (), "2026-11-05T13:00:00+00:00"),
+    # A live lease turns expired.
+    ([_card(lease_holder="w1", lease_expires_at="2026-11-05T10:05:00+00:00")], "UTC", (),
+     "2026-11-05T10:05:00+00:00"),
+    # A lease ending this very second still shows live and turns expired just
+    # after, so the stamp is not kept past now. SQLite's clock reads whole seconds.
+    ([_card(lease_holder="w1", lease_expires_at=NOW)], "UTC", (), NOW),
+    ([], "UTC", (NOW,), NOW),
+    # An expired or held lease has nothing left to change.
+    ([_card(lease_holder="w1", lease_expires_at="2026-11-05T09:00:00+00:00"),
+      _card(lease_holder="chaos")], "UTC", (), "2026-11-06T00:00:00+00:00"),
+    # A scheduled card leaves the scheduled lane SCHEDULE_LEAD before it is due.
+    ([_card(queue="ready", next_run_at="2026-11-05T10:30:00+00:00")], "UTC", (),
+     "2026-11-05T10:25:00+00:00"),
+    # A paused schedule stays where it is.
+    ([_card(queue="ready", next_run_at="2026-11-05T10:30:00+00:00", schedule_paused=True)],
+     "UTC", (), "2026-11-06T00:00:00+00:00"),
+    # Anything else the caller knows of, such as a done card ageing out of its lane.
+    ([], "UTC", ("2026-11-05T11:00:00+00:00", "2026-11-05T09:00:00+00:00"),
+     "2026-11-05T11:00:00+00:00"),
+])
+def test_ab100_a_cached_stamp_lasts_until_the_clock_alone_would_move_it(cards, tz, also, expected):
+    got = web.next_clock_change(cards, NOW, ZoneInfo(tz), also)
+    assert datetime.fromisoformat(got) == datetime.fromisoformat(expected)
+
+
+def test_ab100_a_stamp_built_at_its_clock_change_is_not_kept():
+    cache = web.StampCache()
+    assert cache.get("k", 1, NOW) is None
+    cache.put("k", 1, "s", NOW)
+    assert cache.get("k", 1, NOW) is None
+
+
+def test_ab100_an_older_revision_neither_uses_nor_clears_the_cache():
+    cache = web.StampCache()
+    cache.get("k", 2, NOW)
+    cache.put("k", 2, "s", "2026-11-06T00:00:00+00:00")
+    assert cache.get("k", 1, NOW) is None
+    cache.put("k", 1, "old", "2026-11-06T00:00:00+00:00")
+    assert cache.get("k", 2, NOW) == "s"
+    assert cache.get("k", 3, NOW) is None
+    assert cache.get("k", 3, NOW) is None
