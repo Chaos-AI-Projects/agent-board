@@ -39,7 +39,8 @@ The board and every issue page keep themselves current (AB-4). Each carries
 a stamp, a digest of what it shows, and polls `/stamp` or
 `/issues/<id>/stamp` every `STAMP_POLL_SECONDS`; a moved stamp reloads the
 page unless a field has focus or unsaved input, a card is mid-drag, or the
-issue panel is busy, in which case the next poll tries again.
+issue panel is busy, in which case the next poll tries again. A field's focus
+counts only while its window has focus, and a background tab polls too (AB-98).
 
 Times are stored in UTC and shown in a zone: the one saved in `board_prefs`,
 else `BOARD_TIMEZONE`, else UTC. An unknown name in either is skipped, and

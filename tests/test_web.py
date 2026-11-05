@@ -3046,8 +3046,9 @@ def test_ab4_the_board_stamp_ignores_what_this_board_does_not_show(board, client
 
 
 BUSY_STUBS = """
-var fields = [], active = null;
+var fields = [], active = null, focused = true;
 var document = {get activeElement() { return active; },
+                hasFocus: function () { return focused; },
                 querySelectorAll: function () { return fields; }};
 var window = {};
 """
@@ -3062,6 +3063,84 @@ def test_ab4_page_busy_on_focus_a_dirty_field_or_the_pages_own_check(client):
       window.extraBusy = function () { return true; }; out.push(pageBusy());
       return out; })()""")
     assert got == [False, True, True, True]
+
+
+def test_ab98_a_focused_field_holds_an_update_only_while_the_window_has_focus(client):
+    """A field keeps the focus after the window loses it, and nobody is typing there."""
+    src = BUSY_STUBS + js_function(client.get("/").text, "fieldDirty", "pageBusy")
+    got = run_js(src, """(function () {
+      active = {matches: function () { return true; }};
+      var out = [pageBusy()];
+      focused = false; out.push(pageBusy());
+      fields = [{tagName: "TEXTAREA", value: "x", defaultValue: ""}]; out.push(pageBusy());
+      return out; })()""")
+    # Typed text holds the update whether or not the window has focus.
+    assert got == [True, False, True]
+
+
+def test_ab98_an_open_file_picker_holds_the_update(client):
+    """The picker takes the window's focus while its input has none chosen yet."""
+    src = BUSY_STUBS + js_function(client.get("/").text, "fieldDirty", "pageBusy")
+    got = run_js(src, """(function () {
+      active = {tagName: "INPUT", type: "file", files: [], matches: function () { return true; }};
+      focused = false;
+      return pageBusy(); })()""")
+    assert got is True
+
+
+def test_ab98_a_swap_in_a_window_without_focus_leaves_the_focus_alone(client):
+    """The issue panel's frame would pull the focus from the board the user types in."""
+    src = LIVE_STUBS + js_function(client.get("/").text, "swapLive", "keepState", "focusPath")
+    got = run_js(src, """(function () {
+      var focused = [];
+      var form = {id: "note-form", elements: []}, fresh = region("issue", "new");
+      var now = {form: form, value: "", focus: function () { focused.push(1); }};
+      form.elements.push(now);
+      var was = {id: "", form: {id: "note-form", elements: []}, value: ""};
+      was.form.elements.push(was);
+      var old = region("issue", "old");
+      old.contains = function (el) { return el === was; };
+      var doc = page([old]);
+      doc.activeElement = was; doc.focused = false;
+      doc.getElementById = function (id) { return id === "note-form" ? form : null; };
+      swapLive(doc, page([fresh]));
+      return focused.length; })()""")
+    assert got == 0
+
+
+def run_js_async(source, expr):
+    """What the promise `expr` resolves to."""
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    out = subprocess.run(
+        [node, "-e", f"{source}\n({expr}).then(function (v) {{ console.log(JSON.stringify(v)); }});"],
+        capture_output=True, text=True, check=True).stdout
+    return json.loads(out)
+
+
+POLL_STUBS = """
+var STAMP = "old", STAMP_URL = "/stamp", updates = 0, fetched = 0;
+var document = {hidden: true};
+function fetch() { fetched++; return Promise.resolve({ok: true, json: function () {
+  return Promise.resolve({stamp: "new"}); }}); }
+function pageBusy() { return false; }
+async function liveUpdate() { updates++; }
+"""
+
+
+def test_ab98_a_hidden_tab_still_polls_and_updates(client):
+    src = POLL_STUBS + "async " + js_function(client.get("/").text, "pollStamp")
+    got = run_js_async(src, "pollStamp().then(function () { return [fetched, updates]; })")
+    assert got == [1, 1]
+
+
+def test_ab98_the_window_regaining_focus_polls_at_once(client):
+    html = client.get("/").text
+    assert 'window.addEventListener("focus", pollStamp)' in html
+    assert 'document.addEventListener("visibilitychange", pollStamp)' in html
 
 
 def test_ab4_a_load_after_an_auto_reload_resets_forms_a_browser_refilled(client):
@@ -6204,7 +6283,8 @@ function region(key, label) {
   return el;
 }
 function page(regions) {
-  var doc = {regions: regions, adopted: []};
+  var doc = {regions: regions, adopted: [], focused: true};
+  doc.hasFocus = function () { return doc.focused; };
   regions.forEach(function (r) { r.parent = doc; });
   doc.swap = function (old, other) { doc.regions[doc.regions.indexOf(old)] = other; other.parent = doc; };
   doc.querySelectorAll = function (sel) { return sel === "[data-live]" ? doc.regions.slice() : []; };
@@ -6624,7 +6704,8 @@ function field(value, start) {
           matches: function () { return true; }};
 }
 var box = field("", ""), other = field("", ""), window = {};
-var document = {activeElement: box, querySelectorAll: function () { return [box, other]; }};
+var document = {activeElement: box, hasFocus: function () { return true; },
+                querySelectorAll: function () { return [box, other]; }};
 var form = {contains: function (el) { return el === box; }};
 """
 
